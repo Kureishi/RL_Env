@@ -1,0 +1,57 @@
+{
+  "baseline_score": 73.115,
+  "best_spec": {
+    "activation": "relu",
+    "architecture": [
+      16,
+      128
+    ],
+    "batch_size": 128,
+    "input_noise": 0.02,
+    "learning_rate": 0.015334922322010502,
+    "optimizer": "adam",
+    "train_steps": 4478,
+    "weight_decay": 0.0001
+  },
+  "experiments_run": 30,
+  "final_best_score": 489.645,
+  "finished_reason": "budget_exhausted",
+  "improvement_factor": 6.6969158175476995,
+  "mutation_win_rate": {
+    "activation": {
+      "trials": 3,
+      "wins": 1
+    },
+    "architecture": {
+      "trials": 4,
+      "wins": 2
+    },
+    "batch_size": {
+      "trials": 6,
+      "wins": 2
+    },
+    "input_noise": {
+      "trials": 5,
+      "wins": 0
+    },
+    "learning_rate": {
+      "trials": 9,
+      "wins": 2
+    },
+    "optimizer": {
+      "trials": 4,
+      "wins": 1
+    },
+    "train_steps": {
+      "trials": 4,
+      "wins": 1
+    },
+    "weight_decay": {
+      "trials": 5,
+      "wins": 0
+    }
+  },
+  "seed": 2,
+  "task": "cartpole-v1",
+  "wall_seconds": 9.997
+}

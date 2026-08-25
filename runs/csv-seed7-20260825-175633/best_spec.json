@@ -1,0 +1,19 @@
+{
+  "activation": "tanh",
+  "architecture": [
+    16,
+    8
+  ],
+  "batch_size": 64,
+  "early_stopping_patience": 0,
+  "gradient_clipping": 0.0,
+  "init_scale": 0.5,
+  "input_noise": 0.02,
+  "label_smoothing": 0.05,
+  "learning_rate": 0.003,
+  "lr_schedule": "constant",
+  "model_family": "mlp",
+  "optimizer": "adam",
+  "train_steps": 1000,
+  "weight_decay": 0.0001
+}

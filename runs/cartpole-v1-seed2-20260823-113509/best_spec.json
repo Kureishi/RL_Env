@@ -1,0 +1,13 @@
+{
+  "activation": "relu",
+  "architecture": [
+    16,
+    128
+  ],
+  "batch_size": 128,
+  "input_noise": 0.02,
+  "learning_rate": 0.015334922322010502,
+  "optimizer": "adam",
+  "train_steps": 4478,
+  "weight_decay": 0.0001
+}

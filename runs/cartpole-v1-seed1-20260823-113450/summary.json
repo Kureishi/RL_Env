@@ -1,0 +1,58 @@
+{
+  "baseline_score": 95.41,
+  "best_spec": {
+    "activation": "tanh",
+    "architecture": [
+      16,
+      64,
+      64
+    ],
+    "batch_size": 64,
+    "input_noise": 0.026,
+    "learning_rate": 0.017827646660449926,
+    "optimizer": "sgd",
+    "train_steps": 2783,
+    "weight_decay": 0.00459336
+  },
+  "experiments_run": 30,
+  "final_best_score": 467.3,
+  "finished_reason": "budget_exhausted",
+  "improvement_factor": 4.897809453935646,
+  "mutation_win_rate": {
+    "activation": {
+      "trials": 3,
+      "wins": 0
+    },
+    "architecture": {
+      "trials": 5,
+      "wins": 3
+    },
+    "batch_size": {
+      "trials": 7,
+      "wins": 4
+    },
+    "input_noise": {
+      "trials": 6,
+      "wins": 3
+    },
+    "learning_rate": {
+      "trials": 5,
+      "wins": 2
+    },
+    "optimizer": {
+      "trials": 2,
+      "wins": 1
+    },
+    "train_steps": {
+      "trials": 1,
+      "wins": 1
+    },
+    "weight_decay": {
+      "trials": 7,
+      "wins": 3
+    }
+  },
+  "seed": 1,
+  "task": "cartpole-v1",
+  "wall_seconds": 18.275
+}
