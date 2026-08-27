@@ -29,15 +29,17 @@ from .plotting import (
 from .plugins import PluginError, discover, register_policies, register_tasks
 from .tasks import (
     TASKS,
+    AudioTask,
     CartPoleV1,
     CsvTask,
     GridNavV1,
+    ImageTask,
     Parity4V1,
     ParityTask,
     SineRegressionV1,
 )
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
 __all__ = [
     "AutoRefineEnv",

@@ -5,8 +5,8 @@ The improver loop proposes model-configuration changes, trains, evaluates on
 splits it never saw, records the outcome, and proposes the next change — all
 within a hard budget, fully reproducible, NumPy-only.
 
-**Current version: 0.9.0** (visual dashboard: `autorefine dashboard`,
-a Streamlit app over the same loop — see [SPEC.md](SPEC.md) §23).
+**Current version: 0.10.0** (input modalities: `autorefine fit --data DIR`
+on labelled image/audio directories — see [SPEC.md](SPEC.md) §24).
 
 **Spec (source of truth):** [SPEC.md](SPEC.md)
 
@@ -68,11 +68,19 @@ python -m autorefine fit --data sales.csv --label churn --target 95.0
 # ...or try the bundled sample (600 rows, 27% churn, nonlinear boundary; baseline ~85 -> PASS):
 python -m autorefine fit --data examples/data/churn_sample.csv
 
-# visual dashboard (v0.9, needs: pip install autorefine[gui]):
-# upload the CSV, watch every experiment live, view the plots, download the model
+# no-code model fit on an image/audio directory (v0.10): one subfolder per
+# class (or an index.csv); WAV needs no extra, MP3 needs autorefine[audio],
+# images need autorefine[image]
+python examples/make_sample_media.py   # synthesize deterministic sample dirs
+python -m autorefine fit --data examples/data/tone_clips --target 90.0
+python -m autorefine fit --data examples/data/image_shapes --target 90.0
+
+# visual dashboard (v0.9, needs: pip install autorefine[gui];
+# v0.10: also accepts an image/audio directory):
+# upload the CSV or directory, watch every experiment live, view the plots, download the model
 python -m autorefine dashboard          # or: streamlit run src/autorefine/dashboard_app.py
 
-# run the test suite (197 tests, incl. acceptance A1-A13)
+# run the test suite (214 tests, incl. acceptance A1-A14)
 python -m pytest tests/
 ```
 
@@ -345,6 +353,19 @@ Fixed-dim `Box` observation, `Discrete` action space (the mutation catalog).
   (`pip install autorefine[gui]`); the core stays streamlit-free — a pure
   `DashboardRunner` carries the run semantics, the app only renders
   (SPEC.md 23, §3).
+- **Input modalities (v0.10):** `autorefine fit --data DIR` now accepts a
+  labelled directory — one subfolder per class (or an `index.csv`) of
+  **images** (PNG/JPG/JPEG/BMP/GIF; grayscale 32×32 features; optional
+  `autorefine[image]` extra) or **audio clips** (16-bit PCM WAV via stdlib;
+  MP3 via optional `autorefine[audio]`; NumPy log-mel features) —
+  `ImageTask`/`AudioTask` implement the *same* fitting protocol as
+  `CsvTask` (the §22.1 head/split/score rule verbatim), so the improver
+  loop, spec space, `eval`, reports, and the dashboard (which also accepts
+  a directory) all work unchanged. `fit --task auto` detects the modality
+  from the directory; `--task {csv,image,audio}` forces it; a mixed
+  directory asks for an explicit choice. The core stays PIL/soundfile-free
+  (SPEC.md 24, §3); acceptance A14 runs `fit` on both sample directories
+  with the §22.1 gate.
 - **Reproducibility:** one seed pins every RNG stream; two same-seed runs
   produce identical experiment sequences and best specs (acceptance A2).
 
@@ -371,6 +392,9 @@ src/autorefine/
 │   ├── gridnav.py     # GridNavV1: toroidal navigation policy
 │   ├── parity.py      # ParityTask (n_bits, p_flip) + Parity4V1 + parity_ceiling (v0.6)
 │   ├── csv.py         # CsvTask: user CSV data (v0.8; head/split inference, seed splits)
+│   ├── media.py       # shared labelled-directory rules for image/audio (v0.10)
+│   ├── images.py      # ImageTask: labelled image directory (v0.10; optional Pillow)
+│   ├── audio.py       # AudioTask: labelled audio directory, WAV/MP3 (v0.10; optional soundfile)
 │   └── __init__.py    # TASKS registry
 ├── models/
 │   ├── mlp.py         # NumPy MLP (softmax + mse heads), pickle-free checkpoints
@@ -398,7 +422,8 @@ src/autorefine/
 
 examples/
 ├── gym_dqn.py         # DQN-style agent through the Gymnasium adapter (v0.7)
-└── tabular.py         # custom tabular task + improver run + >95% target gate (v0.7)
+├── tabular.py         # custom tabular task + improver run + >95% target gate (v0.7)
+└── make_sample_media.py  # synthesize sample tone/image directories for `fit` (v0.10)
 ```
 
 ## Extending
@@ -410,7 +435,9 @@ All four paths are demonstrated by working, tested examples (SPEC.md 17/21.3):
   built-in `csv` task and runs the same loop (SPEC.md 22.1) — and the v0.9
   dashboard (`autorefine dashboard`, SPEC.md 23) is that same flow as a web
   page: upload the CSV, watch every experiment live, download the gated
-  model + plots. Otherwise
+  model + plots. Labelled image/audio directories are equally code-free
+  (v0.10): `autorefine fit --data DIR` on one-subfolder-per-class media
+  builds the `image`/`audio` task automatically (SPEC.md 24). Otherwise
   implement the minimal `Task` protocol (`tasks/base.py`) —
   `make_dataset` + `score` (interactive tasks add `step_vec`,
   `reference_action`, ...) — and register it in `TASKS`.

@@ -7,6 +7,7 @@ bit-exact legacy regression pin plus the A8 integration runs.
 """
 import csv as _csv
 import math
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -213,13 +214,55 @@ def _ci_csv_fixture(path):  # SPEC.md 22.1: the csv task is data-driven
     return path
 
 
+def _ci_wav_dir(base: Path) -> Path:
+    """Two tone classes, one subfolder each (SPEC.md 24.4, stdlib wave)."""
+    import math as _m
+    import wave
+    d = base / "tones"
+    for name, freq in (("low", 220.0), ("high", 440.0)):
+        sub = d / name
+        sub.mkdir(parents=True)
+        for i in range(5):
+            sr = 8000
+            sig = 0.8 * np.sin(2 * _m.pi * freq * np.arange(sr) / sr)
+            pcm = (np.clip(sig, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+            with wave.open(str(sub / f"c{i:02d}.wav"), "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(sr)
+                w.writeframes(pcm)
+    return d
+
+
+def _ci_image_dir(base: Path) -> Path:
+    """Two bar-orientation classes, one subfolder each (SPEC.md 24.3)."""
+    pytest.importorskip("PIL", reason="image fixture needs autorefine[image] (SPEC.md 24.1)")
+    from PIL import Image
+    d = base / "shapes"
+    for name, vertical in (("h", False), ("v", True)):
+        sub = d / name
+        sub.mkdir(parents=True)
+        for i in range(5):
+            a = np.zeros((16, 16), dtype=np.uint8)
+            if vertical:
+                a[:, 4:12] = 255
+            else:
+                a[4:12, :] = 255
+            Image.fromarray(a, mode="L").save(str(sub / f"s{i:02d}.png"))
+    return d
+
+
 @pytest.mark.parametrize("task_name", sorted(TASKS))
 def test_score_with_ci_all_tasks(task_name, tmp_path):
     """SPEC.md 18.3: block CI works for every registered task with zero task
-    changes; deterministic given the seed (G2); the csv fixture file covers
-    the data-driven task (SPEC.md 22.1)."""
+    changes; deterministic given the seed (G2); the csv/image/audio fixtures
+    cover the data-driven tasks (SPEC.md 22.1/24)."""
     if task_name == "csv":
         task = CsvTask(seed=1, path=str(_ci_csv_fixture(tmp_path / "ci_fixture.csv")))
+    elif task_name == "audio":
+        task = TASKS[task_name](seed=1, path=str(_ci_wav_dir(tmp_path)))
+    elif task_name == "image":
+        task = TASKS[task_name](seed=1, path=str(_ci_image_dir(tmp_path)))
     else:
         task = TASKS[task_name](seed=1)
     spec = ModelSpec.from_dict({**DEFAULT_SPEC.to_dict(), "train_steps": 200})

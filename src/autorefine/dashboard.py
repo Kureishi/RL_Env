@@ -16,7 +16,7 @@ from .improver.bandit import BanditPolicy
 from .improver.meta_env import AutoRefineEnv, search_quality_v04
 from .improver.policy import SearchPolicy
 from .plotting import html_report, svg_pareto, svg_score_curve
-from .tasks import CsvTask
+from .tasks import TASKS, detect_modality
 
 _RL_HINT = (
     "policy 'rl' does not map to a live per-experiment stream (it trains over "
@@ -36,13 +36,18 @@ class DashboardRunner:
                  target: float = 95.0, policy: str = "bandit", seed: int = 7,
                  experiments: int = 30, max_seconds: float = 900.0,
                  max_train_seconds: float = 30.0, runs_dir: str = "runs",
-                 search_quality: str = "v04") -> None:
+                 search_quality: str = "v04", modality: str | None = None) -> None:
         if policy not in ("bandit", "search"):
             raise ValueError(f"unsupported policy {policy!r}: {_RL_HINT}")
         if search_quality not in ("v04", "legacy"):
             raise ValueError(f"search_quality must be 'v04' or 'legacy', "
                              f"got {search_quality!r}")
+        if modality is not None and modality not in ("auto", "csv", "image", "audio"):
+            raise ValueError(f"modality must be one of auto/csv/image/audio, "
+                             f"got {modality!r} (SPEC.md 24.5)")
+        # `csv_path` is the data path (v0.10: a CSV file or a media directory)
         self.csv_path = csv_path
+        self.modality = modality or "auto"  # SPEC.md 24.5
         self.label = label or None
         self.split_frac = float(split_frac)
         self.target = float(target)
@@ -65,13 +70,41 @@ class DashboardRunner:
         return self._phase == "done"
 
     # --- lifecycle ----------------------------------------------------------
+    def _resolve_task(self, data: Path) -> str:
+        """Data path → task name (v0.10, SPEC.md 24.5): file → csv;
+        directory → detected or forced via `modality`."""
+        mod = self.modality
+        if data.is_file():
+            if mod in ("auto", "csv"):
+                return "csv"
+            raise ValueError(f"{data} is a file: modality must be 'csv' or 'auto'")
+        if data.is_dir():
+            if mod in ("image", "audio"):
+                return mod
+            m = detect_modality(data)
+            if m == "mixed":
+                raise ValueError(
+                    f"{data} holds both image and audio items: set "
+                    f"modality='image' or 'audio' (SPEC.md 24.5)")
+            if m is None:
+                raise ValueError(
+                    f"no image or audio items under {data} — one subfolder "
+                    f"per class, or an index.csv (SPEC.md 24.2)")
+            return m
+        raise ValueError(f"no such CSV file: {data}")
+
     def start(self) -> dict:
-        """Probe the CSV, build the env, train+score the baseline (SPEC.md 23.1)."""
+        """Probe the data, build the env, train+score the baseline (SPEC.md 23.1).
+
+        v0.10 (SPEC.md 24.5): the data is a CSV file (csv task) or a
+        directory of labelled images/audio (image/audio tasks).
+        """
         if self._phase != "idle":
             raise RuntimeError(f"start() again in phase {self._phase!r}")
         data = Path(self.csv_path)
-        if not data.is_file():
+        if not data.exists():
             raise ValueError(f"no such CSV file: {data}")
+        task_name = self._resolve_task(data)
         config: dict = {"path": str(data)}
         if self.label is not None:
             config["label"] = self.label
@@ -80,9 +113,9 @@ class DashboardRunner:
 
         # deterministic probe: the env re-derives the identical split from
         # the same seed (SPEC.md 22.1)
-        probe = CsvTask(seed=self.seed, **config)
+        probe = TASKS[task_name](seed=self.seed, **config)
         self.env = AutoRefineEnv(
-            task="csv", seed=self.seed,
+            task=task_name, seed=self.seed,
             budget=Budget(self.experiments, self.max_seconds, self.max_train_seconds),
             runs_dir=self.runs_dir,
             dataset_episodes=int(probe.default_dataset_size),

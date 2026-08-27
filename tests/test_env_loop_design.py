@@ -42,10 +42,11 @@ def _drive(env, policy):
 def test_tasks_expose_default_dataset_size():
     """Every task declares default_dataset_size (SPEC.md 20.3); the fitting
     tasks moved off 60 points, the episode tasks keep their v1 value.
-    SPEC.md 22.1: the csv task is data-driven, so its size is an instance
-    attribute (class-level None) derived from the file."""
+    SPEC.md 22.1/24: the csv/image/audio tasks are data-driven, so their
+    size is an instance attribute (class-level None) derived from the file.
+    """
     for name, cls in TASKS.items():
-        if name == "csv":
+        if name in ("csv", "image", "audio"):
             assert cls.default_dataset_size is None
             continue
         size = cls.default_dataset_size

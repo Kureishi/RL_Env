@@ -31,7 +31,11 @@ def _launcher_runs_dir() -> str:
 
 
 def _resolve_csv(upload, path_str: str) -> str | None:
-    """Uploaded bytes → session temp file; otherwise the sidebar path."""
+    """Uploaded bytes → session temp file; otherwise the sidebar path.
+
+    v0.10 (SPEC.md 24.5): the sidebar path may be a directory of labelled
+    images/audio as well as a CSV file; uploads stay CSV.
+    """
     if upload is not None:
         dest = Path(tempfile.gettempdir()) / "autorefine_dashboard"
         dest.mkdir(parents=True, exist_ok=True)
@@ -40,17 +44,33 @@ def _resolve_csv(upload, path_str: str) -> str | None:
         out.write_bytes(upload.getvalue())
         return str(out)
     p = path_str.strip()
-    if p and Path(p).is_file():
+    if p and (Path(p).is_file() or Path(p).is_dir()):
         return p
     return None
 
 
 def _preview(csv_path: str) -> None:
-    """Inferred head/splits + first rows (SPEC.md 23.2 data preview)."""
+    """Inferred head/splits + first rows (SPEC.md 23.2 data preview);
+    v0.10 (SPEC.md 24.5): media directories preview their items."""
+    from autorefine.tasks import TASKS, detect_modality
+    p = Path(csv_path)
+    if p.is_file():
+        cls = CsvTask
+    elif p.is_dir():
+        m = detect_modality(p)
+        if m is None or m == "mixed":
+            st.warning(f"Directory {p} holds no image/audio items (or is "
+                       f"mixed) — one subfolder per class, or an index.csv "
+                       f"(SPEC.md 24.2/24.5)")
+            return
+        cls = TASKS[m]
+    else:
+        st.warning(f"no such file or directory: {p}")
+        return
     try:
-        probe = CsvTask(seed=0, path=csv_path)
+        probe = cls(seed=0, path=csv_path)
     except ValueError as exc:
-        st.warning(f"CSV not usable as a task: {exc}")
+        st.warning(f"data not usable as a task: {exc}")
         return
     head_txt = (f"softmax ({probe.n_outputs} classes: "
                 f"{probe.class_values})" if probe.head == "softmax"
@@ -58,18 +78,33 @@ def _preview(csv_path: str) -> None:
     st.caption(
         f"label **{probe.label_name}** · head **{head_txt}** · "
         f"features {', '.join(probe.feature_names)} · "
-        f"rows {len(probe._x_tr)}/{len(probe._x_ho)}/{len(probe._x_ge)} "
+        f"items {len(probe._x_tr)}/{len(probe._x_ho)}/{len(probe._x_ge)} "
         f"(train/holdout/gen)"
     )
-    # simple deterministic preview: header + first 5 data rows
-    with (Path(csv_path)).open(encoding="utf-8", newline="") as f:
-        reader = _csv.reader(f)
-        header = next(reader)
-        data = [next(reader, None) for _ in range(5)]
-        data = [r for r in data if r]
-    if data:
-        import pandas as pd  # a streamlit dependency, app-only
-        st.dataframe(pd.DataFrame(data, columns=header).head(5), width="stretch")
+    import pandas as pd  # a streamlit dependency, app-only
+    if p.is_file():
+        # simple deterministic preview: header + first 5 data rows
+        with p.open(encoding="utf-8", newline="") as f:
+            reader = _csv.reader(f)
+            header = next(reader)
+            data = [next(reader, None) for _ in range(5)]
+            data = [r for r in data if r]
+        if data:
+            st.dataframe(pd.DataFrame(data, columns=header).head(5),
+                         width="stretch")
+    else:
+        rows = []
+        for sub in sorted(p.iterdir()):
+            if sub.is_dir():
+                for f in sorted(sub.iterdir()):
+                    if f.is_file():
+                        rows.append({"class": sub.name, "file": f.name})
+                        if len(rows) >= 5:
+                            break
+            if len(rows) >= 5:
+                break
+        if rows:
+            st.dataframe(pd.DataFrame(rows).head(5), width="stretch")
 
 
 def _run(csv_path: str, label: str, target: float, policy: str, seed: int,
@@ -226,15 +261,17 @@ def main() -> None:
                        layout="wide")
     st.title("AutoRefine — autonomous model improvement")
     st.caption(
-        f"v{__version__} (SPEC.md 23): upload a CSV, watch every experiment, "
-        f"get a gated model + plots. `rl` policy stays CLI-only "
+        f"v{__version__} (SPEC.md 23/24): upload a CSV (or point at a "
+        f"directory of labelled images/audio), watch every experiment, get a "
+        f"gated model + plots. `rl` policy stays CLI-only "
         f"(`autorefine fit --policy rl`)."
     )
 
     side = st.sidebar
     side.header("Data")
     upload = side.file_uploader("CSV file (header + rows)", type=["csv"], key="csv_upload")
-    csv_path = side.text_input("…or CSV path on this machine", value="", key="csv_path")
+    csv_path = side.text_input("…or a CSV path / a directory of labelled "
+                               "images or audio (v0.10)", value="", key="csv_path")
     label = side.text_input("Label column (blank = auto-detect)", value="", key="label")
     target = side.number_input("Target score (0–100)", min_value=0.0, max_value=100.0,
                                value=95.0, step=0.5, key="target")
@@ -259,10 +296,11 @@ def main() -> None:
     path = _resolve_csv(upload, csv_path)
     result = st.session_state.get("result")
     if path is None and result is None:
-        st.info("Upload a CSV (or give a path) to begin. The label column is "
-                "auto-detected (label/target/y/class, else last column) and "
-                "the head is inferred: 2–50 integer classes → accuracy, "
-                "otherwise R² (SPEC.md 22.1).")
+        st.info("Upload a CSV (or give a path — a CSV file, or a directory "
+                "of labelled images/audio, v0.10) to begin. Labels are the "
+                "column (label/target/y/class, else last) or the subfolder "
+                "name / index.csv; the head is inferred: 2–50 integer "
+                "classes → accuracy, otherwise R² (SPEC.md 22.1/24.2).")
         st.stop()
 
     if path is not None:

@@ -447,6 +447,10 @@ Integration / acceptance:
     observability.**
 3. **Q3.** Budget defaults: 30 experiments / 900 s total / 30 s per training —
     reasonable for your machine?
+4. **Q8.** Text / LLM-embedding inputs as a modality (v0.10 added images +
+    audio, §24)? Tokenization / embedding choice is a much bigger surface
+    than pixel or mel features — **non-goal for v1**, revisit after a real
+    need appears.
 
 ## 17. v0.3 Extensions (implemented)
 
@@ -1171,3 +1175,94 @@ every other command remain streamlit-free.
 ### 23.5 Milestone
 
 **M12** — v0.9 visual dashboard (A13).
+
+---
+
+## 24. Input Modalities (v0.10 — implemented)
+
+Beyond tabular CSV (§22): **images** and **audio clips** become *tasks* (G5).
+A modality is just the shape of the features — `ImageTask` and `AudioTask`
+implement the same minimal fitting protocol as `CsvTask` (`make_dataset` +
+`score` + seed-derived splits), so the improver, spec space, v0.4 acceptance,
+frontier, `eval`, `report`, and the dashboard all work on them **unchanged**.
+Text / LLM-embedding inputs stay out of scope (v1; §16).
+
+### 24.1 Optional dependencies (S1, the §3/§21.1 pattern)
+
+- **`autorefine[image]`** → Pillow (≥9): decodes PNG / JPEG / BMP / GIF.
+  `import autorefine` never imports PIL; constructing `ImageTask` without
+  Pillow fails with a clear `pip install autorefine[image]` hint (the §23.4
+  pattern, same blocked-import test shape as the streamlit rule).
+- **`autorefine[audio]`** → soundfile (≥0.12, i.e. libsndfile ≥1.2): **MP3**
+  decode. **WAV (16-bit PCM) uses the stdlib `wave` module — zero
+  dependencies**; an MP3 file without soundfile fails with a clear
+  `pip install autorefine[audio]` hint. `import autorefine` never imports
+  soundfile either.
+
+### 24.2 Shared rules (both media tasks — one source of truth, `tasks/media.py`)
+
+- **Input = one directory.** Labels come from either
+  - one **subfolder per class** — `<dir>/<label>/<file>`, or
+  - an **`index.csv`** in the directory: column 1 = file path (relative to
+    the directory, or absolute), column 2 = label (column names: any of
+    `path`/`file` + `label`/`target`/`y`/`class`, else position);
+- **head inference — identical to §22.1:** all-integer labels with 2–50
+  distinct classes → `softmax` (sorted unique values → classes 0…K−1);
+  otherwise `mse` (numeric labels via `index.csv`);
+- **splits — identical to §22.1:** seed-derived permutation partitions the
+  items into train / holdout / gen (default 80/10/10; `split_frac` is the
+  non-train share, split evenly); prefix-matched split names
+  (`gen*` / `train*` / holdout) so §18.3 block bootstraps work unchanged;
+- features are standardized with **train-only** statistics (std 0 → 1);
+- **score** = 100·accuracy (softmax) or 100·R² clamped at 0 (mse);
+- `default_dataset_size` = train-split item count (§20.3 units).
+
+### 24.3 `ImageTask` (`tasks/images.py`)
+
+- **features:** deterministic resize to a square grid (default 32×32)
+  grayscale → `(grid²,)` vector, in [0, 1]. No augmentation in v1 — the
+  improver's spec space is the improvement axis, as for CSV.
+- **formats:** `.png .jpg .jpeg .bmp .gif` (via Pillow).
+- **errors:** no decodable items → `ValueError` with the label rules; Pillow
+  missing → the §24.1 install hint; unreadable file → `ValueError` naming it.
+
+### 24.4 `AudioTask` (`tasks/audio.py`)
+
+- **formats:** `.wav` (16-bit PCM, stdlib `wave`; mono or stereo → mean
+  downmix) and `.mp3` (soundfile, §24.1). Other extensions are rejected with
+  a hint; non-16-bit WAV is rejected with a hint.
+- **features:** a hand-rolled, **NumPy-only log-mel spectrogram** —
+  STFT (Hann window, 25 ms window / 10 ms hop at the file's sample rate),
+  power spectrum, 26-band mel filterbank (0 Hz → min(sr/2, 8 kHz)),
+  log(1+x), mean over time → `(bands,)` vector. Deterministic given the file
+  bytes (G2); no new dependency (S1).
+- **errors:** too-short signal → `ValueError`; MP3 without soundfile → the
+  §24.1 hint.
+
+### 24.5 CLI & dashboard
+
+- **`fit --data` now accepts a directory:** auto-detect image vs audio items
+  (an `index.csv` labels either) or force with `--task csv|image|audio`
+  (default `auto`; a file is always csv). The §22.1 gate (exit 0/2) and all
+  other `fit` flags apply unchanged. `eval` / `report` are unchanged
+  (registry + `task_config` round-trip, as for csv).
+- **dashboard:** the sidebar path input accepts a **directory** (preview +
+  run; `DashboardRunner` auto-detects the modality — `modality` arg to
+  force it). File **upload** stays CSV in v0.10 (zip-upload of a folder =
+  open question, not a commitment).
+
+### 24.6 Sample data & acceptance (A14)
+
+- `examples/make_sample_media.py` synthesizes runnable samples —
+  `tone_clips/` (220 Hz vs 440 Hz WAVs, stdlib `wave`, zero deps) and
+  `image_shapes/` (two geometric pattern classes, Pillow when available) —
+  mirroring the churn-sample acceptance of §22.6.
+- **acceptance:** `autorefine fit --data <either sample dir> --target 90`
+  **PASSes** on a small budget; determinism (same seed → same features/
+  splits) holds for both tasks; blocked-import hint tests; the core import
+  stays PIL/soundfile-free (the §23 import test pattern); `fit --data DIR`
+  auto-detects and a mixed directory without `--task` is a clean error.
+
+### 24.7 Milestone
+
+**M13** — v0.10 input modalities: images + audio as tasks (A14).

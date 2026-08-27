@@ -1,4 +1,6 @@
 """Extension-task tests: SineRegressionV1, GridNavV1 (SPEC.md 15), Parity4V1 (SPEC.md 17)."""
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -27,6 +29,44 @@ def _fixture_csv(path):
     return path
 
 
+def _fixture_wav_dir(base) -> "Path":
+    """Two tone classes, one subfolder each (SPEC.md 24.4, stdlib wave)."""
+    import math
+    import wave
+    d = Path(base) / "tones"
+    for name, freq in (("low", 220.0), ("high", 440.0)):
+        sub = d / name
+        sub.mkdir(parents=True)
+        for i in range(5):
+            sr = 8000
+            sig = 0.8 * np.sin(2 * math.pi * freq * np.arange(sr) / sr)
+            pcm = (np.clip(sig, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+            with wave.open(str(sub / f"c{i:02d}.wav"), "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(sr)
+                w.writeframes(pcm)
+    return d
+
+
+def _fixture_image_dir(base) -> "Path":
+    """Two bar-orientation classes, one subfolder each (SPEC.md 24.3)."""
+    pytest.importorskip("PIL", reason="image fixture needs autorefine[image] (SPEC.md 24.1)")
+    from PIL import Image
+    d = Path(base) / "shapes"
+    for name, vertical in (("h", False), ("v", True)):
+        sub = d / name
+        sub.mkdir(parents=True)
+        for i in range(5):
+            a = np.zeros((16, 16), dtype=np.uint8)
+            if vertical:
+                a[:, 4:12] = 255
+            else:
+                a[4:12, :] = 255
+            Image.fromarray(a, mode="L").save(str(sub / f"s{i:02d}.png"))
+    return d
+
+
 class _TargetModel:
     """'Model' that knows the sine target exactly: score must be ~100."""
 
@@ -35,12 +75,17 @@ class _TargetModel:
 
 
 def test_task_registry_covers_all_tasks(tmp_path):
-    # SPEC.md 22.1: the csv task is data-driven (needs a file), the rest are
-    # seed-constructable
-    assert set(TASKS) == {"cartpole-v1", "sine-v1", "gridnav-v1", "parity-v1", "csv"}
+    # SPEC.md 22.1/24: csv/image/audio are data-driven (need a file/dir),
+    # the rest are seed-constructable
+    assert set(TASKS) == {"cartpole-v1", "sine-v1", "gridnav-v1", "parity-v1",
+                          "csv", "image", "audio"}
     for name, cls in TASKS.items():
         if name == "csv":
             task = CsvTask(seed=7, path=str(_fixture_csv(tmp_path / "csv_fixture.csv")))
+        elif name == "audio":
+            task = cls(seed=7, path=str(_fixture_wav_dir(tmp_path)))
+        elif name == "image":
+            task = cls(seed=7, path=str(_fixture_image_dir(tmp_path)))
         else:
             task = cls(seed=7)
         assert task.name == name

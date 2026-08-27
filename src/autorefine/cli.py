@@ -125,16 +125,49 @@ def _print_summary(args: argparse.Namespace, env: AutoRefineEnv,
     print(f"artifacts: {env.run_dir}")
 
 
-def _cmd_fit(args: argparse.Namespace) -> int:
-    """`fit` (SPEC.md 22.1): CSV in, gated validated model out.
+def _resolve_fit_task(data: Path, want: str) -> str:
+    """v0.10 (SPEC.md 24.5): `--data` file → csv; directory → image/audio.
 
-    = the `run` loop over the built-in `csv` task (task_config carries the
-    file), plus the §21.5 target gate: PASS → exit 0, MISS → exit 2.
+    `want` is the `--task` value ('auto' | 'csv' | 'image' | 'audio');
+    auto-detection counts modality extensions in the directory's subfolders.
     """
-    from .tasks import CsvTask
+    from .tasks import detect_modality
+    if data.is_file():
+        if want in ("auto", "csv"):
+            return "csv"
+        raise ValueError(f"--data {data} is a file: use --task csv (or auto)")
+    if data.is_dir():
+        if want == "auto":
+            m = detect_modality(data)
+            if m == "mixed":
+                raise ValueError(
+                    f"{data} holds both image and audio items: pass "
+                    f"--task image or --task audio (SPEC.md 24.5)")
+            if m is None:
+                raise ValueError(
+                    f"no image or audio items under {data} — one subfolder "
+                    f"per class, or an index.csv (SPEC.md 24.2); or pass a "
+                    f"CSV file with --task csv")
+            return m
+        if want in ("image", "audio"):
+            return want
+        raise ValueError(f"--task csv needs a CSV file, got directory {data}")
+    raise ValueError(f"no such file or directory: {data}")
+
+
+def _cmd_fit(args: argparse.Namespace) -> int:
+    """`fit` (SPEC.md 22.1, v0.10 24.5): data in, gated validated model out.
+
+    = the `run` loop over the matching data task (task_config carries the
+    path: csv file / image dir / audio dir), plus the §21.5 target gate:
+    PASS → exit 0, MISS → exit 2.
+    """
+    from .tasks import TASKS
     data = Path(args.data)
-    if not data.is_file():
-        print(f"no such file: {args.data}", file=sys.stderr)
+    try:
+        task_name = _resolve_fit_task(data, getattr(args, "task", "auto") or "auto")
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
         return 1
     config: dict = {"path": str(data)}
     if args.label is not None:
@@ -143,11 +176,15 @@ def _cmd_fit(args: argparse.Namespace) -> int:
         config["split_frac"] = args.split_frac
     # deterministic probe for the train-split size (the env re-derives the
     # identical split from the same seed, SPEC.md 22.1)
-    probe = CsvTask(seed=args.seed, **config)
+    try:
+        probe = TASKS[task_name](seed=args.seed, **config)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     quality = {} if args.search_quality == "legacy" else search_quality_v04()
-    args.task = "csv"  # _drive's print lines
+    args.task = task_name  # _drive's print lines
     env = AutoRefineEnv(
-        task="csv", seed=args.seed, budget=_budget(args), runs_dir=args.runs_dir,
+        task=task_name, seed=args.seed, budget=_budget(args), runs_dir=args.runs_dir,
         ensemble_top_k=2 if args.ensemble_final else 0,
         dataset_episodes=int(probe.default_dataset_size),
         task_config=config,
@@ -350,8 +387,15 @@ def main(argv: list[str] | None = None) -> int:
     p_rep.set_defaults(func=_cmd_report)
 
     p_fit = sub.add_parser(
-        "fit", help="v0.8 (SPEC.md 22.1): fit a model on a CSV and gate on a target")
-    p_fit.add_argument("--data", required=True, help="path to a CSV file (header + rows)")
+        "fit", help="v0.8 (SPEC.md 22.1) / v0.10 (24.5): fit a model on your data "
+                    "(CSV file, or a directory of labelled images/audio) and "
+                    "gate on a target")
+    p_fit.add_argument("--data", required=True,
+                       help="CSV file, or a directory of labelled images/audio "
+                            "(v0.10, SPEC.md 24.5)")
+    p_fit.add_argument("--task", default="auto", choices=("auto", "csv", "image", "audio"),
+                       help="v0.10 (SPEC.md 24.5): force the data task; default auto "
+                            "(file → csv, directory → detected)")
     p_fit.add_argument("--label", default=None,
                        help="label column (default: label/target/y/class, else last column)")
     p_fit.add_argument("--split", dest="split_frac", type=float, default=0.2,

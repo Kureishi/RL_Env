@@ -12,6 +12,8 @@ dependencies = ["numpy>=1.26"]
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 gui = ["streamlit>=1.30"]   # v0.9 dashboard (SPEC.md 23); core stays streamlit-free
+image = ["Pillow>=9"]        # v0.10 ImageTask (SPEC.md 24.1); core stays PIL-free
+audio = ["soundfile>=0.12"]  # v0.10 AudioTask MP3 (SPEC.md 24.1); WAV is stdlib
 
 [project.scripts]
 autorefine = "autorefine.cli:main"
