@@ -42,6 +42,9 @@ class ImageTask:
     n_outputs = 2
     state_dim = 1
     default_dataset_size = None  # instance value: len(train items)
+    # SPEC.md 25.3: the image modality is grid-structured (C=1, grid x grid)
+    grid_capable = True
+    feature_grid = None  # instance value: (1, grid, grid)
 
     def __init__(self, seed: int, path: str | Path | None = None,
                  label: str | None = None, split_frac: float = 0.2,
@@ -70,6 +73,7 @@ class ImageTask:
             resolve_labels([lb for _, lb in items])
         self.state_dim = int(self.grid) ** 2
         self.feature_names = [f"{self.grid}x{self.grid} grayscale"]
+        self.feature_grid = (1, self.grid, self.grid)  # SPEC.md 25.3
         tr, ho, ge = split_indices(len(items), self.seed, self.split_frac,
                                    b"image-split")
         mean = x[tr].mean(axis=0)
@@ -118,8 +122,24 @@ class ImageTask:
         n = len(self._x_tr) if n_points is None else min(int(n_points), len(self._x_tr))
         return self._x_tr[:n], self._y_tr[:n]
 
-    def score(self, model, split: str, n: int) -> float:
+    # --- grid protocol (SPEC.md 25.3) ---------------------------------------
+    def grid_dataset(self, n_points: int | None = None) -> tuple[np.ndarray, np.ndarray]:
+        """Train split in grid layout (n, 1, grid, grid) — a pure reshape of
+        the flat 1024-d rows, so the flat path stays bit-identical (25.3)."""
+        x, y = self.make_dataset(n_points)
+        return x.reshape(x.shape[0], *self.feature_grid), y
+
+    def _grid_rows_for(self, split: str) -> tuple[np.ndarray, np.ndarray]:
         x, y = self._rows_for(split)
+        return x.reshape(x.shape[0], *self.feature_grid), y
+
+    def score(self, model, split: str, n: int) -> float:
+        # SPEC.md 25.3: a wants_grid model (convnet) gets grid-layout rows;
+        # flat models get the flat rows (today's behavior, unchanged).
+        if getattr(model, "wants_grid", False):
+            x, y = self._grid_rows_for(split)
+        else:
+            x, y = self._rows_for(split)
         if len(x) == 0:
             return 0.0
         n = min(int(n), len(x))

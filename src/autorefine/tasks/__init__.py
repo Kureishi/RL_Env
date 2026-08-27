@@ -1,7 +1,7 @@
 from .base import Task
 from .cartpole import CartPoleV1, clip_states
 from .csv import CsvTask
-from .audio import AudioTask, log_mel_features
+from .audio import AudioTask, log_mel_features, log_mel_frames
 from .gridnav import GridNavV1
 from .images import ImageTask
 from .media import collect_items, detect_modality
@@ -23,6 +23,6 @@ TASKS = {
 __all__ = [
     "Task", "CartPoleV1", "clip_states", "CsvTask", "GridNavV1",
     "SineRegressionV1", "Parity4V1", "ParityTask", "parity_ceiling", "TASKS",
-    "ImageTask", "AudioTask", "log_mel_features",
+    "ImageTask", "AudioTask", "log_mel_features", "log_mel_frames",
     "collect_items", "detect_modality",
 ]

@@ -12,13 +12,17 @@ import math
 
 import numpy as np
 
-from ..config import HIDDEN_LAYER_SIZES, ModelSpec, SpecError
+from ..config import CONV_FILTERS, HIDDEN_LAYER_SIZES, KNN_K_VALUES, ModelSpec, SpecError
 
 # values per field; note (1,)/(2,)/(3,) architectures are valid tree depths
-# while (16, 8) etc. are valid mlp widths — apply_action enforces consistency
+# while (16, 8) etc. are valid mlp widths — apply_action enforces consistency.
+# SPEC.md 25.3: the 16 (c1, c2) convnet filter pairs are appended to the
+# architecture values (c1, c2 each in CONV_FILTERS); the mlp/tree values are
+# unchanged and keep their relative order.
+_CONVNET_ARCHS = tuple((c1, c2) for c1 in CONV_FILTERS for c2 in CONV_FILTERS)
 FIELD_CATALOG: dict[str, tuple] = {
-    "architecture": ((16, 8), (32, 16), (64, 32), (16, 32, 16), (1,), (2,), (3,)),
-    "model_family": ("mlp", "tree", "boost"),  # boost added in v0.5 (SPEC.md 19.2)
+    "architecture": ((16, 8), (32, 16), (64, 32), (16, 32, 16), (1,), (2,), (3,)) + _CONVNET_ARCHS,
+    "model_family": ("mlp", "tree", "boost", "knn", "convnet"),  # SPEC.md 25.2/25.3
     "optimizer": ("sgd", "momentum", "adam"),
     "learning_rate": (1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2, 1e-1),
     "batch_size": (16, 32, 64, 128),
@@ -33,6 +37,8 @@ FIELD_CATALOG: dict[str, tuple] = {
     "early_stopping_patience": (0, 10, 25, 50),
     "init_scale": (0.5, 1.0, 2.0),
     "gradient_clipping": (0.0, 1.0, 5.0),
+    # SPEC.md 25.2: knn family's k (appended; consumed only by the knn family)
+    "knn_k": KNN_K_VALUES,
 }
 
 CATALOG_FIELDS = tuple(FIELD_CATALOG)
@@ -49,7 +55,33 @@ FAMILY_FIELDS: dict[str, tuple[str, ...]] = {
     "mlp": CATALOG_FIELDS,
     "tree": ("architecture", "train_steps", "input_noise", "model_family"),
     "boost": ("architecture", "train_steps", "input_noise", "model_family"),
+    # SPEC.md 25.2: knn only exposes its k (architecture is ignored)
+    "knn": ("knn_k", "model_family"),
+    # SPEC.md 25.3: convnet trains like mlp (shared neural loop)
+    "convnet": CATALOG_FIELDS,
 }
+
+
+def relevant_families(task_name: str | None) -> tuple[str, ...]:
+    """SPEC.md 25.5: the model families the bandit may offer for `task_name`.
+
+    Grid-capable tasks (image, audio) offer all five families, including the
+    convnet temporal/spatial model; flat tasks offer the legacy three
+    (mlp, tree, boost). Offering only the legacy three on flat tasks keeps the
+    §18.7 bit-exact legacy pin green, while knn/convnet remain fully usable
+    on flat tasks through the spec surface, `eval`, and the search/RL/gym
+    paths (a convnet there is a §25.4 logged rejection, not a crash).
+    """
+    if task_name is None:
+        return ("mlp", "tree", "boost")
+    try:
+        from ..tasks import TASKS  # lazy: catalog is imported before tasks
+    except Exception:  # pragma: no cover - defensive (import order)
+        return ("mlp", "tree", "boost")
+    cls = TASKS.get(task_name)
+    if cls is not None and getattr(cls, "grid_capable", False):
+        return ("mlp", "tree", "boost", "knn", "convnet")
+    return ("mlp", "tree", "boost")
 
 
 def relevant_fields(family: str = "mlp") -> tuple[str, ...]:
@@ -117,7 +149,11 @@ def apply_action(best_spec_dict: dict, action_index: int | np.integer) -> dict:
     # SPEC.md 19.2: boost shares tree's (depth,) architecture rule
     if fam in ("tree", "boost") and not (len(arch) == 1 and arch[0] in (1, 2, 3)):
         out["architecture"] = (2,)
-    if fam not in ("tree", "boost") and (not arch or any(h not in HIDDEN_LAYER_SIZES for h in arch)):
+    elif fam == "knn":
+        pass  # SPEC.md 25.2: knn ignores architecture — leave it as-is
+    elif fam == "convnet" and not (len(arch) == 2 and all(int(h) in CONV_FILTERS for h in arch)):
+        out["architecture"] = (4, 8)  # SPEC.md 25.3: a valid conv filter pair
+    elif (not arch or any(h not in HIDDEN_LAYER_SIZES for h in arch)):
         out["architecture"] = (16, 8)
     try:
         ModelSpec.from_dict(out)

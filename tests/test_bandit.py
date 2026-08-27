@@ -64,8 +64,9 @@ def test_cold_start_tries_every_relevant_field():
     pol = BanditPolicy(seed=0)
     best = DEFAULT_SPEC.to_dict()
     state = {"best_spec": best, "last": None}
-    # window comfortably above the 23 proposals seed 0 needs to credit all 14
-    # fields across the family switches (probe-verified; deterministic, G2)
+    # window comfortably above the 25 proposals seed 0 needs to credit all 15
+    # fields (v0.11, SPEC.md 25.2: knn_k joins the space) across the family
+    # switches (probe-verified; deterministic, G2)
     for _ in range(28):
         rel = relevant_fields(best.get("model_family", "mlp"))
         # the previous step's fields are credited inside propose(), so they

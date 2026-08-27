@@ -38,12 +38,15 @@ def _mel_to_hz(m: float | np.ndarray) -> float | np.ndarray:
     return 700.0 * (10.0 ** (m / 2595.0) - 1.0)
 
 
-def log_mel_features(sig: np.ndarray, sr: int, n_bands: int = 26,
-                     fmin: float = 0.0, fmax_cap: float = 8000.0,
-                     win_s: float = 0.025, hop_s: float = 0.010) -> np.ndarray:
-    """NumPy-only log-mel spectrogram, time-mean → (n_bands,) (SPEC.md 24.4).
+def log_mel_frames(sig: np.ndarray, sr: int, n_bands: int = 26,
+                   fmin: float = 0.0, fmax_cap: float = 8000.0,
+                   win_s: float = 0.025, hop_s: float = 0.010) -> np.ndarray:
+    """NumPy-only log-mel spectrogram frames → (T_i, n_bands) (SPEC.md 24.4/25.3).
 
-    Deterministic for a given signal + sample rate (G2).
+    The per-frame (time × mel) spectrogram in log1p space. Deterministic for a
+    given signal + sample rate (G2). `log_mel_features` (the flat v0.10
+    feature) is the time-mean of this — so the flat path stays bit-identical
+    to v0.10 (SPEC.md 25.3).
     """
     sig = np.asarray(sig, dtype=np.float64).ravel()
     win = max(4, int(round(win_s * sr)))
@@ -76,7 +79,18 @@ def log_mel_features(sig: np.ndarray, sr: int, n_bands: int = 26,
     if not np.all(np.isfinite(feats)) or feats.sum() <= 0.0:
         raise ValueError("audio feature extraction produced no signal "
                          "(silence or unsupported sample rate)")
-    return np.log1p(feats).mean(axis=0)
+    return np.log1p(feats)
+
+
+def log_mel_features(sig: np.ndarray, sr: int, n_bands: int = 26,
+                     fmin: float = 0.0, fmax_cap: float = 8000.0,
+                     win_s: float = 0.025, hop_s: float = 0.010) -> np.ndarray:
+    """NumPy-only log-mel spectrogram, time-mean → (n_bands,) (SPEC.md 24.4).
+
+    Bit-identical to the v0.10 single-shot feature: `log_mel_frames` (the
+    (T_i, bands) spectrogram) time-meaned over the time axis (SPEC.md 25.3).
+    """
+    return log_mel_frames(sig, sr, n_bands, fmin, fmax_cap, win_s, hop_s).mean(axis=0)
 
 
 class AudioTask:
@@ -88,6 +102,9 @@ class AudioTask:
     n_outputs = 2
     state_dim = 1
     default_dataset_size = None  # instance value: len(train items)
+    # SPEC.md 25.3: the audio modality is the log-mel spectrogram (time x mel)
+    grid_capable = True
+    feature_grid = None  # instance value: (1, T, bands)
 
     def __init__(self, seed: int, path: str | Path | None = None,
                  label: str | None = None, split_frac: float = 0.2,
@@ -106,7 +123,11 @@ class AudioTask:
         self.label_name = "class"  # subfolder name / index.csv label column
 
         items = collect_items(self.path, _AUDIO_EXTS, "audio")
-        x = np.array([self._features(p) for p, _ in items], dtype=np.float64)
+        # SPEC.md 25.3: decode each clip once; the flat feature is the
+        # time-mean of the per-item spectrogram frames (bit-identical to the
+        # v0.10 flat path) and the grid layout reuses the same frames.
+        frames_list = [self._frames(p) for p, _ in items]
+        x = np.array([f.mean(axis=0) for f in frames_list], dtype=np.float64)
 
         # head / labels / splits / standardization — the §22.1 rule
         # (SPEC.md 24.2); raw labels resolve to §22.1 targets or string
@@ -125,6 +146,23 @@ class AudioTask:
         self._x_ho, self._y_ho = x[ho], self._y[ho]
         self._x_ge, self._y_ge = x[ge], self._y[ge]
         self.default_dataset_size = int(len(tr))  # SPEC.md 20.3 (items)
+        # --- SPEC.md 25.3: grid (spectrogram) layout for the convnet family -
+        # T = min(128, max frame count); items shorter than T are zero-padded
+        # on the time axis (a padded frame reads as silence). Standardization
+        # reuses the flat train per-band mean/std (exactly consistent).
+        t_max = min(128, max(int(f.shape[0]) for f in frames_list))
+        # (n, 1, T, bands): the grid protocol is one (C, H, W) sample per
+        # item (SPEC.md 25.3) — C=1, H=T (time), W=bands (mel)
+        frames = np.zeros((len(items), 1, t_max, self.bands), dtype=np.float64)
+        for i, f in enumerate(frames_list):
+            k = min(int(f.shape[0]), t_max)
+            frames[i, 0, :k, :] = f[:k]
+        self._T = int(t_max)
+        self.feature_grid = (1, int(t_max), self.bands)
+        g = (frames - mean[None, None, None, :]) / std[None, None, None, :]
+        self._g_tr = g[tr]
+        self._g_ho = g[ho]
+        self._g_ge = g[ge]
 
     # --- decoding / features ----------------------------------------------------
     @staticmethod
@@ -159,14 +197,19 @@ class AudioTask:
             f"{', '.join(_AUDIO_EXTS)} (SPEC.md 24.4)"
         )
 
-    def _features(self, p: Path) -> np.ndarray:
+    def _frames(self, p: Path) -> np.ndarray:
+        """Per-item log-mel spectrogram frames (T_i, bands) (SPEC.md 25.3)."""
         try:
             sig, sr = self._load_signal(p)
         except ValueError:
             raise
         except Exception as exc:
             raise ValueError(f"could not read audio clip {p}: {exc}") from exc
-        return log_mel_features(sig, sr, self.bands)
+        return log_mel_frames(sig, sr, self.bands)
+
+    def _features(self, p: Path) -> np.ndarray:
+        """Flat log-mel feature (bands,) — the time-mean of `_frames` (25.3)."""
+        return self._frames(p).mean(axis=0)
 
     # --- protocol (SPEC.md 15, 24.2 — mirrors CsvTask) ------------------------
     def _rows_for(self, split: str) -> tuple[np.ndarray, np.ndarray]:
@@ -189,8 +232,28 @@ class AudioTask:
         n = len(self._x_tr) if n_points is None else min(int(n_points), len(self._x_tr))
         return self._x_tr[:n], self._y_tr[:n]
 
+    # --- grid protocol (SPEC.md 25.3) ---------------------------------------
+    def grid_dataset(self, n_points: int | None = None) -> tuple[np.ndarray, np.ndarray]:
+        """Train split in grid layout (n, 1, T, bands) — the log-mel
+        spectrogram (SPEC.md 25.3), the audio temporal model's input."""
+        n = len(self._x_tr) if n_points is None else min(int(n_points), len(self._x_tr))
+        return self._g_tr[:n], self._y_tr[:n]
+
+    def _grid_rows_for(self, split: str) -> tuple[np.ndarray, np.ndarray]:
+        s = (split or "").lower()
+        if s.startswith("gen"):
+            return self._g_ge, self._y_ge
+        if s.startswith("train"):
+            return self._g_tr, self._y_tr
+        return self._g_ho, self._y_ho
+
     def score(self, model, split: str, n: int) -> float:
-        x, y = self._rows_for(split)
+        # SPEC.md 25.3: a wants_grid model (convnet) gets grid-layout rows;
+        # flat models get the flat rows (today's behavior, unchanged).
+        if getattr(model, "wants_grid", False):
+            x, y = self._grid_rows_for(split)
+        else:
+            x, y = self._rows_for(split)
         if len(x) == 0:
             return 0.0
         n = min(int(n), len(x))

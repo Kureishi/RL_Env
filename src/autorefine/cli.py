@@ -299,6 +299,28 @@ def _cmd_plugins_list(args: argparse.Namespace) -> int:
     return 0
 
 
+# SPEC.md 25.5: family loaders for `eval` (local imports keep the module
+# surface small, mirroring the v0.5 boost loader)
+def _load_tree(path: str):
+    from .models.trees import TreeEnsemble
+    return TreeEnsemble.load(path)
+
+
+def _load_boost(path: str):
+    from .models.trees import BoostingEnsemble
+    return BoostingEnsemble.load(path)
+
+
+def _load_knn(path: str):
+    from .models.knn import KNN
+    return KNN.load(path)
+
+
+def _load_convnet(path: str):
+    from .models.convnet import ConvNet
+    return ConvNet.load(path)
+
+
 def _cmd_eval(args: argparse.Namespace) -> int:
     mem = RunMemory(Path(args.run))
     try:
@@ -318,14 +340,18 @@ def _cmd_eval(args: argparse.Namespace) -> int:
         print(f"unknown task {task_name!r} in summary", file=sys.stderr)
         return 1
     family = summary["best_spec"].get("model_family", "mlp")
-    if family == "tree":
-        from .models.trees import TreeEnsemble
-        model = TreeEnsemble.load(str(Path(args.run) / "best_model.npz"))
-    elif family == "boost":  # SPEC.md 19.2: the v0.5 boosted family
-        from .models.trees import BoostingEnsemble
-        model = BoostingEnsemble.load(str(Path(args.run) / "best_model.npz"))
-    else:
-        model = MLP.load(str(Path(args.run) / "best_model.npz"))
+    # SPEC.md 25.5: the family -> loader mapping (knn/convnet since v0.11)
+    loaders = {
+        "mlp": lambda p: MLP.load(p),
+        "tree": lambda p: _load_tree(p),
+        "boost": lambda p: _load_boost(p),  # SPEC.md 19.2
+        "knn": lambda p: _load_knn(p),      # SPEC.md 25.2
+        "convnet": lambda p: _load_convnet(p),  # SPEC.md 25.3
+    }
+    if family not in loaders:
+        print(f"unknown model_family {family!r} in summary", file=sys.stderr)
+        return 1
+    model = loaders[family](str(Path(args.run) / "best_model.npz"))
     spec = ModelSpec.from_dict(summary["best_spec"])
     ev = evaluate_full(task, model, n=args.episodes)
     print(f"spec      : {json.dumps(spec.to_dict())}")

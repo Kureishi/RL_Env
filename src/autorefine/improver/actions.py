@@ -12,16 +12,21 @@ import numpy as np
 from ..config import (
     ACTIVATIONS,
     BATCH_SIZES,
+    CONV_FILTERS,
     HIDDEN_LAYER_SIZES,
     INPUT_NOISE_RANGE,
+    KNN_K_VALUES,
     LABEL_SMOOTHING_RANGE,
     LEARNING_RATE_RANGE,
-    MODEL_FAMILIES,
     OPTIMIZERS,
     TRAIN_STEPS_RANGE,
     WEIGHT_DECAY_RANGE,
 )
-from .catalog import FIELD_CATALOG, index_of_value_nearest
+from .catalog import (
+    FIELD_CATALOG,
+    index_of_value_nearest,
+    relevant_families,
+)
 
 # SPEC.md 18.1: ordered numeric fields that get a local (neighborhood) move
 # (v0.5, SPEC.md 19.4: the three ordered new fields join; lr_schedule stays
@@ -43,27 +48,44 @@ def _sample_learning_rate(rng: np.random.Generator) -> float:
     return float(np.exp(rng.uniform(math.log(lo), math.log(hi))))
 
 
+# SPEC.md 25.5: every sampler takes an optional `task` name so the
+# model_family sampler can restrict itself to the task's relevant families
+# (relevant_families). `task=None` (default, and all pre-v0.11 call sites)
+# keeps the legacy three-family draw, preserving the §18.7 bit-exact pin.
 FIELD_SAMPLERS = {
-    "architecture": _sample_architecture,
-    "optimizer": lambda rng: str(rng.choice(OPTIMIZERS)),
-    "learning_rate": _sample_learning_rate,
-    "batch_size": lambda rng: int(rng.choice(BATCH_SIZES)),
-    "weight_decay": lambda rng: round(float(rng.uniform(*WEIGHT_DECAY_RANGE)), 8),
-    "train_steps": lambda rng: int(rng.integers(TRAIN_STEPS_RANGE[0], TRAIN_STEPS_RANGE[1] + 1)),
-    "input_noise": lambda rng: round(float(rng.uniform(*INPUT_NOISE_RANGE)), 4),
-    "activation": lambda rng: str(rng.choice(ACTIVATIONS)),
-    "model_family": lambda rng: str(rng.choice(MODEL_FAMILIES)),
+    "architecture": lambda rng, task=None: _sample_architecture(rng),
+    "optimizer": lambda rng, task=None: str(rng.choice(OPTIMIZERS)),
+    "learning_rate": lambda rng, task=None: _sample_learning_rate(rng),
+    "batch_size": lambda rng, task=None: int(rng.choice(BATCH_SIZES)),
+    "weight_decay": lambda rng, task=None: round(float(rng.uniform(*WEIGHT_DECAY_RANGE)), 8),
+    "train_steps": lambda rng, task=None: int(rng.integers(TRAIN_STEPS_RANGE[0], TRAIN_STEPS_RANGE[1] + 1)),
+    "input_noise": lambda rng, task=None: round(float(rng.uniform(*INPUT_NOISE_RANGE)), 4),
+    "activation": lambda rng, task=None: str(rng.choice(ACTIVATIONS)),
+    # SPEC.md 25.5: task-aware — grid tasks may draw knn/convnet too
+    "model_family": lambda rng, task=None: str(rng.choice(relevant_families(task))),
     # SPEC.md 17: new spec fields get a sampler here; validation + dedup follow
-    "label_smoothing": lambda rng: round(float(rng.uniform(*LABEL_SMOOTHING_RANGE)), 4),
+    "label_smoothing": lambda rng, task=None: round(float(rng.uniform(*LABEL_SMOOTHING_RANGE)), 4),
     # SPEC.md 19.1: v0.5 fields sample catalog values (single source of truth
     # in FIELD_CATALOG; guaranteed-different holds on every field)
-    "lr_schedule": lambda rng: str(rng.choice(FIELD_CATALOG["lr_schedule"])),
-    "early_stopping_patience": lambda rng: int(rng.choice(FIELD_CATALOG["early_stopping_patience"])),
-    "init_scale": lambda rng: float(rng.choice(FIELD_CATALOG["init_scale"])),
-    "gradient_clipping": lambda rng: float(rng.choice(FIELD_CATALOG["gradient_clipping"])),
+    "lr_schedule": lambda rng, task=None: str(rng.choice(FIELD_CATALOG["lr_schedule"])),
+    "early_stopping_patience": lambda rng, task=None: int(rng.choice(FIELD_CATALOG["early_stopping_patience"])),
+    "init_scale": lambda rng, task=None: float(rng.choice(FIELD_CATALOG["init_scale"])),
+    "gradient_clipping": lambda rng, task=None: float(rng.choice(FIELD_CATALOG["gradient_clipping"])),
+    # SPEC.md 25.2: knn family's k samples the catalog values
+    "knn_k": lambda rng, task=None: int(rng.choice(KNN_K_VALUES)),
 }
 
 FIELD_NAMES = tuple(FIELD_SAMPLERS)
+
+# SPEC.md 25.7 (full suite green; A1-A4 unchanged): the v1 search policy's
+# random-field space stays the v0.10 14 fields, so its seeded proposal
+# stream (and the A1-A4 acceptance runs) is bit-stable as the spec space
+# grows (the same legacy-stability pattern as SPEC.md 19.4's stable action
+# indices). The new `knn_k` field is explored where it belongs: the family
+# bandit (FAMILY_FIELDS["knn"]), the catalog (77 actions), and the spec
+# surface. `knn_k` remains in FIELD_NAMES/FIELD_SAMPLERS, so
+# mutate_spec_dict(spec, "knn_k", ...) works for every policy.
+SEARCH_FIELDS = tuple(f for f in FIELD_NAMES if f != "knn_k")
 
 
 def _values_equal(field: str, a, b) -> bool:
@@ -74,25 +96,47 @@ def _values_equal(field: str, a, b) -> bool:
 
 def _coerce_for_family(spec_dict: dict, rng: np.random.Generator) -> dict:
     """Keep `architecture` valid for the spec's model_family (SPEC.md 15,
-    19.2): tree/boost need (depth 1..3); mlp needs 1..3 layers of allowed sizes."""
+    19.2): tree/boost need (depth 1..3); mlp needs 1..3 layers of allowed
+    sizes. SPEC.md 25: knn ignores architecture; convnet needs a valid
+    (c1, c2) filter pair."""
     fam = spec_dict.get("model_family", "mlp")
     arch = tuple(spec_dict.get("architecture") or ())
     if fam in ("tree", "boost"):
         if not (len(arch) == 1 and arch[0] in (1, 2, 3)):
             spec_dict["architecture"] = (int(rng.integers(1, 4)),)
+    elif fam == "knn":
+        pass  # SPEC.md 25.2: knn ignores architecture — leave it as-is
+    elif fam == "convnet":
+        if not (len(arch) == 2 and all(int(h) in CONV_FILTERS for h in arch)):
+            spec_dict["architecture"] = (4, 8)  # SPEC.md 25.3: a valid pair
     else:
         if not arch or any(h not in HIDDEN_LAYER_SIZES for h in arch):
             spec_dict["architecture"] = _sample_architecture(rng)
     return spec_dict
 
 
-def _uniform_value(field: str, current, rng: np.random.Generator):
-    """Guaranteed-different resample over the field's full range (v1 behavior)."""
+def _uniform_value(field: str, current, rng: np.random.Generator,
+                   task: str | None = None):
+    """Guaranteed-different resample over the field's full range (v1 behavior).
+
+    `task` (SPEC.md 25.5) is forwarded to the field's sampler; only the
+    model_family sampler is task-sensitive (knn/convnet appear only for
+    grid-capable tasks)."""
     for _ in range(8):
-        value = FIELD_SAMPLERS[field](rng)
+        value = FIELD_SAMPLERS[field](rng, task)
         if not _values_equal(field, current, value):
             break
-    return value
+    if not _values_equal(field, current, value):
+        return value
+    # All 8 draws tied with the current value (plausible for small catalogs,
+    # e.g. activation has 2). Keep the guaranteed-different contract without
+    # consuming more rng: deterministically step to the first catalog value
+    # that differs (every FIELD_NAMES field is cataloged). Streams that never
+    # hit this case are bit-identical to the legacy 8-draw loop.
+    for candidate in FIELD_CATALOG[field]:
+        if not _values_equal(field, candidate, current):
+            return candidate
+    raise ValueError(f"could not resample {field!r} to a different value")  # pragma: no cover
 
 
 def _local_architecture(spec_dict: dict, current, rng: np.random.Generator):
@@ -135,7 +179,8 @@ def _local_architecture(spec_dict: dict, current, rng: np.random.Generator):
     return candidates[0]
 
 
-def _local_value(field: str, current, spec_dict: dict, rng: np.random.Generator):
+def _local_value(field: str, current, spec_dict: dict, rng: np.random.Generator,
+                 task: str | None = None):
     """SPEC.md 18.1: move to a neighborhood of the current value.
 
     Ordered fields step +/-1 catalog index (anchor = nearest catalog index,
@@ -153,34 +198,42 @@ def _local_value(field: str, current, spec_dict: dict, rng: np.random.Generator)
             if not _values_equal(field, current, candidate):
                 return candidate
             step = -step
-        return _uniform_value(field, current, rng)
+        return _uniform_value(field, current, rng, task)
     if field == "architecture":
         value = _local_architecture(spec_dict, current, rng)
         if value is not None:
             return value
-        return _uniform_value(field, current, rng)
-    return _uniform_value(field, current, rng)
+        return _uniform_value(field, current, rng, task)
+    return _uniform_value(field, current, rng, task)
 
 
 def mutate_spec_dict(spec_dict: dict, field: str, rng: np.random.Generator,
-                     mode: str = "uniform") -> dict:
+                     mode: str = "uniform", task: str | None = None) -> dict:
     """Return a new spec dict with `field` mutated (guaranteed different).
 
     `mode` (SPEC.md 18.1): "uniform" (default, v0.3 behavior) resamples the
-    full range; "local" moves to a neighborhood of the current value."""
+    full range; "local" moves to a neighborhood of the current value.
+
+    `task` (SPEC.md 25.5): task name for task-aware sampling (model_family
+    offers knn/convnet only on grid-capable tasks); None = legacy behavior."""
     if field not in FIELD_SAMPLERS:
         raise KeyError(f"unknown spec field {field!r}")
     if mode not in ("uniform", "local"):
         raise ValueError(f"unknown mutation mode {mode!r} (expected 'uniform' or 'local')")
     out = dict(spec_dict)
     current = spec_dict.get(field, "mlp" if field == "model_family" else spec_dict[field])
-    value = _uniform_value(field, current, rng) if mode == "uniform" \
-        else _local_value(field, current, spec_dict, rng)
+    value = _uniform_value(field, current, rng, task) if mode == "uniform" \
+        else _local_value(field, current, spec_dict, rng, task)
     out[field] = value
     return _coerce_for_family(out, rng)
 
 
-def uniform_random_spec(rng: np.random.Generator) -> dict:
-    """A fresh point in the whole allowed spec space (evolutionary restart)."""
-    out = {field: FIELD_SAMPLERS[field](rng) for field in FIELD_NAMES}
+def uniform_random_spec(rng: np.random.Generator, task: str | None = None) -> dict:
+    """A fresh point in the v1 spec space (evolutionary restart).
+
+    Draws the legacy 14 fields (SEARCH_FIELDS, SPEC.md 25.7) so the v1
+    restart stream stays v0.10 bit-stable; `knn_k` then defaults to 5 via
+    ModelSpec.from_dict. `task` (SPEC.md 25.5): task name for task-aware
+    family sampling; None keeps the legacy three-family draw."""
+    out = {field: FIELD_SAMPLERS[field](rng, task) for field in SEARCH_FIELDS}
     return _coerce_for_family(out, rng)

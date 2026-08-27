@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from .actions import FIELD_NAMES, mutate_spec_dict, uniform_random_spec
+from .actions import SEARCH_FIELDS, mutate_spec_dict, uniform_random_spec
 
 K_RESTART_AFTER = 5  # consecutive non-improvements before a uniform restart
 REFINE_STEPS = 2  # extra mutations in the same field after a success
@@ -36,12 +36,13 @@ class SearchPolicy:
                 self.fail_streak += 1
                 self.refine_left = 0
 
+        task = env_state.get("task")  # SPEC.md 25.5: task-aware family draw
         # evolutionary restart after K consecutive non-improvements
         if self.fail_streak >= K_RESTART_AFTER:
             self.fail_streak = 0
             self.last_field = None
             self.refine_left = 0
-            return uniform_random_spec(self.rng)
+            return uniform_random_spec(self.rng, task)
 
         if self._started and self.refine_left > 0 and self.last_field is not None:
             # SPEC.md 18.1: refinement (re-mutating the successful field) is a
@@ -50,8 +51,11 @@ class SearchPolicy:
             self.refine_left -= 1
             mode = "local"
         else:
-            field = str(self.rng.choice(FIELD_NAMES))
+            # SPEC.md 25.7: the v1 field space (14 legacy fields) keeps the
+            # A1-A4 seeded streams bit-stable as the spec space grows
+            field = str(self.rng.choice(SEARCH_FIELDS))
             self._started = True
             mode = "uniform"
 
-        return mutate_spec_dict(env_state["best_spec"], field, self.rng, mode=mode)
+        return mutate_spec_dict(env_state["best_spec"], field, self.rng,
+                                mode=mode, task=task)

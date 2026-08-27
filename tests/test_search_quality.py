@@ -148,18 +148,19 @@ def test_unknown_mode_and_field_raise():
 # ---------------------------------------------------------------------------
 
 def test_relevant_fields_and_actions():
-    """SPEC.md 18.2 + 19.4: tree/boost ignore optimizer/lr/batch/weight-decay/
-    activation/label-smoothing and the v0.5 mlp fields; mlp uses all 14
-    fields; the v0.5 action space is 54 (40 v0.3 + boost + 4 new fields)."""
+    """SPEC.md 18.2 + 19.4 + 25: tree/boost ignore optimizer/lr/batch/
+    weight-decay/activation/label-smoothing and the mlp-only fields; mlp uses
+    all 15 fields (v0.11: +knn_k); the v0.11 action space is 77 (54 v0.5
+    + knn_k 5 + convnet arch pairs 16 + family knn/convnet 2)."""
     assert set(relevant_fields("mlp")) == set(FIELD_NAMES)
     assert set(relevant_fields("tree")) == set(TREE_FIELDS)
     assert set(relevant_fields("boost")) == set(TREE_FIELDS)  # SPEC.md 19.2
-    assert len(ACTIONS) == 54
+    assert len(ACTIONS) == 77
     tree_actions = relevant_actions("tree")
-    assert len(tree_actions) == 19  # arch 7 + steps 5 + noise 4 + family 3
+    assert len(tree_actions) == 37  # arch 23 + steps 5 + noise 4 + family 5
     assert set(tree_actions) < set(range(len(ACTIONS)))
     assert all(ACTIONS[i][0] in TREE_FIELDS for i in tree_actions)
-    assert set(relevant_actions("mlp")) == set(range(54))
+    assert set(relevant_actions("mlp")) == set(range(77))
 
 
 def test_bandit_tree_best_stays_in_relevant_fields():

@@ -1266,3 +1266,137 @@ Text / LLM-embedding inputs stay out of scope (v1; §16).
 ### 24.7 Milestone
 
 **M13** — v0.10 input modalities: images + audio as tasks (A14).
+
+---
+
+## 25. Modality-aware model families (v0.11)
+
+**Goal.** Give the improver structurally better answers per modality: a
+non-parametric family (`knn`) available on every task, and a convolutional
+family (`convnet`) that exploits 2-D feature layout — the spatial grid for
+images and the time×mel spectrogram for audio (the audio *temporal* model).
+Both integrate with the existing loop, scoring, §19.3 ensembling, reports,
+and dashboard with no protocol changes beyond two optional task attributes
+and one optional task method.
+
+### 25.1 Scope rules
+- Zero new dependencies (NumPy only, §3).
+- Both families keep the `forward(x) -> (n, n_out)` contract, so task
+  scoring (§15/§22.1), the §19.3 ensemble, `eval`, block CI, and the
+  dashboard work with no changes.
+- Deterministic given the seed (G2); save/load is plain arrays only
+  (`allow_pickle=False`, §9).
+- The v0.10 flat-feature contracts are unchanged: audio stays 26-d
+  time-mean for mlp/tree/boost/knn; image stays 1024-d.
+
+### 25.2 `knn` — k-nearest neighbors (all tasks)
+- `models/knn.py::KNN`: "training" = memorizing the standardized train
+  split `(X, y)`; forward = k-NN over that split.
+  - softmax head: majority vote over the k nearest neighbors → class-vote
+    fractions `(n, C)`, with a deterministic ε = 1e-6 smoothing so the
+    cross-entropy training loss stays finite;
+  - mse head: mean of the k neighbors' targets `(n, 1)`.
+- Deterministic ties: `np.argsort(kind="stable")` (equal distances → lower
+  dataset index first); vote ties → lower class index (argmax convention).
+- New spec field **`knn_k` ∈ {1, 3, 5, 11, 21}** (config `KNN_K_VALUES`),
+  default **5** — the default keeps pre-v0.11 spec JSON loadable
+  (back-compat, the §17 pattern).
+- Family surface: `FAMILY_FIELDS["knn"] = (knn_k, model_family)`;
+  `architecture` is ignored for knn (`validate` accepts any valid shape).
+- Serialization: `X_train, y_train, k, n_out, head` → `best_model.npz`
+  (plain arrays only).
+
+### 25.3 `convnet` — small NumPy convnet over grid-structured features
+- **Grid protocol (task side, all optional):**
+  - class-level capability flag `grid_capable: bool` and instance-level
+    concrete layout `feature_grid: (C, H, W)` — the convnet family is
+    offered only for tasks with `grid_capable`;
+  - `grid_dataset(n_points) -> (X (n, C, H, W), y)` — the train-split
+    data in grid layout, standardized exactly like the flat split;
+  - `ImageTask`: `feature_grid = (1, grid, grid)` (default (1, 32, 32));
+    `grid_dataset` is a pure reshape of the flat 1024-d train rows — the
+    flat path stays bit-identical to v0.10;
+  - `AudioTask`: `feature_grid = (1, T, 26)` with
+    **T = min(MAX_FRAMES = 128, max frame count over the dataset)** — the
+    log-mel **spectrogram** (time × mel) is the audio modality layout and
+    this is the audio *temporal* model. `log_mel_features` refactors into
+    `log_mel_frames` (per-item (T_i, 26)) + time-mean
+    `log_mel_features` (output bit-identical to v0.10). Items shorter
+    than T are zero-padded on the time axis (deterministic; a padded frame
+    reads as silence). Grid standardization reuses the flat path's
+    per-band train mean/std — exactly consistent.
+  - A `wants_grid` model's `forward` also accepts flat
+    `(n, C·H·W)` input and reshapes it (robustness).
+- **Model** (`models/convnet.py::ConvNet`): conv 3×3 (C→c1) + activation +
+  2×2 avg-pool → conv 3×3 (c1→c2) + activation + 2×2 avg-pool → flatten →
+  FC(32) + activation → linear head `(n, n_out)`. `architecture = (c1, c2)`,
+  each in {4, 8, 16, 32} (config `CONV_FILTERS`); pooling applies only to
+  dimensions ≥ 2 (guard for very short time axes); im2col forward/backprop;
+  Glorot×`init_scale` init. FC hidden size 32 is fixed (deliberately kept
+  off the spec surface).
+- **Training**: `ConvNet` exposes the same `.layers` (list of `(w, b)`)
+  + `.loss_and_grads(x, y, label_smoothing)` interface as `MLP`, so the
+  mlp training loop (optimizer, LR schedule, gradient clipping, early
+  stopping, weight decay, label smoothing, time cap) is shared verbatim.
+  The mlp path itself stays bit-identical (the T2 pin is untouched).
+- **Scoring / ensembling**: the task's `score()` routes the input by the
+  model's declared contract — a `wants_grid` model gets grid-layout split
+  rows; flat models get flat rows (today's behavior, unchanged). The
+  §19.3 ensemble forms only from members sharing the top member's input
+  contract (mixed contracts → the ensemble degenerates to the matching
+  members; deterministic).
+- **Rejection semantics**: a convnet spec on a non-grid task is a clean
+  `SpecError` at train time — never a silent fallback.
+
+### 25.4 Loop safety: invalid-spec rejection in `step()`
+`AutoRefineEnv.step()` catches `SpecError` from spec construction +
+training: the step returns `accepted=False, reason="invalid_spec"`,
+`candidate_score=None`, spends no budget, is not added to the dedup set
+(the spec may still be valid on another task), and is logged in the
+experiment log. This closes a pre-existing crash path (an invalid spec
+from an external gym agent; convnet-on-flat-task) where the loop used to
+die.
+
+### 25.5 Improver integration (the same 4-line pattern)
+- `ModelSpec`: `MODEL_FAMILIES += ("knn", "convnet")`; new field
+  `knn_k` (default 5); validate: knn ignores `architecture`, convnet
+  requires a 2-tuple from `CONV_FILTERS`.
+- `catalog.py`: new family values; `knn_k` field values; convnet
+  architecture pairs; `FAMILY_FIELDS` for both; `relevant_families(
+  task_name)` — task-aware family offering (excludes `convnet` when the
+  task class is not `grid_capable`), consulted by the bandit for the
+  `model_family` field; search/RL policies may still propose convnet on
+  flat tasks → the §25.4 rejection is the safe, logged outcome.
+- `actions.py`: `knn_k` sampler; family-consistent `architecture`
+  coercion for convnet/knn.
+- `gym.py` / `rl_policy.py`: pick up the new values/fields through the
+  catalog (embedding follows the catalog, as since v0.4).
+- CLI `eval`: the family→loader mapping gains `knn` → `KNN.load`,
+  `convnet` → `ConvNet.load`.
+- `fit` / dashboard: unchanged — the families are explored autonomously.
+
+### 25.6 Non-goals (v0.11)
+>2 conv layers, pooling other than 2×2 avg, dropout / batch-norm, 1-D
+convnets for flat tasks, per-modality bandit priors, model merging (v1
+non-goal stands), text modality (Q8 stands), attention / seq2seq — the
+padded fixed-T grid is the audio temporal surface for v0.11.
+
+### 25.7 Acceptance (A15)
+- Protocol: KNN determinism/ties/round-trip; ConvNet determinism/
+  round-trip/gradient sanity; both save/load with `allow_pickle=False`.
+- Integration: knn branch on a csv fixture; convnet branch on image and
+  audio grid fixtures (score ≥ 80 on the bar/tone fixtures); convnet on a
+  flat task is a clean `SpecError`; `step()` rejection (no crash, budget
+  intact, env usable).
+- Contracts: the audio flat path is bit-identical to v0.10 (state_dim 26;
+  the existing §24 tests stay green); the image grid reshape equals the
+  flat features; the ensemble contract filter is deterministic.
+- End-to-end: `fit` on the bundled image sample dir still **PASS**es the
+  §22.1 gate; the improver trains a `knn` spec to ≥ 90 on the tone
+  sample; a `convnet` spec (the temporal model) reaches ≥ 80 on the tone
+  sample; full suite green; the mlp T2 pin untouched.
+
+### 25.8 Milestone
+
+**M14** — v0.11 modality-aware model families: `knn` + `convnet`
+(image grid + audio spectrogram) + invalid-spec rejection (A15).

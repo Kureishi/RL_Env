@@ -59,4 +59,8 @@ class BanditPolicy:
         fields = relevant_fields(best.get("model_family", "mlp"))
         # deterministic tie-break: highest UCB, then lexicographically largest field
         field = max(fields, key=lambda f: (self._ucb(f), f))
-        return mutate_spec_dict(env_state["best_spec"], field, self.rng, mode=self.mode)
+        # SPEC.md 25.5: the model_family field offers the task's relevant
+        # families (knn/convnet on grid-capable tasks; legacy three otherwise)
+        task = env_state.get("task")
+        return mutate_spec_dict(env_state["best_spec"], field, self.rng,
+                                mode=self.mode, task=task)

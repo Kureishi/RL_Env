@@ -255,8 +255,10 @@ Fixed-dim `Box` observation, `Discrete` action space (the mutation catalog).
   `lr_schedule` (constant/cosine/warmup_cosine), `early_stopping_patience`
   (0–50, tail-split early stopping with best-val restore), `init_scale`
   (0.5–2.0, scales the Glorot bound), `gradient_clipping` (0.0–10.0, global
-  L2-norm cap). All default to the legacy behavior, so pre-v0.5 spec JSON
-  still loads and legacy training stays bit-identical (T2/A8 pins).
+  L2-norm cap), and (v0.11) `knn_k` (1/3/5/11/21, consumed only by the
+  `knn` family; default 5 keeps pre-v0.11 spec JSON loadable). All default
+  to the legacy behavior, so pre-v0.5 spec JSON still loads and legacy
+  training stays bit-identical (T2/A8 pins).
 - **Tasks:**
   - `cartpole-v1` — balance policy by dense behavior-cloning of a reference
     controller; score = mean episode survival (max 500 steps).
@@ -274,13 +276,20 @@ Fixed-dim `Box` observation, `Discrete` action space (the mutation catalog).
     seed-derived 80/10/10 train/holdout/gen splits, train-only standardization;
     score = 100·accuracy (2–50 integer classes → softmax head) or 100·R².
     SPEC.md 22.1.
-- **Model families (v0.2, +v0.5):** `mlp` (any depth 0..3; depth 0 is a
-  *linear* model; `softmax` or `mse` head), `tree` (bagged CART ensemble,
-  depth 1..3, `train_steps//100` trees), and (v0.5) `boost` (gradient-
-  boosted residual CART, `BOOST_SHRINK=0.1`, same surface as `tree`). Boost
-  is clearly stronger than bag on regression (`sine-v1`) and a competitive
-  third answer on `parity-v1` (the ordering is config-dependent, SPEC §19.2).
-  Old spec JSON and checkpoints still load.
+- **Model families (v0.2, +v0.5, +v0.11):** `mlp` (any depth 0..3; depth 0
+  is a *linear* model; `softmax` or `mse` head), `tree` (bagged CART
+  ensemble, depth 1..3, `train_steps//100` trees), (v0.5) `boost`
+  (gradient-boosted residual CART, `BOOST_SHRINK=0.1`, same surface as
+  `tree`), (v0.11) `knn` (non-parametric: memorizes the standardized train
+  split and answers by k-NN with deterministic ties; `knn_k` is its knob;
+  every task), and (v0.11) `convnet` (small NumPy convnet over
+  grid-structured features — the 32×32 image grid and the log-mel
+  time×mel spectrogram, the audio *temporal* model; `architecture=(c1,c2)`
+  with c ∈ 4/8/16/32; grid-capable tasks only — a convnet spec on a flat
+  task is a logged `invalid_spec` rejection, never a crash, SPEC.md
+  25.3/25.4). Boost is clearly stronger than bag on regression (`sine-v1`)
+  and a competitive third answer on `parity-v1` (the ordering is
+  config-dependent, SPEC §19.2). Old spec JSON and checkpoints still load.
 - **Honesty:** scoring uses a holdout split the improver never sees as data,
   plus a `gen_score` under different seeds; `gen_gap` is logged to catch
   overfitting (acceptance A3 requires < 5%).
@@ -366,6 +375,19 @@ Fixed-dim `Box` observation, `Discrete` action space (the mutation catalog).
   directory asks for an explicit choice. The core stays PIL/soundfile-free
   (SPEC.md 24, §3); acceptance A14 runs `fit` on both sample directories
   with the §22.1 gate.
+- **Modality-aware model families (v0.11):** the improver now has
+  structurally better answers per modality — `knn` on every task and
+  `convnet` on grid tasks, where it exploits the 2-D layout of image
+  pixels and audio spectrograms that flat-feature families only see
+  flattened. Both keep the `forward -> (n, n_out)` contract, so scoring,
+  the §19.3 ensemble (mixed grid/flat members filter to the top member's
+  contract), `eval`, reports, and the dashboard work unchanged; `eval`
+  loads both new families. Invalid specs (a convnet on a flat task, an
+  external agent's malformed spec) are rejected in `step()` with
+  `reason="invalid_spec"` — no budget spent, not dedup-marked, logged —
+  closing a pre-existing crash path. The v0.10 flat features stay
+  bit-identical (the audio flat path is the same 26-d time-mean, the image
+  grid a pure reshape). SPEC.md 25, acceptance A15.
 - **Reproducibility:** one seed pins every RNG stream; two same-seed runs
   produce identical experiment sequences and best specs (acceptance A2).
 
@@ -384,7 +406,7 @@ Each run writes to `runs/<task>-seed<seed>-<timestamp>/`:
 
 ```
 src/autorefine/
-├── config.py          # ModelSpec (validated, hashed; mlp/tree/boost families), Budget
+├── config.py          # ModelSpec (validated, hashed; mlp/tree/boost/knn/convnet families), Budget
 ├── tasks/
 │   ├── base.py        # minimal Task protocol (make_dataset + score)
 │   ├── cartpole.py    # CartPoleV1: dynamics, reference controller, dataset
@@ -399,6 +421,8 @@ src/autorefine/
 ├── models/
 │   ├── mlp.py         # NumPy MLP (softmax + mse heads), pickle-free checkpoints
 │   ├── trees.py       # TreeEnsemble (bagged) + BoostingEnsemble (boosted, v0.5) CART
+│   ├── knn.py         # KNN: memorized-train-split k-NN family (v0.11)
+│   ├── convnet.py     # ConvNet: small NumPy convnet over grid features (v0.11)
 │   └── optimizers.py  # SGD / momentum / Adam
 ├── trainer.py         # deterministic training, mid-loop time cap, family dispatch
 ├── evaluator.py       # holdout + gen scoring, block-bootstrap CI (v0.4), episodes
@@ -407,7 +431,7 @@ src/autorefine/
 │   ├── policy.py      # v1 search: hill-climb + restarts + local refinement (v0.4)
 │   ├── bandit.py      # BanditPolicy: UCB over spec fields (v0.3; local/family-aware v0.4)
 │   ├── actions.py     # per-field mutation samplers (uniform + local modes, v0.4)
-│   ├── catalog.py     # discrete mutation catalog (54 actions, v0.5) + family-relevant fields
+│   ├── catalog.py     # discrete mutation catalog (77 actions, v0.11) + family-relevant fields
 │   ├── curriculum.py  # ParityCurriculum: adaptive-difficulty ladder (v0.6)
 │   └── rl_policy.py   # MetaRLPolicy: REINFORCE on the loop (masked v0.4; multi-task v0.6)
 ├── pareto.py          # score-vs-train-time frontier (efficiency memory)
@@ -465,5 +489,12 @@ All four paths are demonstrated by working, tested examples (SPEC.md 17/21.3):
   (`lr_schedule`, `early_stopping_patience`, `init_scale`,
   `gradient_clipping`) follow this exact 4-line pattern and are consumed by
   `trainer.py`; the `boost` family adds one entry to `MODEL_FAMILIES`,
-  one branch in `trainer.train`, and `FAMILY_FIELDS["boost"]` (54 actions
-  total).
+  one branch in `trainer.train`, and `FAMILY_FIELDS["boost"]`. The v0.11
+  modality-aware families are the same pattern at family scale: `knn`
+  (`models/knn.py`, a `knn_k` field, one `FAMILY_FIELDS` entry, one
+  trainer branch) and `convnet` (`models/convnet.py` + the optional grid
+  protocol on tasks — `grid_capable` / `feature_grid` / `grid_dataset()` —
+  reusing the shared neural training loop verbatim); both reach 100 on the
+  bundled tone and shape samples, and `eval`, the §19.3 ensemble, and the
+  loop's `invalid_spec` rejection (SPEC.md 25.4) pick them up with no
+  protocol change (77 catalog actions; SPEC.md 25.5, A15).

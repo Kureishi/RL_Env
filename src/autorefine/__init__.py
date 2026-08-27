@@ -18,6 +18,8 @@ from .improver.bandit import BanditPolicy
 from .improver.rl_policy import MetaRLPolicy, train_policy, train_multi_policy
 from .improver.curriculum import ParityCurriculum
 from .models.trees import TreeEnsemble, BoostingEnsemble
+from .models.knn import KNN
+from .models.convnet import ConvNet
 from .pareto import ParetoFrontier
 from .plotting import (
     ascii_pareto,
@@ -72,6 +74,8 @@ __all__ = [
     "OPTIMIZERS",
     "TreeEnsemble",
     "BoostingEnsemble",
+    "KNN",
+    "ConvNet",
     "ParetoFrontier",
     "TASKS",
     "CartPoleV1",

@@ -23,13 +23,15 @@ from typing import Tuple, Union
 
 import numpy as np
 
-from .config import ModelSpec
+from .config import ModelSpec, SpecError
+from .models.convnet import ConvNet
+from .models.knn import KNN
 from .models.mlp import MLP
 from .models.optimizers import make_optimizer
 from .models.trees import BoostingEnsemble, TreeEnsemble
 
 Dataset = Tuple[np.ndarray, np.ndarray]  # (features (n, d), targets (n,) or (n, k))
-Model = Union[MLP, TreeEnsemble, BoostingEnsemble]
+Model = Union[MLP, TreeEnsemble, BoostingEnsemble, KNN, ConvNet]
 
 # SPEC.md 19.1: warmup fraction for the "warmup_cosine" schedule, and the
 # internal validation-split fraction used for early stopping (both fixed, so
@@ -97,54 +99,19 @@ def _training_loss(model: Model, X: np.ndarray, y: np.ndarray, head: str) -> flo
     return float(-logz[np.arange(n), y].mean())
 
 
-def train(
-    dataset: Dataset,
-    spec: ModelSpec,
-    seed: int,
-    time_limit_seconds: float | None = None,
-    time_check_every: int = 256,
-    n_out: int = 2,
-    head: str = "softmax",
+def _train_neural(
+    model: Model, X: np.ndarray, y: np.ndarray, n: int, spec: ModelSpec,
+    seed: int, start: float, time_limit_seconds: float | None,
+    time_check_every: int, head: str,
 ) -> TrainResult:
-    X, y = dataset
-    n = X.shape[0]
-    start = time.perf_counter()
+    """Shared neural training loop for the mlp and convnet families.
 
-    if spec.model_family == "tree":
-        # Bagged ensemble: one blocking fit (fast on v1 dataset sizes); the
-        # time cap is checked around it rather than inside the growth loop.
-        n_trees = max(2, int(spec.train_steps) // 100)
-        max_depth = int(spec.architecture[0])
-        if time_limit_seconds is not None and time_limit_seconds <= 0.0:
-            model = TreeEnsemble(n_out=n_out, n_trees=0, max_depth=max_depth, head=head, seed=seed)
-            return TrainResult(model, 0, float("inf"), 0.0, True)
-        model = TreeEnsemble(
-            n_out=n_out, n_trees=n_trees, max_depth=max_depth, head=head, seed=seed
-        ).fit(X, y, input_noise=spec.input_noise)
-        loss = _training_loss(model, X, y, head)
-        elapsed = time.perf_counter() - start
-        return TrainResult(model, n_trees, loss, elapsed, False)
-
-    if spec.model_family == "boost":
-        # Gradient-boosted ensemble (SPEC.md 19.2): same surface as tree —
-        # architecture[0] is the per-round depth, train_steps // 100 the
-        # number of residual rounds (2..50).
-        n_trees = max(2, int(spec.train_steps) // 100)
-        max_depth = int(spec.architecture[0])
-        if time_limit_seconds is not None and time_limit_seconds <= 0.0:
-            model = BoostingEnsemble(n_out=n_out, n_trees=0, max_depth=max_depth, head=head, seed=seed)
-            return TrainResult(model, 0, float("inf"), 0.0, True)
-        model = BoostingEnsemble(
-            n_out=n_out, n_trees=n_trees, max_depth=max_depth, head=head, seed=seed
-        ).fit(X, y, input_noise=spec.input_noise)
-        loss = _training_loss(model, X, y, head)
-        elapsed = time.perf_counter() - start
-        return TrainResult(model, n_trees, loss, elapsed, False)
-
-    model = MLP(
-        X.shape[1], spec.architecture, n_out=n_out, activation=spec.activation,
-        seed=seed, head=head, init_scale=spec.init_scale,  # SPEC.md 19.1
-    )
+    SPEC.md 25.3: `ConvNet` exposes the same `.layers` (list of `(w, b)`) +
+    `.loss_and_grads(x, y, label_smoothing)` interface as `MLP`, so this loop
+    (optimizer, LR schedule, gradient clipping, early stopping, weight decay,
+    label smoothing, time cap) is shared verbatim. The mlp path stays
+    byte-identical (the T2 pin is untouched).
+    """
     opt = make_optimizer(spec.optimizer, spec.learning_rate)
     # per-layer optimizer state: [w_state, b_state]
     opt_states: list[list[dict]] = [[{}, {}] for _ in model.layers]
@@ -222,6 +189,96 @@ def train(
         train_seconds=elapsed,
         time_capped=time_capped,
     )
+
+
+def train(
+    dataset: Dataset,
+    spec: ModelSpec,
+    seed: int,
+    time_limit_seconds: float | None = None,
+    time_check_every: int = 256,
+    n_out: int = 2,
+    head: str = "softmax",
+) -> TrainResult:
+    X, y = dataset
+    n = X.shape[0]
+    start = time.perf_counter()
+
+    if spec.model_family == "tree":
+        # Bagged ensemble: one blocking fit (fast on v1 dataset sizes); the
+        # time cap is checked around it rather than inside the growth loop.
+        n_trees = max(2, int(spec.train_steps) // 100)
+        max_depth = int(spec.architecture[0])
+        if time_limit_seconds is not None and time_limit_seconds <= 0.0:
+            model = TreeEnsemble(n_out=n_out, n_trees=0, max_depth=max_depth, head=head, seed=seed)
+            return TrainResult(model, 0, float("inf"), 0.0, True)
+        model = TreeEnsemble(
+            n_out=n_out, n_trees=n_trees, max_depth=max_depth, head=head, seed=seed
+        ).fit(X, y, input_noise=spec.input_noise)
+        loss = _training_loss(model, X, y, head)
+        elapsed = time.perf_counter() - start
+        return TrainResult(model, n_trees, loss, elapsed, False)
+
+    if spec.model_family == "boost":
+        # Gradient-boosted ensemble (SPEC.md 19.2): same surface as tree —
+        # architecture[0] is the per-round depth, train_steps // 100 the
+        # number of residual rounds (2..50).
+        n_trees = max(2, int(spec.train_steps) // 100)
+        max_depth = int(spec.architecture[0])
+        if time_limit_seconds is not None and time_limit_seconds <= 0.0:
+            model = BoostingEnsemble(n_out=n_out, n_trees=0, max_depth=max_depth, head=head, seed=seed)
+            return TrainResult(model, 0, float("inf"), 0.0, True)
+        model = BoostingEnsemble(
+            n_out=n_out, n_trees=n_trees, max_depth=max_depth, head=head, seed=seed
+        ).fit(X, y, input_noise=spec.input_noise)
+        loss = _training_loss(model, X, y, head)
+        elapsed = time.perf_counter() - start
+        return TrainResult(model, n_trees, loss, elapsed, False)
+
+    if spec.model_family == "knn":
+        # Non-parametric family (SPEC.md 25.2): "training" = memorizing the
+        # standardized train split; one blocking step (steps_run == 1). The
+        # time cap is checked around it, like the tree/boost fits.
+        if time_limit_seconds is not None and time_limit_seconds <= 0.0:
+            model = KNN(k=int(spec.knn_k), n_out=n_out, head=head)
+            return TrainResult(model, 0, float("inf"), 0.0, True)
+        model = KNN(k=int(spec.knn_k), n_out=n_out, head=head).fit(X, y)
+        # A k-NN query is O(n * N); on episode tasks the train split is large
+        # (tens of thousands of rows), so the reported final loss uses the
+        # deterministic first 256 rows (exact when n <= 256, e.g. csv/image/
+        # audio fixtures). The memorized model itself is unchanged.
+        m = min(n, 256)
+        loss = _training_loss(model, X[:m], y[:m], head)
+        elapsed = time.perf_counter() - start
+        return TrainResult(model, 1, loss, elapsed, False)
+
+    if spec.model_family == "convnet":
+        # Grid features (SPEC.md 25.3): a convnet spec on a flat task is a
+        # clean SpecError at train time — never a silent fallback.
+        if X.ndim != 4:
+            raise SpecError(
+                "convnet family needs grid data (n, C, H, W); got "
+                f"X.shape={X.shape} — offer convnet only for grid_capable "
+                "tasks (SPEC.md 25.3)")
+        if time_limit_seconds is not None and time_limit_seconds <= 0.0:
+            model = ConvNet(X.shape[1:], int(spec.architecture[0]),
+                            int(spec.architecture[1]), n_out, spec.activation,
+                            seed, head, spec.init_scale)
+            return TrainResult(model, 0, float("inf"), 0.0, True)
+        model = ConvNet(
+            X.shape[1:], int(spec.architecture[0]), int(spec.architecture[1]),
+            n_out, spec.activation, seed, head, spec.init_scale,
+        )  # SPEC.md 25.3 (audio temporal model + image spatial model)
+        return _train_neural(model, X, y, n, spec, seed, start,
+                             time_limit_seconds, time_check_every, head)
+
+    # mlp (the default family): the shared neural training loop (SPEC.md 19.1)
+    model = MLP(
+        X.shape[1], spec.architecture, n_out=n_out, activation=spec.activation,
+        seed=seed, head=head, init_scale=spec.init_scale,  # SPEC.md 19.1
+    )
+    return _train_neural(model, X, y, n, spec, seed, start,
+                         time_limit_seconds, time_check_every, head)
 
 
 def train_from_task(

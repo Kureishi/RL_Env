@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from ..budget import BudgetManager
-from ..config import DEFAULT_SPEC, Budget, ModelSpec
+from ..config import DEFAULT_SPEC, Budget, ModelSpec, SpecError
 from ..evaluator import evaluate_full, score_with_ci
 from ..memory import RunMemory
 from ..pareto import ParetoFrontier
@@ -46,12 +46,18 @@ MAX_CONSECUTIVE_DUPLICATES = 32
 class _EnsembleModel:
     """SPEC.md 19.3: average of member model outputs (logits for softmax
     tasks, values for mse). Same `forward(x) -> (n, k)` contract, so any
-    task can score it."""
+    task can score it. SPEC.md 25.3: members must share one input contract
+    (grid vs flat) — the ensemble takes the top member's contract, so the
+    averaged forward never mixes (n, d) and (n, C, H, W) inputs."""
 
     def __init__(self, members: list) -> None:
         if not members:
             raise ValueError("ensemble needs at least one member")
-        self.members = list(members)
+        top_grid = bool(getattr(members[0], "wants_grid", False))
+        kept = [m for m in members
+                if bool(getattr(m, "wants_grid", False)) == top_grid]
+        self.members = kept if kept else list(members)  # >= 1 (top matches)
+        self.wants_grid = top_grid  # routed by the task's score() (SPEC.md 25.3)
 
     def forward(self, x):
         out = self.members[0].forward(x)
@@ -249,7 +255,13 @@ class AutoRefineEnv:
         if self.done:
             raise RuntimeError(f"environment is done ({self.done_reason}); call reset()")
 
-        spec = action if isinstance(action, ModelSpec) else ModelSpec.from_dict(action)
+        # SPEC.md 25.4: an invalid spec from an external proposer (gym agent,
+        # hand-written dict) is a logged rejection, never a crash
+        try:
+            spec = action if isinstance(action, ModelSpec) else ModelSpec.from_dict(action)
+        except SpecError as exc:
+            return self._reject_invalid(
+                action if isinstance(action, dict) else dict(action), [], str(exc))
         fp = spec.fingerprint()
 
         # R3: duplicates are rejected without spending budget; reported as a
@@ -291,11 +303,17 @@ class AutoRefineEnv:
         prev_best_std = self.best_std
         mutation_fields = list(spec.diff_fields(self.best_spec))
 
-        result = train(
-            self.dataset, spec, self.seed,
-            time_limit_seconds=self.bm.train_time_limit(),
-            n_out=self.task.n_outputs, head=self.task.head,
-        )
+        # SPEC.md 25.3: the convnet family trains on the grid dataset; a
+        # convnet spec on a flat task raises SpecError here -> SPEC.md 25.4
+        try:
+            result = train(
+                self._dataset_for(spec), spec, self.seed,
+                time_limit_seconds=self.bm.train_time_limit(),
+                n_out=self.task.n_outputs, head=self.task.head,
+            )
+        except SpecError as exc:
+            return self._reject_invalid(
+                spec.to_dict(), list(spec.diff_fields(self.best_spec)), str(exc))
         score, std, gen, gen_gap = self._evaluate(result.model)
         eff = self._eff(score, result.train_seconds, gen_gap)
 
@@ -407,6 +425,51 @@ class AutoRefineEnv:
         }
         self.curriculum_events.append(event)
         self.memory.log({"kind": "curriculum", **event})
+
+    # --- datasets (SPEC.md 25.3) ---------------------------------------------
+    def _dataset_for(self, spec: ModelSpec) -> Any:
+        """The train-split dataset a spec family trains on.
+
+        convnet trains on the grid view of a grid_capable task's dataset
+        (SPEC.md 25.3); every other family trains on the flat view
+        (unchanged). convnet on a non-grid task is a clean SpecError
+        (SPEC.md 25.3/25.4) — never a silent fallback."""
+        if spec.model_family == "convnet":
+            if not getattr(self.task, "grid_capable", False):
+                raise SpecError(
+                    f"convnet family needs a grid_capable task; task "
+                    f"{self.task_name!r} is flat (SPEC.md 25.3/25.4)")
+            grid_dataset = getattr(self.task, "grid_dataset", None)
+            if grid_dataset is None:
+                raise SpecError(
+                    f"task {self.task_name!r} is grid_capable but exposes no "
+                    "grid_dataset() (SPEC.md 25.3)")
+            return grid_dataset(self.dataset_size)
+        return self.dataset
+
+    # --- invalid-spec rejection (SPEC.md 25.4) --------------------------------
+    def _reject_invalid(self, spec_dict: dict, fields: list[str],
+                        error: str) -> tuple[dict, float, bool, dict]:
+        """SPEC.md 25.4: an invalid spec (e.g. convnet on a flat task, or a
+        spec an external gym agent proposed) is rejected without crashing:
+        no budget is spent, it is not added to the dedup set (it may still
+        be valid on another task), and it is logged in the experiment log."""
+        self.last = {"accepted": False, "fields": list(fields)}
+        if self.memory is not None:
+            self.memory.log({
+                "kind": "invalid_spec",
+                "spec": spec_dict,
+                "error": str(error),
+                "accepted": False,
+                "reason": "invalid_spec",
+            })
+        done, _reason = self._check_done()
+        if done:
+            self._finish(_reason)
+        return (
+            self._state(), 0.0, done,
+            {"accepted": False, "reason": "invalid_spec", "candidate_score": None},
+        )
 
     # --- scoring (SPEC.md 18.3/18.4) -----------------------------------------
     def _evaluate(self, model) -> tuple[float, float, float, float]:

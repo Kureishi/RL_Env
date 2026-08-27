@@ -18,7 +18,14 @@ BATCH_SIZES = (16, 32, 64, 128)
 # depth-0 architecture is a *linear model*. "tree" is a bagged decision-tree
 # ensemble; "boost" is a gradient-boosted (residual) decision-tree ensemble
 # (SPEC.md 19.2 — a genuinely stronger answer than bagging on parity/sine).
-MODEL_FAMILIES = ("mlp", "tree", "boost")
+MODEL_FAMILIES = ("mlp", "tree", "boost", "knn", "convnet")
+
+# --- SPEC.md 25: modality-aware families (v0.11) ---------------------------
+# knn: allowed k values (SPEC.md 25.2); default 5 keeps pre-v0.11 spec JSON
+# loadable (the §17 back-compat pattern)
+KNN_K_VALUES = (1, 3, 5, 11, 21)
+# convnet: per-layer filter counts (SPEC.md 25.3); architecture = (c1, c2)
+CONV_FILTERS = (4, 8, 16, 32)
 
 LEARNING_RATE_RANGE = (1e-4, 1e-1)
 WEIGHT_DECAY_RANGE = (0.0, 1e-2)
@@ -82,6 +89,9 @@ class ModelSpec:
     init_scale: float = 1.0
     # global L2-norm cap on per-step gradients (0.0 = no clipping)
     gradient_clipping: float = 0.0
+    # --- SPEC.md 25.2: knn family's k (default 5 keeps pre-v0.11 spec JSON
+    # loadable); validated for every family, consumed only by knn.
+    knn_k: int = 5
 
     def __post_init__(self) -> None:
         # normalize list -> tuple even though the class is frozen
@@ -98,6 +108,16 @@ class ModelSpec:
                      f"{self.model_family} family needs architecture=(depth,) of length 1")
             _require(arch[0] in (1, 2, 3),
                      f"{self.model_family} depth {arch[0]} outside 1..3")
+        elif self.model_family == "convnet":
+            # convnet: architecture = (c1, c2), each a conv filter count (25.3)
+            _require(len(arch) == 2,
+                     "convnet family needs architecture=(c1, c2) of length 2")
+            for c in arch:
+                _require(int(c) in CONV_FILTERS,
+                         f"convnet filter size {c} not in {CONV_FILTERS}")
+        elif self.model_family == "knn":
+            # knn: architecture is ignored (SPEC.md 25.2) — accept any shape.
+            pass
         else:
             # mlp: depth 0..3; depth 0 is a linear model (SPEC.md 15)
             lo, hi = DEPTH_RANGE
@@ -140,6 +160,9 @@ class ModelSpec:
         lo, hi = GRADIENT_CLIP_RANGE
         _require(lo <= self.gradient_clipping <= hi,
                  f"gradient_clipping {self.gradient_clipping} outside {lo}..{hi}")
+        # SPEC.md 25.2: knn_k is validated for every family (consumed only by knn)
+        _require(int(self.knn_k) in KNN_K_VALUES,
+                 f"knn_k {self.knn_k} not in {KNN_K_VALUES}")
 
     # --- serialization -----------------------------------------------------
     def to_dict(self) -> dict[str, Any]:
@@ -158,6 +181,7 @@ class ModelSpec:
             "early_stopping_patience": self.early_stopping_patience,
             "init_scale": self.init_scale,
             "gradient_clipping": self.gradient_clipping,
+            "knn_k": int(self.knn_k),  # SPEC.md 25.2
         }
 
     @classmethod
@@ -180,6 +204,8 @@ class ModelSpec:
             early_stopping_patience=int(d.get("early_stopping_patience", 0)),
             init_scale=float(d.get("init_scale", 1.0)),
             gradient_clipping=float(d.get("gradient_clipping", 0.0)),
+            # default keeps pre-v0.11 spec JSON loadable (SPEC.md 25.2, back-compat)
+            knn_k=int(d.get("knn_k", 5)),
         )
 
     def fingerprint(self) -> str:
