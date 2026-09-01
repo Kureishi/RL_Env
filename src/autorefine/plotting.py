@@ -18,6 +18,7 @@ _LINE = "#1a66c2"
 _BASELINE = "#c2410c"
 _ACCEPTED = "#15803d"
 _REJECTED = "#6b7280"
+_SCORED_REJ = "#b91c1c"  # timeline: rejected with a score (SPEC.md 26.3)
 
 
 def _finite(v) -> bool:
@@ -266,6 +267,84 @@ def html_report(summary: dict, entries) -> str:
       "assets (SPEC.md 22.2).</p>")
     a("</body></html>")
     return "\n".join(L) + "\n"
+
+
+def _timeline_cells(rows) -> list[tuple[int, str, bool, bool]]:
+    """(step, field, accepted, scored) cells from update rows (SPEC.md 26.3).
+
+    `rows` are the runner's update dicts (SPEC.md 23.1): `mutation` fields,
+    `accepted` outcome, `candidate_score` present iff the step was scored.
+    """
+    cells = []
+    for i, r in enumerate(rows or [], start=1):
+        scored = _finite(r.get("candidate_score"))
+        accepted = bool(r.get("accepted"))
+        for f in (r.get("mutation") or []):
+            if isinstance(f, str):
+                cells.append((i, f, accepted, scored))
+    return cells
+
+
+def svg_mutation_timeline(rows, width: int = 640, row_h: int = 18) -> str:
+    """Mutation timeline: field x update-index strip (SPEC.md 26.3).
+
+    One cell per (step, field) mutation — green accepted, red
+    scored-rejected, grey unscored (duplicate / invalid-spec). Pure,
+    deterministic in `rows` (G2), valid XML like the other §21.2 charts.
+    """
+    cells = _timeline_cells(rows)
+    if not cells:
+        height = 120
+        parts = _svg_header(width, height, "mutation timeline (empty)")
+        parts.append(
+            f'<text x="{width // 2}" y="{height // 2}" text-anchor="middle" '
+            f'font-size="13" fill="{_AXIS}">no mutations in the update stream</text>')
+        parts.append("</svg>")
+        return "\n".join(parts)
+    fields = sorted({f for _, f, _, _ in cells})
+    n_steps = max(i for i, _, _, _ in cells)
+    row = {f: j for j, f in enumerate(fields)}
+    L = 130  # left label gutter
+    T = 30
+    col_w = (width - L - 16) / n_steps
+    bottom = T + len(fields) * row_h
+    height = bottom + 46  # step ticks + legend
+    parts = _svg_header(width, height, "mutation timeline (field x step)")
+    parts.append(f'<text x="8" y="{T - 10}" font-size="11" '
+                 f'fill="{_AXIS}">field</text>')
+    for f in fields:
+        y = T + row[f] * row_h
+        parts.append(f'<text x="{L - 8}" y="{y + row_h - 5}" text-anchor="end" '
+                     f'font-size="11" fill="{_AXIS}">{html.escape(f)}</text>')
+    for i, f, accepted, scored in cells:
+        if accepted:
+            fill, label = _ACCEPTED, "accepted"
+        elif scored:
+            fill, label = _SCORED_REJ, "scored-rejected"
+        else:
+            fill, label = _REJECTED, "unscored"
+        x = L + (i - 1) * col_w
+        y = T + row[f] * row_h
+        parts.append(
+            f'<rect x="{x:.1f}" y="{y + 1:.1f}" width="{max(1.0, col_w - 1):.1f}" '
+            f'height="{row_h - 2:.1f}" fill="{fill}">'
+            f'<title>step {i}: {html.escape(f)} ({label})</title></rect>')
+    for i in {1, n_steps // 2 + 1, n_steps}:  # 1, mid, n step ticks
+        x = L + (i - 1) * col_w + col_w / 2
+        parts.append(f'<text x="{x:.1f}" y="{bottom + 16}" text-anchor="middle" '
+                     f'font-size="11" fill="{_AXIS}">{i}</text>')
+    ly = bottom + 34
+    lx = float(L)
+    for fill, label in ((_ACCEPTED, "accepted"),
+                        (_SCORED_REJ, "scored-rejected"),
+                        (_REJECTED, "unscored")):
+        parts.append(f'<rect x="{lx:.1f}" y="{ly - 9:.1f}" width="10" height="10" '
+                     f'fill="{fill}"/>')
+        parts.append(f'<text x="{lx + 14:.1f}" y="{ly}" font-size="11" '
+                     f'fill="{_AXIS}">{label}</text>')
+        lx += 14 + 7 * len(label) + 20
+    parts.append("</svg>")
+    return "\n".join(parts)
 
 
 def svg_pareto(points, width: int = 640, height: int = 360) -> str:

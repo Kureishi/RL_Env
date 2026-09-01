@@ -1400,3 +1400,88 @@ padded fixed-T grid is the audio temporal surface for v0.11.
 
 **M14** — v0.11 modality-aware model families: `knn` + `convnet`
 (image grid + audio spectrogram) + invalid-spec rejection (A15).
+
+## 26. Dashboard decision views (v0.12)
+
+The v0.9 dashboard shows *what* happened (scores, budget, verdict). This
+section adds *why the improver did what it did* — four views derived
+entirely from data the loop already records (the runner's update stream,
+which extends `experiments.jsonl` with the free duplicate rejections).
+**Zero new logging, zero new dependencies**; the core stays streamlit-free
+and NumPy-only (SPEC.md 3, §23.1).
+
+### 26.1 D1 — per-field win-rate (both policies)
+`field_stats(updates)` (dashboard.py, pure): credit each update's
+`mutation` fields with that update's `accepted` outcome — exactly the
+(field, accepted) credit pairs the bandit consumes in SPEC.md 17. Output
+`{field: {trials, wins, win_rate}}`, keys lexicographically sorted;
+`win_rate = wins / trials`. The app renders it as a live bar chart
+(streamlit-native `st.bar_chart`, a streamlit dependency — app-only).
+
+### 26.2 D2 — per-step spec diff
+Each step's mutated fields as `field: old → new`: `old` is the value in
+the best spec *before* the step, `new` the value in the proposed spec;
+a value absent from that spec is `None` (rendered as "—"). Carried as
+the update's `spec_diff` list of `{field, old, new}`; shown in the
+per-step note, as a `diff` column of the experiment table, and in the
+restored view (SPEC.md 23.2).
+
+### 26.3 D3 — mutation timeline (SVG)
+`svg_mutation_timeline(rows)` (plotting.py, pure, valid XML like the
+§21.2 charts): rows = the union of mutated fields (lexicographic),
+columns = update index 1..n; a cell is drawn when that field was mutated
+in that update — green accepted, red scored-rejected, grey unscored
+(duplicate / invalid-spec rejection). Makes the cold-start burst (every
+field once) and the shift to exploitation visible at a glance.
+
+### 26.4 D4 — bandit UCB trace (bandit policy only)
+`ucb_trace(updates, alpha)` (dashboard.py, pure): replays the bandit's
+credit rule (SPEC.md 17) over the update stream. After crediting update
+i, every field credited so far gets
+`wins[f]/t[f] + sqrt(alpha * ln(max(1, total)) / t[f])` (the bandit's
+exact UCB, SPEC.md 17); fields not yet credited are `None` (rendered as
+a chart gap). `alpha` is the runner's bandit alpha (default 1.0).
+The update's `ucb` key holds the per-field values after that update;
+the **search** policy sets `ucb` to `None` (UCB is a bandit concept)
+and the app renders the trace only for bandit runs.
+
+### 26.5 App rendering
+Live section (after the experiment table / best-score chart): D1 bar
+chart, D3 timeline SVG, D4 UCB line chart (bandit only); D2 in the
+per-step note and the table's `diff` column. Result section: final D1
+bars, D3 SVG, and the full D4 trace; the restored view re-renders all
+four from the stored updates — no new run state. All four views are pure
+functions of the update stream (G2): same-seed runs produce identical
+views, and every update stays JSON-safe (SPEC.md 23.1).
+
+### 26.6 Non-goals (v0.12)
+No new rows in `experiments.jsonl` (the views are derived); no
+RL-policy views (the app stays bandit/search, SPEC.md 23.1); no
+multi-seed variance plots; no matplotlib (NumPy core; hand-rolled SVG
+or streamlit-native charts only).
+
+### 26.7 Acceptance (A16)
+- The view functions are pure and deterministic: same update stream →
+  bit-identical output; every update still JSON-safe.
+- `field_stats`: hand-computed trials/wins/win_rate on a fixed stream;
+  sorted keys; empty stream → `{}`.
+- `spec_diff`: correct old/new per field, absent value → `None`, empty
+  mutation → `[]`.
+- `ucb_trace`: uncredited fields `None`; credited values match the
+  SPEC.md 17 formula by hand computation (alpha = 1.0).
+- Timeline SVG: valid XML (starts `<svg`), one cell per (step, field)
+  mutation, one fill per outcome class, empty case is header text.
+- Runner: every update carries `field_stats` / `spec_diff` / `ucb`
+  (bandit: per-field value series; search: `None`); `finish()` carries
+  final `field_stats`, `ucb_trace`, `timeline_svg`; the existing
+  same-seed determinism test (full update dicts, SPEC.md 23.1) stays
+  green.
+- App (streamlit optional, §3/§21.1 pattern): the end-to-end run renders
+  all four views for bandit and **no** UCB chart for search; A13–A15
+  stay green; `import autorefine` never pulls in streamlit.
+- Full suite green; the T2 and §18.7 pins untouched.
+
+### 26.8 Milestone
+
+**M15** — v0.12 dashboard decision views: field win-rate, spec diff,
+mutation timeline, bandit UCB trace (A16).

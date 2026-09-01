@@ -15,7 +15,8 @@ from pathlib import Path
 import streamlit as st
 
 from autorefine import __version__
-from autorefine.dashboard import DashboardRunner
+from autorefine.dashboard import DashboardRunner, ucb_trace
+from autorefine.plotting import svg_mutation_timeline
 from autorefine.tasks import CsvTask
 
 
@@ -28,6 +29,16 @@ def _launcher_runs_dir() -> str:
         if t.startswith("--runs-dir="):
             return t.split("=", 1)[1]
     return "runs"
+
+
+def _spec_v(v) -> str:
+    """Spec value to chip text (SPEC.md 26.2): None renders as an em dash,
+    list values are joined (e.g. hidden-layer sizes)."""
+    if v is None:
+        return "—"
+    if isinstance(v, (list, tuple)):
+        return ",".join(str(x) for x in v)
+    return str(v)
 
 
 def _resolve_csv(upload, path_str: str) -> str | None:
@@ -137,12 +148,19 @@ def _run(csv_path: str, label: str, target: float, policy: str, seed: int,
         "#": 0, "accepted": "—",
         "candidate": f"{info['baseline_score']:.2f}", "gen gap": "—",
         "mutation": "baseline", "best": f"{info['baseline_score']:.2f}",
+        "diff": "—",
     }]
     best_series = [round(info["baseline_score"], 2)]
     table = st.empty()
     chart = st.empty()
     bar = st.progress(0.0, text="starting…")
     note = st.empty()
+    # decision-view placeholders, live (SPEC.md 26.5): D1 win-rate bars,
+    # D3 mutation timeline, D4 UCB trace (bandit policy only)
+    vbars = st.empty()
+    vtimeline = st.empty()
+    vucb = st.empty() if policy == "bandit" else None
+    stream: list[dict] = []          # updates so far: the views' only input
 
     while not runner.done:  # runner state machine (SPEC.md 23.1)
         u = runner.next()
@@ -155,6 +173,10 @@ def _run(csv_path: str, label: str, target: float, policy: str, seed: int,
                         if isinstance(u["gen_gap"], (int, float)) else "—"),
             "mutation": ", ".join(u["mutation"]) or (u["reason"] or "—"),
             "best": f"{u['best_score']:.2f}",
+            "diff": (" · ".join(
+                f"{d['field']}: {_spec_v(d['old'])} → {_spec_v(d['new'])}"
+                for d in u.get("spec_diff") or []
+            ) or (u["reason"] or "—")),
         })
         best_series.append(round(u["best_score"], 2))
         # the bar tracks the *budget*, not the stream-row count: spent =
@@ -169,15 +191,35 @@ def _run(csv_path: str, label: str, target: float, policy: str, seed: int,
             + ("  ·  dup step (free, R3)" if is_dup else "")))
         table.dataframe(pd.DataFrame(rows), width="stretch")
         chart.line_chart(pd.DataFrame({"best score": best_series}))
+        # decision views, live (SPEC.md 26.5) — pure over the stream so far
+        stream.append(u)
+        if u.get("field_stats"):  # D1: per-field win-rate bars (SPEC.md 26.1)
+            vbars.bar_chart(
+                pd.DataFrame.from_dict(u["field_stats"], orient="index")
+                .sort_index())
+        vtimeline.markdown(  # D3: mutation timeline (SPEC.md 26.3)
+            svg_mutation_timeline(stream), unsafe_allow_html=True)
+        if vucb is not None and u.get("ucb"):  # D4: bandit UCB (SPEC.md 26.4)
+            # the same pure function as the result view: aligned per-field
+            # series with None gaps for the steps before a field was credited
+            trace = ucb_trace(stream, alpha=runner.policy.alpha)
+            vucb.line_chart(
+                pd.DataFrame({f: trace[f] for f in sorted(trace)}
+                             ).astype("float64"))
         # per-step caption, including the final step (SPEC.md 23.2) — rendered
-        # before the break so the last row is not skipped
+        # before the break so the last row is not skipped; D2 spec-diff chips
+        # (SPEC.md 26.2) replace the plain field list
         score_txt = (f"score {u['candidate_score']:.2f}"
                      if isinstance(u["candidate_score"], (int, float)) else "duplicate")
         kind = ("dup step (free, R3)" if is_dup
                 else f"experiment {spent} of {budget}")
+        diff_txt = " · ".join(
+            f"{d['field']}: {_spec_v(d['old'])} → {_spec_v(d['new'])}"
+            for d in u.get("spec_diff") or []
+        ) or (", ".join(u["mutation"]) or "-")
         note.caption(
             f"{kind}: {'accepted +' if u['accepted'] else 'rejected '} "
-            f"{score_txt} · mutation: {', '.join(u['mutation']) or '-'}"
+            f"{score_txt} · {diff_txt}"
         )
         if u["done"]:
             break
@@ -222,6 +264,20 @@ def _render_result(res: dict) -> None:
     st.subheader("Plots")
     st.markdown(res["svg_score"], unsafe_allow_html=True)
     st.markdown(res["svg_pareto"], unsafe_allow_html=True)
+
+    # decision views, final state (SPEC.md 26.5) — pure over the stored
+    # update stream, so the restored view re-renders them with no new state
+    st.subheader("Decision views")
+    import pandas as pd  # a streamlit dependency, app-only
+    fs = res.get("field_stats")
+    if fs:  # D1: per-field win-rate bars (SPEC.md 26.1)
+        st.bar_chart(pd.DataFrame.from_dict(fs, orient="index").sort_index())
+    if res.get("timeline_svg"):  # D3: mutation timeline (SPEC.md 26.3)
+        st.markdown(res["timeline_svg"], unsafe_allow_html=True)
+    ucb = res.get("ucb_trace")
+    if ucb:  # D4: bandit UCB trace (SPEC.md 26.4); None for the search policy
+        st.line_chart(pd.DataFrame({f: ucb[f] for f in sorted(ucb)})
+                      .astype("float64"))
 
     st.subheader("Artifacts")
     c1, c2, c3, c4 = st.columns(4)

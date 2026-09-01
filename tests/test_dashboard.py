@@ -1,4 +1,5 @@
-"""v0.9 visual dashboard: core runner + optional app + launcher (SPEC.md 23, A13).
+"""v0.9 visual dashboard: core runner + optional app + launcher (SPEC.md 23, A13),
+plus the v0.12 decision views (SPEC.md 26, A16).
 
 The runner is streamlit-free and carries the run semantics (SPEC.md 23.1);
 the app tests follow the §3/§21.1 optional-dependency pattern (skipped when
@@ -15,6 +16,8 @@ import numpy as np
 import pytest
 
 from autorefine import DashboardRunner
+from autorefine.dashboard import field_stats, spec_diff, ucb_trace
+from autorefine.plotting import svg_mutation_timeline
 
 
 def _write_csv(tmp_path: Path, name: str = "data.csv") -> Path:
@@ -154,6 +157,130 @@ def test_runner_rejects_rl_policy_with_cli_pointer(tmp_path):
         _runner(tmp_path, policy="rl")
 
 
+# --- decision views (SPEC.md 26, A16) ----------------------------------------
+
+def test_field_stats_hand_computed():
+    # D1 (SPEC.md 26.1): credit = the (mutation fields, accepted) pairs
+    stream = [
+        {"mutation": ["a"], "accepted": True},
+        {"mutation": ["a", "b"], "accepted": False},
+        {"mutation": ["b"], "accepted": True},
+        {"mutation": [], "accepted": False},  # dup step: credits nothing
+    ]
+    stats = field_stats(stream)
+    assert stats == {
+        "a": {"trials": 2, "wins": 1, "win_rate": 0.5},
+        "b": {"trials": 2, "wins": 1, "win_rate": 0.5},
+    }
+    assert list(stats) == ["a", "b"]  # lexicographically sorted keys
+    assert field_stats([]) == {}
+
+
+def test_spec_diff_old_new_and_absent():
+    # D2 (SPEC.md 26.2): old = best spec before the step, new = the proposal
+    prev = {"lr": 0.1, "hidden": [64]}
+    action = {"lr": 0.05, "hidden": [32]}
+    assert spec_diff(prev, action, ["lr", "hidden", "dropout"]) == [
+        {"field": "lr", "old": 0.1, "new": 0.05},
+        {"field": "hidden", "old": [64], "new": [32]},
+        {"field": "dropout", "old": None, "new": None},  # absent → None
+    ]
+    assert spec_diff(prev, action, []) == []
+    assert spec_diff(None, None, ["lr"]) == [
+        {"field": "lr", "old": None, "new": None}]
+
+
+def test_ucb_trace_hand_computed():
+    # D4 (SPEC.md 26.4): the bandit's UCB (SPEC.md 17) after each credit
+    import math
+    stream = [
+        {"mutation": ["a"], "accepted": True},
+        {"mutation": ["a", "b"], "accepted": False},
+    ]
+    tr = ucb_trace(stream)  # alpha = 1.0
+    assert tr["a"][0] == 1.0  # 1/1 + sqrt(ln 1 / 1)
+    assert tr["b"][0] is None  # not credited yet → chart gap
+    assert tr["a"][1] == pytest.approx(0.5 + math.sqrt(math.log(3) / 2))
+    assert tr["b"][1] == pytest.approx(math.sqrt(math.log(3)))
+    assert ucb_trace([]) == {}
+
+
+def test_timeline_svg_cells_and_outcomes():
+    # D3 (SPEC.md 26.3): one cell per (step, field) mutation, fill per outcome
+    rows = [
+        {"mutation": ["a", "b"], "accepted": True, "candidate_score": 70.0},
+        {"mutation": ["a"], "accepted": False, "candidate_score": 60.0},
+        {"mutation": ["b"], "accepted": False, "candidate_score": None},
+    ]
+    svg = svg_mutation_timeline(rows)
+    assert svg.startswith("<svg")
+    assert svg.count("<title>") == 4  # 2 + 1 + 1 cells (one tooltip each)
+    assert ">a</text>" in svg and ">b</text>" in svg  # the field rows
+    assert "accepted" in svg and "scored-rejected" in svg and "unscored" in svg
+    empty = svg_mutation_timeline([])
+    assert empty.startswith("<svg")
+    assert "no mutations" in empty
+    assert empty.count("<title>") == 0
+
+
+def test_runner_updates_carry_decision_views(tmp_path):
+    # A16: every update carries the views; the bandit ucb series grows per step
+    r = _runner(tmp_path)  # bandit, 4 experiments
+    r.start()
+    res = r.run_all()
+    updates = res["updates"]
+    for i, u in enumerate(updates, start=1):
+        json.dumps(u, sort_keys=True)  # still JSON-safe (SPEC.md 23.1)
+        assert isinstance(u["field_stats"], dict)
+        assert isinstance(u["spec_diff"], list)
+        assert isinstance(u["ucb"], dict)  # bandit: per-field values
+        # the per-field values *after that update* (SPEC.md 26.4)
+        assert u["ucb"] == {f: s[-1] for f, s in ucb_trace(updates[:i]).items()}
+    last = updates[-1]
+    assert last["field_stats"] == field_stats(updates)
+    assert last["ucb"] == {f: s[-1] for f, s in ucb_trace(updates).items()}
+    assert res["field_stats"] == field_stats(updates)
+    # the result's ucb_trace carries the full aligned per-field series
+    assert res["ucb_trace"] == ucb_trace(updates)  # alpha = 1.0 (the default)
+    assert all(len(s) == len(updates) for s in res["ucb_trace"].values())
+    # D2 trajectory: the last accepted step's new values are the final best
+    # spec (any later steps were rejected and could not change it)
+    acc = [u for u in updates if u["accepted"]]
+    if acc:
+        for d in acc[-1]["spec_diff"]:
+            assert res["best_spec"][d["field"]] == d["new"]
+    assert res["timeline_svg"].startswith("<svg")
+
+
+def test_runner_search_policy_has_no_ucb(tmp_path):
+    # A16: UCB is a bandit concept — search gets None, the other views still
+    # render (SPEC.md 26.4)
+    r = _runner(tmp_path, policy="search")
+    r.start()
+    res = r.run_all()
+    for u in res["updates"]:
+        json.dumps(u, sort_keys=True)
+        assert u["ucb"] is None
+        assert isinstance(u["field_stats"], dict)
+        assert isinstance(u["spec_diff"], list)
+    assert res["ucb_trace"] is None
+    assert isinstance(res["field_stats"], dict)
+    assert res["timeline_svg"].startswith("<svg")
+
+
+def test_decision_views_deterministic(tmp_path):
+    # A16: same-seed runs → bit-identical views (G2)
+    views = []
+    for i in range(2):
+        r = _runner(tmp_path, runs_dir=str(tmp_path / f"dv{i}"),
+                    search_quality="legacy")
+        r.start()
+        res = r.run_all()
+        views.append((res["field_stats"], res["ucb_trace"],
+                      res["timeline_svg"]))
+    assert views[0] == views[1]
+
+
 # --- app (streamlit optional — §3/§21.1 pattern) -----------------------------
 
 APP = Path(__file__).resolve().parents[1] / "src" / "autorefine" / "dashboard_app.py"
@@ -209,6 +336,68 @@ def test_app_renders_and_runs_end_to_end(tmp_path):
     verdicts3 = [e.value for e in at.success] + [e.value for e in at.error]
     assert not any(("PASS" in v) or ("MISS" in v) for v in verdicts3)
     assert len(at.get("download_button")) == 0
+
+
+def _app_chart_marks(at) -> tuple[int, int]:
+    """(bar, line) chart counts. streamlit 1.5x's AppTest has no typed
+    bar/line elements — both arrive as `arrow_vega_lite_chart`, so the mark
+    type is read from the element's Vega-Lite spec."""
+    bars = lines = 0
+
+    def walk(node):
+        nonlocal bars, lines
+        ch = getattr(node, "children", None)
+        if not isinstance(ch, dict):
+            return
+        for el in ch.values():
+            if getattr(el, "type", None) == "arrow_vega_lite_chart":
+                spec = el.proto.spec
+                if '"type": "bar"' in spec:
+                    bars += 1
+                elif '"type": "line"' in spec:
+                    lines += 1
+            walk(el)
+
+    walk(at.main)
+    return bars, lines
+
+
+def test_app_renders_decision_views(tmp_path):
+    # A16: all four views render live + in the result for bandit; the search
+    # policy gets no UCB chart (SPEC.md 26.4/26.5)
+    pytest.importorskip("streamlit", reason="dashboard app is optional (SPEC.md 23)")
+    from streamlit.testing.v1 import AppTest
+
+    def run_policy(policy: str):
+        csv = _write_csv(tmp_path, name=f"data_{policy}.csv")
+        at = AppTest.from_file(str(APP), default_timeout=300)
+        at.run()  # first render materializes the sidebar widgets
+        assert not at.exception
+        at.text_input(key="csv_path").set_value(str(csv))
+        at.text_input(key="runs_dir").set_value(str(tmp_path / f"runs_{policy}"))
+        at.selectbox(key="policy").set_value(policy)
+        at.number_input(key="experiments").set_value(2)
+        at.number_input(key="max_train").set_value(5.0)
+        at.run()  # re-render: data preview + the Run button (idle stops earlier)
+        assert not at.exception
+        at.button(key="run_button").set_value(True).run()
+        assert not at.exception
+        return at
+
+    b = run_policy("bandit")
+    bars, lines = _app_chart_marks(b)
+    assert bars >= 2   # D1 win-rate bars: live + result (SPEC.md 26.1/26.5)
+    assert lines >= 2  # best-score curve + the bandit UCB trace (SPEC.md 26.4)
+    md = " ".join(m.value for m in b.markdown)
+    assert md.count("mutation timeline") >= 2  # D3 timeline: live + result
+    assert "Decision views" in " ".join(h.value for h in b.subheader)
+    assert "→" in " ".join(c.value for c in b.caption)  # D2 chips (SPEC.md 26.2)
+
+    s = run_policy("search")
+    sbars, slines = _app_chart_marks(s)
+    assert sbars >= 1   # D1 renders for both policies
+    assert slines == 1  # best-score curve only — no UCB chart (SPEC.md 26.4)
+    assert "mutation timeline" in " ".join(m.value for m in s.markdown)
 
 
 # --- launcher (SPEC.md 23.4) --------------------------------------------------

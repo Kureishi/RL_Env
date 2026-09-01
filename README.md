@@ -361,7 +361,13 @@ Fixed-dim `Box` observation, `Discrete` action space (the mutation catalog).
   **New run** button resets it. Optional extra
   (`pip install autorefine[gui]`); the core stays streamlit-free — a pure
   `DashboardRunner` carries the run semantics, the app only renders
-  (SPEC.md 23, §3).
+  (SPEC.md 23, §3). v0.12 adds four **decision views** explaining the
+  improver's choices, derived purely from the existing update stream: a
+  per-field win-rate bar chart, per-step spec-diff chips (`field: old → new`)
+  in the note and table, a field × step mutation-timeline SVG (accepted /
+  scored-rejected / unscored), and the bandit's UCB trace (bandit policy
+  only) — rendered live during the run and again in the result section
+  (SPEC.md 26, A16).
 - **Input modalities (v0.10):** `autorefine fit --data DIR` now accepts a
   labelled directory — one subfolder per class (or an `index.csv`) of
   **images** (PNG/JPG/JPEG/BMP/GIF; grayscale 32×32 features; optional

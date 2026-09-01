@@ -9,13 +9,19 @@ No streamlit import (SPEC.md 23.1, §3 optional-dependency pattern).
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 from .config import Budget
 from .improver.bandit import BanditPolicy
 from .improver.meta_env import AutoRefineEnv, search_quality_v04
 from .improver.policy import SearchPolicy
-from .plotting import html_report, svg_pareto, svg_score_curve
+from .plotting import (
+    html_report,
+    svg_mutation_timeline,
+    svg_pareto,
+    svg_score_curve,
+)
 from .tasks import TASKS, detect_modality
 
 _RL_HINT = (
@@ -147,13 +153,23 @@ class DashboardRunner:
         }
 
     def next(self) -> dict:
-        """One improver step → one JSON-safe update dict (SPEC.md 23.1)."""
+        """One improver step → one JSON-safe update dict (SPEC.md 23.1).
+
+        The update also carries the decision views (SPEC.md 26): `spec_diff`
+        (26.2), `field_stats` (26.1), and `ucb` (26.4, bandit only) — pure
+        functions of the update stream so far (G2).
+        """
         if self._phase == "idle":
             raise RuntimeError("call start() before next()")
         if self._phase == "done":
             raise RuntimeError("the run is done; call finish()")
         action = self.policy.propose(self._state)
+        # D2 (SPEC.md 26.2): the best spec *before* this step, and the
+        # proposed spec, for the old → new chips
+        prev_best = self.env.best_spec.to_dict() if self.env.best_spec else {}
+        action_dict = action if isinstance(action, dict) else action.to_dict()
         self._state, reward, done, info = self.env.step(action)
+        mutation = list((self._state.get("last") or {}).get("fields") or [])
         update = {
             "index": len(self._updates) + 1,
             "accepted": bool(info.get("accepted", False)),
@@ -163,12 +179,20 @@ class DashboardRunner:
             "train_seconds": info.get("train_seconds"),
             "experiments_left": info.get("experiments_left",
                                          self.env.bm.experiments_left),
-            "mutation": list((self._state.get("last") or {}).get("fields") or []),
+            "mutation": mutation,
+            "spec_diff": spec_diff(prev_best, action_dict, mutation),
             "best_score": self.env.best_score,
             "reward": reward,
             "done": bool(done),
         }
         self._updates.append(update)
+        # decision views over the stream so far (SPEC.md 26.5; pure, G2)
+        update["field_stats"] = field_stats(self._updates)
+        if self.policy_name == "bandit":
+            trace = ucb_trace(self._updates, alpha=self.policy.alpha)
+            update["ucb"] = {f: series[-1] for f, series in trace.items()}
+        else:
+            update["ucb"] = None  # UCB is a bandit concept (SPEC.md 26.4)
         if done:
             self._phase = "done"
         return update
@@ -214,6 +238,11 @@ class DashboardRunner:
             # SPEC.md 21.2 SVGs + 22.2 report, generated in-memory
             "svg_score": svg_score_curve(entries),
             "svg_pareto": svg_pareto(pareto_pts),
+            # decision views, final state (SPEC.md 26.5)
+            "field_stats": field_stats(self._updates),
+            "ucb_trace": (ucb_trace(self._updates, alpha=self.policy.alpha)
+                          if self.policy_name == "bandit" else None),
+            "timeline_svg": svg_mutation_timeline(self._updates),
             "report_html": html_report(summary, entries),
             "artifacts": {
                 "best_spec.json": (run_dir / "best_spec.json").read_bytes(),
@@ -227,3 +256,60 @@ class DashboardRunner:
     def updates_json(self) -> str:
         """The full update stream as JSON (machine-readable live feed)."""
         return json.dumps(self._updates, indent=2, sort_keys=True)
+
+
+# --- decision views (SPEC.md 26) ---------------------------------------------
+# Pure functions of the runner's update stream (SPEC.md 23.1 rows): the app
+# renders them; the runner attaches them to each update (SPEC.md 26.5).
+# G2: same stream → bit-identical output. No streamlit (SPEC.md 23.1).
+
+def field_stats(updates) -> dict[str, dict]:
+    """D1 (SPEC.md 26.1): per-field {trials, wins, win_rate}, crediting each
+    update's `mutation` fields with its `accepted` outcome — the exact
+    (field, accepted) credit pairs the bandit consumes (SPEC.md 17)."""
+    acc: dict[str, list] = {}
+    for u in updates or []:
+        for f in (u.get("mutation") or []):
+            if not isinstance(f, str):
+                continue
+            s = acc.setdefault(f, [0, 0.0])
+            s[0] += 1
+            if u.get("accepted"):
+                s[1] += 1.0
+    return {f: {"trials": acc[f][0], "wins": acc[f][1],
+                "win_rate": acc[f][1] / acc[f][0]}
+            for f in sorted(acc)}
+
+
+def spec_diff(prev_best, action, fields) -> list[dict]:
+    """D2 (SPEC.md 26.2): old → new per mutated field; a value absent from
+    that spec is None (rendered as "—"). `prev_best`/`action` are spec dicts."""
+    prev_best = prev_best if isinstance(prev_best, dict) else {}
+    action = action if isinstance(action, dict) else {}
+    return [{"field": f, "old": prev_best.get(f), "new": action.get(f)}
+            for f in (fields or []) if isinstance(f, str)]
+
+
+def ucb_trace(updates, alpha: float = 1.0) -> dict[str, list]:
+    """D4 (SPEC.md 26.4): the bandit's UCB (SPEC.md 17) after crediting each
+    update: wins[f]/t + sqrt(alpha * ln(max(1, total)) / t); fields not yet
+    credited are None (a chart gap). Pure in (updates, alpha)."""
+    names = sorted({f for u in (updates or [])
+                    for f in (u.get("mutation") or []) if isinstance(f, str)})
+    trials = {f: 0 for f in names}
+    wins = {f: 0.0 for f in names}
+    trace: dict[str, list] = {f: [] for f in names}
+    for u in updates or []:
+        for f in (u.get("mutation") or []):
+            if f not in trials:
+                continue
+            trials[f] += 1
+            if u.get("accepted"):
+                wins[f] += 1.0
+        total = max(1, sum(trials.values()))
+        for f in names:
+            t = trials[f]
+            trace[f].append(
+                None if t == 0
+                else wins[f] / t + math.sqrt(alpha * math.log(total) / t))
+    return trace
