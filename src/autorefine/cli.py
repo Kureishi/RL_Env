@@ -221,10 +221,11 @@ def _cmd_variance(args: argparse.Namespace) -> int:
 
     A variance report is a measurement, not a gate: per-seed `verdict` carries
     the §22.1 gate, but the command exits 0 (even with MISS seeds). Writes
-    `seed_variance.svg` + `seed_sweep.json`; `--json` prints pure JSON (SPEC.md 21.2).
+    `seed_variance.svg` + `seed_curves.svg` (V1, SPEC.md 30.1) +
+    `seed_sweep.json`; `--json` prints pure JSON (SPEC.md 21.2).
     """
     from .dashboard import DashboardRunner
-    from .plotting import _quantile, svg_seed_variance
+    from .plotting import _quantile, svg_seed_curves, svg_seed_variance
     data = Path(args.data)
     try:
         _resolve_fit_task(data, getattr(args, "task", "auto") or "auto")
@@ -244,6 +245,8 @@ def _cmd_variance(args: argparse.Namespace) -> int:
     rd.mkdir(parents=True, exist_ok=True)
     svg = rd / "seed_variance.svg"
     svg.write_text(svg_seed_variance(sweep, target=args.target), encoding="utf-8")
+    curves = rd / "seed_curves.svg"  # V1 (SPEC.md 30.1): when the seeds diverge
+    curves.write_text(svg_seed_curves(sweep, target=args.target), encoding="utf-8")
     js = rd / "seed_sweep.json"
     js.write_text(json.dumps(sweep, indent=2, sort_keys=True), encoding="utf-8")
     if args.json:
@@ -263,6 +266,7 @@ def _cmd_variance(args: argparse.Namespace) -> int:
     print(f"target    : {passing}/{len(sweep)} seed(s) pass {args.target:.1f} "
           f"(a variance report is a measurement - the per-seed verdict carries the gate)")
     print(f"svg     : {svg}")
+    print(f"svg     : {curves}")
     print(f"json    : {js}")
     return 0
 
@@ -272,12 +276,14 @@ def _cmd_policy_report(args: argparse.Namespace) -> int:
     and render the per-step action-probability + per-task-return views.
 
     RL stays CLI-only (SPEC.md 23.1): this writes `action_probabilities.svg`,
-    `task_returns.svg`, `policy_trace.json`, `policy_returns.json`. Single
-    (`--task`) or multi-task (`--multi --tasks ...`, SPEC.md 20.2).
+    `task_returns.svg`, `policy_trace_curve.svg` (v0.16, SPEC.md 30.6),
+    `policy_trace.json`, `policy_returns.json`. Single (`--task`) or
+    multi-task (`--multi --tasks ...`, SPEC.md 20.2).
     """
     from .improver.catalog import ACTIONS
     from .improver.rl_policy import MetaRLPolicy, train_multi_policy, train_policy
-    from .plotting import svg_action_probabilities, svg_task_returns
+    from .plotting import (svg_action_probabilities, svg_policy_trace,
+                           svg_task_returns)
 
     seed, episodes = args.seed, args.episodes
     trace: list[dict] = []
@@ -317,6 +323,8 @@ def _cmd_policy_report(args: argparse.Namespace) -> int:
                                            n_steps=args.n_steps), encoding="utf-8")
     tr = rd / "task_returns.svg"
     tr.write_text(svg_task_returns(returns), encoding="utf-8")
+    pc = rd / "policy_trace_curve.svg"  # V6 (SPEC.md 30.6): r2g / baseline trace
+    pc.write_text(svg_policy_trace(trace), encoding="utf-8")
     tj = rd / "policy_trace.json"
     tj.write_text(json.dumps(trace, indent=2), encoding="utf-8")
     pj = rd / "policy_returns.json"
@@ -334,6 +342,7 @@ def _cmd_policy_report(args: argparse.Namespace) -> int:
             f"{ACTIONS[i][0]}={ACTIONS[i][1]} {last['probs'][i]:.2f}" for i in top))
     print(f"svg     : {ap}")
     print(f"svg     : {tr}")
+    print(f"svg     : {pc}")
     print(f"json    : {tj}  {pj}")
     return 0
 

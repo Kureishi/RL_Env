@@ -1908,3 +1908,234 @@ timestamp/counter, the scores do not); the caller's own runner is left
 **M18** — v0.15 multi-run / policy views: seed-variance box plot (CLI +
 runner + app) and the RL policy view (probabilities + trace + action-prob /
 task-return SVGs + CLI + precomputed app panel) (A19).
+
+---
+
+## 30. Comprehension visuals II (v0.16)
+
+The v0.12–v0.15 views explain one run, its gate, its learning, and its
+multi-run / policy behavior. This section adds six more views — all derived
+from data the loop already produces, plus one small logging addition: the
+block-bootstrap `std` (SPEC.md 18.3) that the §18.5 CI gate already computes
+per experiment is now *logged* with the entry and *shown* as a band on the
+score curve. **No new core dependencies** (NumPy only; the new SVGs are
+hand-rolled valid XML like the §26/§27/§28/§29 charts); **no search,
+training, or acceptance changes**; RL **stays CLI-only** (SPEC.md 23.1) —
+the app renders one more precomputed artifact; `import autorefine` stays
+clean (SPEC.md 3). Every renderer is pure and deterministic (G2),
+ASCII-only in its text, and empty-safe (header + message).
+
+### 30.1 V1 — per-seed best-score curves
+`plotting.py`: `svg_seed_curves(seeds, target=None, width=640,
+height=360)` — the running best score of each seed over the sweep, so the
+variance view (SPEC.md 29.1) answers *when* the seeds diverge (early noise
+vs late divergence). Input: a list of dicts each carrying `curve` (a list
+of ≥ 1 finite floats) and optionally `seed` (int). The chart:
+- a fixed vertical **0–100 score axis** (same layout as `svg_seed_variance`);
+- one **polyline per seed** (input order), colored from the §29.2 palette
+  (`_LINE, _BASELINE, _LADDER, _ACCEPTED, _SCORED_REJ, _REJECTED`, cycling),
+  x = point index `0 … M-1` where `M` = the longest curve (point 0 = the
+  baseline);
+- a **legend** (swatch + `seed <n>` per line, input order);
+- a dashed **target line** + `target X.XX` label when `target` is finite;
+- a summary line `n seeds = N - steps = M` (`M` counts the baseline point);
+- rows without a finite `curve` are skipped; empty → header +
+  `no seed curves in the sweep`.
+
+`dashboard.py`: `DashboardRunner.seed_sweep` extends each per-seed dict
+(SPEC.md 29.1 contract) with exactly one new key, `"curve"`:
+`[baseline, best after step 1, …]` — the baseline from `start()`'s
+`baseline_score`, then each `next()` update's `best_score` (free duplicate
+rejections, R3, are steps too, so the curve has one point per `next()` call
+plus the baseline). `curve[0] == baseline`, `curve[-1] == final`. The A19
+sweep-dict test is extended with this key (the rest of the contract is
+unchanged).
+
+`cli.py`: `variance` additionally writes `seed_curves.svg` (and names it in
+its output listing; `--json` mode is unchanged). The app's **Seed
+variance** panel renders `svg_seed_variance` + `svg_seed_curves`.
+
+### 30.2 V2 — field × value win matrix
+`dashboard.py`: `field_value_stats(updates) -> dict[str, dict[str, dict]]`
+— the v0.12 per-field win-rate (SPEC.md 26.1) refined to *which value won*
+(e.g. `architecture=16,8` vs `8,16`). For each update and each field in its
+`mutation`, the new value is read from that update's `spec_diff` (SPEC.md
+26.2: `{field, old, new}`); the cell `(field, value)` is credited with the
+update's `accepted` outcome. Value keys are normalized strings (`None` →
+`"-"`, list/tuple values joined with `,`, else `str(v)`); fields and values
+are returned sorted (values numeric-first: a value that float-parses sorts
+by its number, else alphabetically). Returns
+`{field: {value: {"trials": int, "wins": float, "win_rate": float}}}`.
+Pure over the update stream (G2); `field_stats` (SPEC.md 26.1) stays the
+per-field rollup — the per-field trial/wins sums of `field_value_stats`
+equal `field_stats`' whenever `spec_diff` is present.
+
+`plotting.py`: `svg_field_value_matrix(stats, width=640, row_h=28)` — one
+row per field (sorted), one cell per value: a green cell (`_ACCEPTED`) with
+`fill-opacity = 0.10 + 0.90·win_rate`, the `wins/trials` text centered
+(white when `win_rate ≥ 0.5`, axis color otherwise), and a `<title>`
+`field value: wins/trials (rate)`. Field names left of the cells; cell
+widths shrink to fit the widest row; a legend line `cell = wins/trials ·
+fill = win rate`. Empty → header + `no field values credited`.
+
+`dashboard.py`: `next()` attaches `field_value_stats` to each update (like
+`field_stats`, SPEC.md 26.5); `finish()` returns `"field_value_stats"` and
+`"field_value_svg"`. The app renders the matrix in the **Decision views**
+section (after the per-field bars) and live in the run loop. `report`
+CLI output is unchanged (the matrix is a dashboard view).
+
+### 30.3 V3 — decision-boundary scatter (2-feature tabular)
+`dashboard.py`: `decision_boundary(task, model, n_grid=24,
+n_points=200) -> dict | None` — the flat-task complement of the media error
+gallery (SPEC.md 28.3): where does the model fail on a 2-D feature plane?
+Applies only when `task.head == "softmax"`, `task.state_dim == 2`,
+`task.class_values` is non-empty, `task.holdout_rows` (SPEC.md 28.2) is
+callable, and `model is not None` — otherwise `None` (one feature, mse
+head, episode tasks). One forward pass over the holdout (the same `n` as
+`holdout_diagnostics`) and one over an `n_grid × n_grid` grid spanning the
+holdout's per-feature ranges (padded 5%; a degenerate range → ±1);
+**no RNG** (G2). Returns a JSON-safe dict:
+`{"x0", "x1" (feature names, or `x0`/`x1`), "x0_range", "x1_range",
+"n_grid", "grid_preds" (flat, row-major: index `i·n + j` is cell
+(i, j), class index), "points" ([{x, y, true, pred} per holdout row]),
+"classes" (labels via `class_label_str`, SPEC.md 28.3), "n", "correct"}`;
+`correct` = `#{true == pred}`.
+
+`plotting.py`: `svg_decision_boundary(data, width=640, height=560)` — the
+grid painted as `n²` class-colored cells (`fill-opacity 0.30`, a
+8-color class palette cycling for `k > 8`), each with a `<title>`
+`grid <i>,<j> -> class <k>`; the holdout points on top — correct as green
+(`_ACCEPTED`) circles, misclassified as red (`_SCORED_REJ`), each with a
+`<title>` `true <label> -> pred <label>`; value ticks on both axes; a
+legend row (class swatches + correct/misclassified swatches + `x:` / `y:`
+feature names) and a summary `n holdout = N - correct = C (P%)`. `data` is
+None → header + `no 2-feature classification data`.
+
+`dashboard.py`: `finish()` returns `"boundary"` (or None) and
+`"boundary_svg"` (or None); the app renders it in the **Learning views**
+section (after the confusion matrix).
+
+### 30.4 V4 — CI band on the score curve
+`improver/meta_env.py`: the three scored log entries (baseline,
+experiment, curriculum) now record `"std"`: the block-bootstrap holdout σ
+already computed by `_evaluate` (SPEC.md 18.3) — `0.0` in legacy mode
+(`ci_blocks == 0`), so legacy log rows gain exactly one zero-valued key
+and the §18.7 bit-exact pin (which asserts the acceptance sequence and
+summary, not the log bytes) stays green.
+
+`plotting.py`: `svg_score_curve` (SPEC.md 21.2) draws, for each scored row
+whose `std` is finite and `> 0`, a vertical translucent band
+(`#93c5fd`, width 7, round caps) spanning `score ± std`, behind the curve,
+with a `<title>` `±std <v>` and a caption `bands = score ± std (SPEC.md
+18.3 block-bootstrap; the §18.5 CI gate)`; the y-range expands to cover
+the bands. Rows without a positive `std` (legacy mode, old logs) draw
+**exactly** the pre-v0.16 SVG (no band elements, no caption) — the §21.2
+chart is unchanged for legacy runs, and `ascii_score_curve` is untouched.
+`report --plot` picks the band up automatically (it renders from
+`experiments.jsonl`).
+
+### 30.5 V5 — model-family score bars
+`dashboard.py`: `family_stats(entries) -> list[dict]` — over the scored
+entries (`kind` baseline/experiment, finite `holdout_score`), grouped by
+the entry's `spec.model_family` (`"unknown"` when absent):
+`[{"family", "best_score", "best_seconds" (the cost of the best member),
+"trials", "wins" (accepted count)}]`, sorted by `(-best_score,
+family)`. Pure (G2).
+
+`plotting.py`: `svg_family_bars(families, width=640, row_h=34)` — one
+horizontal bar per family on a fixed 0–100 axis (bar length =
+`best_score`), the top family highlighted (`_ACCEPTED`, the rest `_LINE`),
+captioned `name — best (cost, wins/trials)`, faint 0/25/50/75/100
+gridlines, and a legend `best holdout score per model family (all logged
+experiments)`. Each bar's `<title>` is
+`family <name>: best <s> in <secs>s (<wins>/<trials> accepted)`. Rows
+without a finite `best_score` are skipped; empty → header +
+`no scored experiments`.
+
+`dashboard.py`: `finish()` returns `"family_stats"` and
+`"family_bars_svg"`; the app renders the bars in the **Decision views**
+section.
+
+### 30.6 V6 — RL return-to-go / baseline trace
+`plotting.py`: `svg_policy_trace(trace, width=640, height=360)` — beside
+the existing action-probability bars (SPEC.md 29.2), *why the policy
+explored*: over the existing per-step trace records `{task, action, probs,
+reward}` (no `rl_policy.py` change — pure rendering of the v0.15 trace):
+- one **reward bar per step** (green `r ≥ 0`, red `r < 0`), `<title>`
+  `step <i> · <task> · r=<r>`;
+- a **return-to-go** line + points (`_LADDER`): `r2g[t] = Σ rewards[t:]`;
+- a dashed **baseline** line (`_BASELINE`): the running mean of rewards up
+  to `t` (inclusive);
+- a data-driven y-range covering `0`, all rewards, and all return-to-go
+  values (all-zero rewards → fixed `[-1, 1]`), x = step index;
+- a legend (reward sign, return-to-go, baseline) and a summary `n steps =
+  N - final return-to-go = R - mean reward = M`.
+
+`cli.py`: `policy-report` additionally writes `policy_trace_curve.svg` and
+names it in its output listing. The app's **RL policy view (precomputed)**
+panel renders whichever of `action_probabilities.svg`, `task_returns.svg`,
+`policy_trace_curve.svg` exist in the given directory (so a v0.15-era two-
+file directory still renders) and warns only when none exist (the A19
+warning text is preserved). RL still never runs live (SPEC.md 23.1).
+
+### 30.7 Non-goals (v0.16)
+No search/training/acceptance changes (all six views are derived from
+logged data; the only core deltas are the logged `std` key and the sweep
+dict's `curve` key — both additive); no new core dependencies (NumPy only);
+no live RL in the app (the §23.1 boundary is unchanged); no new `report`
+sections — `report --plot`'s score curve gains the CI band for free, and
+the other five views live in the dashboard/CLI surfaces; no parallelism or
+algorithmic changes (the optimization items stay out of v0.16); no change
+to `ascii_score_curve`, `field_stats` (SPEC.md 26.1), or any pinned
+sequence (A1–A18, §18.7, §20.2, §18.7-legacy).
+
+### 30.8 Acceptance (A20)
+- **V1**: `svg_seed_curves` is valid XML, one polyline per seed with a
+  legend naming each seed, the target line when given, the `steps = M`
+  summary, and is empty-safe; `seed_sweep`'s per-seed dict carries
+  `curve` with `curve[0] == baseline`, `curve[-1] == final`, all finite,
+  and the rest of the A19 contract (the A19 exact-key test is extended
+  with `curve`); `variance` writes `seed_curves.svg` (valid XML) alongside
+  `seed_variance.svg`; the app's Seed variance panel renders both.
+- **V2**: `field_value_stats` credits `(field, value)` exactly as
+  hand-computed on a synthetic stream, normalizes value keys (tuple
+  joined, `None` → `-`), sorts fields and values deterministically, and
+  its per-field trial/wins sums equal `field_stats`'; `svg_field_value_matrix`
+  is valid XML with one cell per credited `(field, value)` (counted via
+  their `<title>`s), `wins/trials` text, and is empty-safe; `next()`
+  updates carry `field_value_stats`; `finish()` returns `field_value_stats`
+  + `field_value_svg`; the app renders the matrix.
+- **V3**: `decision_boundary` returns `None` for a 1-feature CSV, an mse-
+  head CSV, and `model=None`; on the 2-feature softmax CSV it returns
+  `grid_preds` of length `n_grid²`, `points` of length = the holdout size
+  with `true`/`pred` in range, `correct == #{true == pred}`, class labels
+  `["0", "1"]`; `svg_decision_boundary` is valid XML with `n²` grid-cell
+  titles and one `true … -> pred …` title per holdout point, the summary
+  line, and is None-safe; `finish()` on a 2-feature CSV run returns
+  non-None `boundary` + `boundary_svg`; the app renders it in Learning
+  views.
+- **V4**: the baseline/experiment log entries carry a finite `std`
+  (`== 0.0` in legacy mode, finite in v0.4 mode); `svg_score_curve` on
+  rows with `std > 0` draws exactly one band line per such row (counted by
+  stroke color) + the §18.3 caption and expands the y-range, while rows
+  without a positive `std` render byte-identical SVG to pre-v0.16 (no band
+  elements, no caption); `ascii_score_curve` is unchanged; the §18.7
+  legacy pin and the §21.2 SVG tests stay green.
+- **V5**: `family_stats` on synthetic entries matches hand-computed
+  groups/sort; `svg_family_bars` is valid XML with one titled bar per
+  family, the top family highlighted, and is empty-safe; `finish()`
+  returns `family_stats` + `family_bars_svg`; the app renders the bars.
+- **V6**: `svg_policy_trace` is valid XML with one reward bar per step
+  (counted by their `<title>`s), hand-computed return-to-go values in the
+  text, the dashed baseline line, and is empty-safe; `policy-report`
+  writes `policy_trace_curve.svg` (valid XML); the app's RL panel renders
+  the third SVG when present, still renders a v0.15 two-file directory,
+  and still warns on an empty directory (A19 text preserved).
+- Full suite green; A1–A19 stay green (the A19 sweep-dict test updated per
+  §30.1); `import autorefine` never pulls in streamlit/PIL/soundfile.
+
+### 30.9 Milestone
+
+**M19** — v0.16 comprehension visuals II: per-seed curves, field × value
+win matrix, decision-boundary scatter, CI band on the score curve,
+model-family bars, and the RL return-to-go/baseline trace (A20).

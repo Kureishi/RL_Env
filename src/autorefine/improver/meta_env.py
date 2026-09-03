@@ -230,6 +230,7 @@ class AutoRefineEnv:
             "spec_hash": DEFAULT_SPEC.fingerprint(),
             "mutation": None,
             "holdout_score": score,
+            "std": std,  # SPEC.md 30.4 (V4): the §18.3 holdout sigma (0.0 legacy)
             "gen_score": gen,
             "gen_gap": gen_gap,
             "train_seconds": result.train_seconds,
@@ -353,6 +354,7 @@ class AutoRefineEnv:
             "spec_hash": fp,
             "mutation": mutation_fields,
             "holdout_score": score,
+            "std": std,  # SPEC.md 30.4 (V4): the §18.3 holdout sigma (0.0 legacy)
             "gen_score": gen,
             "gen_gap": gen_gap,
             "train_seconds": result.train_seconds,
@@ -425,6 +427,7 @@ class AutoRefineEnv:
             "ceiling": self.curriculum.ceiling,
             "best_before_step": best_before,
             "new_baseline_score": score,
+            "std": std,  # SPEC.md 30.4 (V4): the §18.3 holdout sigma (0.0 legacy)
             "loss_history": result.loss_history,  # SPEC.md 28.1 (C1)
         }
         self.curriculum_events.append(event)

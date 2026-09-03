@@ -417,6 +417,54 @@ Fixed-dim `Box` observation, `Discrete` action space (the mutation catalog).
   SVGs and **never runs RL live** (RL stays CLI-only, SPEC.md 23.1). Zero
   new core dependencies (NumPy only; both SVGs are hand-rolled valid XML)
   and `import autorefine` never pulls in streamlit (SPEC.md 29, A19, M18).
+- **Comprehension visuals II (v0.16):** the six questions the
+  v0.12–v0.15 views leave open. **When did the seeds diverge?** — the v0.15
+  Seed variance view gains **per-seed best-score curves**: `seed_sweep` now
+  carries a `curve` per seed (the baseline + the best score after every step,
+  so early noise vs late divergence are visible), and `autorefine variance`
+  writes `seed_curves.svg` next to `seed_variance.svg` — one polyline per
+  seed on the fixed 0–100 axis, a per-seed legend, the dashed target line,
+  and `n seeds / steps`; the app's Seed variance panel renders both (SPEC.md
+  30.1). **Which value won?** — the v0.12 per-field win-rate bars gain a
+  **field × value win matrix**: `field_value_stats` credits each update's
+  `(field, new value)` pair (from its `spec_diff`) with its accepted/
+  rejected outcome — value keys normalized (lists joined, `None` → `-`),
+  fields and values sorted (values numeric-first) — rendered as one green
+  cell per `(field, value)` (`fill-opacity` = win rate, `wins/trials` inside)
+  live in the run loop and in the result's Decision views; `finish()`
+  returns `field_value_stats` + `field_value_svg` (SPEC.md 30.2).
+  **Where does the model fail?** — the flat-task complement of the media
+  error gallery: **decision-boundary scatter** for 2-feature
+  classification — `decision_boundary` paints an `n_grid × n_grid`
+  prediction grid (holdout feature ranges, 5% padding, no RNG) plus the
+  holdout points colored correct/misclassified; `finish()` returns
+  `boundary` + `boundary_svg` and the app renders it in Learning views
+  (one-feature, mse-head, and episode tasks get `None`) (SPEC.md 30.3).
+  **How much is the score's noise?** — the **CI band on the score curve**:
+  the §18.3 block-bootstrap holdout σ that the §18.5 gate already computes
+  is now logged with every baseline/experiment/curriculum entry (`std`,
+  `0.0` in legacy mode), and `svg_score_curve` draws a translucent
+  `score ± std` band per positive-`std` row — `report --plot` picks it up
+  from `experiments.jsonl` for free; legacy rows/old logs render byte-
+  identical pre-v0.16 SVG (SPEC.md 30.4).
+  **Which family won?** — the **model-family score bars**: `family_stats`
+  rolls the scored log entries up per `spec.model_family` (best holdout
+  score, that member's cost, trials / accepted count; a missing family is
+  `unknown`), rendered as one bar per family on the fixed 0–100 axis with
+  the top family highlighted — `finish()` returns `family_stats` +
+  `family_bars_svg` and the app renders the bars in Decision views
+  (SPEC.md 30.5). **Why did the policy explore?** — the **RL
+  return-to-go trace**: `svg_policy_trace` renders the existing per-step
+  `policy-report` trace as reward bars (green `r ≥ 0`, red `r < 0`), a
+  return-to-go line + points, and a dashed running-mean baseline —
+  `autorefine policy-report` now also writes `policy_trace_curve.svg`
+  (named in its output listing), and the app's RL policy panel renders
+  whichever of the three precomputed SVGs exist (a v0.15-era two-file
+  directory still renders; the A19 warning text is preserved when none
+  exist) (SPEC.md 30.6). All six are pure over data the loop already
+  produces: zero new core dependencies, the SVGs are hand-rolled valid
+  XML, and every pinned sequence (A1–A19, §18.7) stays green.
+  (SPEC.md 30.1–30.6, A20.)
 - **Input modalities (v0.10):** `autorefine fit --data DIR` now accepts a
   labelled directory — one subfolder per class (or an `index.csv`) of
   **images** (PNG/JPG/JPEG/BMP/GIF; grayscale 32×32 features; optional

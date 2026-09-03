@@ -12,6 +12,8 @@ import json
 import math
 from pathlib import Path
 
+import numpy as np
+
 from .config import Budget
 from .diagnostics import holdout_diagnostics
 from .improver.bandit import BanditPolicy
@@ -21,6 +23,9 @@ from .plotting import (
     html_report,
     svg_architecture,
     svg_confusion_matrix,
+    svg_decision_boundary,  # V3 view (SPEC.md 30.3)
+    svg_family_bars,  # V5 view (SPEC.md 30.5)
+    svg_field_value_matrix,  # V2 view (SPEC.md 30.2)
     svg_ladder_curve,
     svg_loss_curves,
     svg_mutation_timeline,
@@ -31,6 +36,7 @@ from .plotting import (
     svg_score_strip,
 )
 from .tasks import TASKS, detect_modality
+from .tasks.media import class_label_str  # V3 class labels (SPEC.md 30.3)
 
 _RL_HINT = (
     "policy 'rl' does not map to a live per-experiment stream (it trains over "
@@ -164,8 +170,9 @@ class DashboardRunner:
         """One improver step → one JSON-safe update dict (SPEC.md 23.1).
 
         The update also carries the decision views (SPEC.md 26): `spec_diff`
-        (26.2), `field_stats` (26.1), and `ucb` (26.4, bandit only) — pure
-        functions of the update stream so far (G2).
+        (26.2), `field_stats` (26.1), `field_value_stats` (30.2), and `ucb`
+        (26.4, bandit only) — pure functions of the update stream so far
+        (G2).
         """
         if self._phase == "idle":
             raise RuntimeError("call start() before next()")
@@ -199,6 +206,7 @@ class DashboardRunner:
         self._updates.append(update)
         # decision views over the stream so far (SPEC.md 26.5; pure, G2)
         update["field_stats"] = field_stats(self._updates)
+        update["field_value_stats"] = field_value_stats(self._updates)  # V2 (SPEC.md 30.2)
         if self.policy_name == "bandit":
             trace = ucb_trace(self._updates, alpha=self.policy.alpha)
             update["ucb"] = {f: series[-1] for f, series in trace.items()}
@@ -236,16 +244,21 @@ class DashboardRunner:
         For each seed it builds a fresh `DashboardRunner` (`_clone`), drives
         the exact §23.1 loop `start()` → `next()`…→ `finish()` (`on_update`
         forwarded per step), and appends one JSON-safe dict
-        `{seed, baseline, final, target, pass, verdict, experiments_run,
-        run_dir}`. Empty `seeds` → `[]`. The caller's own runner is untouched.
+        `{seed, baseline, final, curve, target, pass, verdict,
+        experiments_run, run_dir}` — `curve` (SPEC.md 30.1) is
+        `[baseline, best after step 1, …]`, one point per `next()` call
+        (free duplicate rejections are steps too, R3). Empty `seeds` → `[]`.
+        The caller's own runner is untouched.
         """
         out: list[dict] = []
         for seed in (seeds or []):
             seed = int(seed)
             runner = self._clone(seed)
-            runner.start()
+            info = runner.start()
+            curve = [float(info["baseline_score"])]  # V1 (SPEC.md 30.1)
             while not runner.done:
                 update = runner.next()
+                curve.append(float(update["best_score"]))
                 if on_update is not None:
                     on_update(update)
             res = runner.finish()
@@ -255,6 +268,7 @@ class DashboardRunner:
                 "seed": seed,
                 "baseline": float(res["baseline_score"]),
                 "final": final,
+                "curve": curve,  # curve[0] == baseline, curve[-1] == final
                 "target": target,
                 "pass": bool(final >= target),  # the §22.1 gate, exactly
                 "verdict": res["verdict"],
@@ -291,6 +305,9 @@ class DashboardRunner:
                                      self.env.task.state_dim,
                                      self.env.task.n_outputs)
                     if self.env.best_spec else None)
+        fvs = field_value_stats(self._updates)  # V2 (SPEC.md 30.2)
+        fams = family_stats(entries)  # V5 (SPEC.md 30.5): over the scored entries
+        boundary = decision_boundary(self.env.task, self.env.best_model)  # V3
         return {
             "verdict": "PASS" if pass_ else "MISS",
             "target": self.target,
@@ -309,6 +326,12 @@ class DashboardRunner:
             "svg_pareto": svg_pareto(pareto_pts),
             # decision views, final state (SPEC.md 26.5)
             "field_stats": field_stats(self._updates),
+            # V2 (SPEC.md 30.2): field x value win matrix + its stats
+            "field_value_stats": fvs,
+            "field_value_svg": svg_field_value_matrix(fvs),
+            # V5 (SPEC.md 30.5): model-family score bars + its stats
+            "family_stats": fams,
+            "family_bars_svg": svg_family_bars(fams),
             "ucb_trace": (ucb_trace(self._updates, alpha=self.policy.alpha)
                           if self.policy_name == "bandit" else None),
             "timeline_svg": svg_mutation_timeline(self._updates),
@@ -326,6 +349,10 @@ class DashboardRunner:
             "diagnostics": diag,
             "per_class_svg": svg_per_class_bars(diag) if diag else None,
             "confusion_svg": svg_confusion_matrix(diag) if diag else None,
+            # V3 (SPEC.md 30.3): decision boundary on the 2-D feature plane
+            # (None for 1-feature / mse-head / episode tasks)
+            "boundary": boundary,
+            "boundary_svg": svg_decision_boundary(boundary) if boundary else None,
             "error_gallery": gallery,
             "arch_svg": arch_svg,
             "report_html": html_report(summary, entries, diagnostics=diag,
@@ -387,6 +414,98 @@ def field_stats(updates) -> dict[str, dict]:
             for f in sorted(acc)}
 
 
+def _fv_key(value) -> str:
+    """V2 (SPEC.md 30.2): a spec value → its matrix cell key — `None` →
+    `"-"`, list/tuple values joined with `,` (e.g. layers `[8, 16]` →
+    `"8,16"`), else `str(v)`."""
+    if value is None:
+        return "-"
+    if isinstance(value, (list, tuple)):
+        return ",".join(str(v) for v in value)
+    return str(value)
+
+
+def field_value_stats(updates) -> dict[str, dict[str, dict]]:
+    """V2 (SPEC.md 30.2): per `(field, value)` {trials, wins, win_rate} —
+    the v0.12 per-field rollup (`field_stats`, SPEC.md 26.1) refined to
+    *which value won* (e.g. `layers` 8,16 vs 16,8). For each update and each
+    entry of its `spec_diff` (SPEC.md 26.2: {field, old, new}), the new value
+    is keyed via `_fv_key` and the cell credited with the update's
+    `accepted` outcome. Fields and values are returned sorted (values
+    numeric-first, matching `_fv_sort_key` in plotting.py). Pure over the
+    update stream (G2): the per-field trial/wins sums equal `field_stats`'
+    whenever `spec_diff` is present.
+    """
+    acc: dict[str, dict[str, list]] = {}
+    for u in updates or []:
+        diff = u.get("spec_diff")
+        if not isinstance(diff, list):
+            continue
+        for d in diff:
+            if not isinstance(d, dict):
+                continue
+            f = d.get("field")
+            if not isinstance(f, str):
+                continue
+            cell = acc.setdefault(f, {}).setdefault(_fv_key(d.get("new")), [0, 0.0])
+            cell[0] += 1
+            if u.get("accepted"):
+                cell[1] += 1.0
+
+    def _sort(k: str) -> tuple:
+        try:
+            return (0.0, float(k), "")
+        except (TypeError, ValueError):
+            return (1.0, 0.0, k)
+
+    return {
+        f: {v: {"trials": acc[f][v][0], "wins": acc[f][v][1],
+                "win_rate": acc[f][v][1] / acc[f][v][0]}
+            for v in sorted(acc[f], key=_sort)}
+        for f in sorted(acc)
+    }
+
+
+def family_stats(entries) -> list[dict]:
+    """V5 (SPEC.md 30.5): best holdout score per model family — over the
+    scored entries (kind baseline/experiment, finite `holdout_score`),
+    grouped by the entry's `spec.model_family` (`"unknown"` when absent or
+    not a string): `{family, best_score, best_seconds (the cost of the
+    best member — ties keep the first), trials, wins (accepted count)}`,
+    sorted by `(-best_score, family)`. Pure (G2); the renderer
+    (`svg_family_bars`) reads exactly these keys."""
+    groups: dict[str, list] = {}
+    for e in entries or []:
+        if not isinstance(e, dict):
+            continue
+        if e.get("kind") not in ("baseline", "experiment"):
+            continue
+        s = e.get("holdout_score")
+        if isinstance(s, bool) or not isinstance(s, (int, float)) \
+                or not math.isfinite(float(s)):
+            continue
+        spec = e.get("spec")
+        fam = spec.get("model_family") if isinstance(spec, dict) else None
+        if not isinstance(fam, str) or not fam:
+            fam = "unknown"
+        groups.setdefault(fam, []).append(e)
+    out = []
+    for fam in groups:
+        members = groups[fam]
+        # max() is stable: the first best member wins ties, so
+        # `best_seconds` is that member's cost (SPEC.md 30.5)
+        best = max(members, key=lambda m: float(m["holdout_score"]))
+        out.append({
+            "family": fam,
+            "best_score": float(best["holdout_score"]),
+            "best_seconds": float(best.get("train_seconds", 0.0) or 0.0),
+            "trials": len(members),
+            "wins": float(sum(1 for m in members if m.get("accepted"))),
+        })
+    out.sort(key=lambda f: (-f["best_score"], f["family"]))
+    return out
+
+
 def spec_diff(prev_best, action, fields) -> list[dict]:
     """D2 (SPEC.md 26.2): old → new per mutated field; a value absent from
     that spec is None (rendered as "—"). `prev_best`/`action` are spec dicts."""
@@ -419,3 +538,89 @@ def ucb_trace(updates, alpha: float = 1.0) -> dict[str, list]:
                 None if t == 0
                 else wins[f] / t + math.sqrt(alpha * math.log(total) / t))
     return trace
+
+
+def decision_boundary(task, model, n_grid: int = 24, n_points: int = 200) -> dict | None:
+    """V3 (SPEC.md 30.3): the decision-boundary data for a 2-feature
+    classification task — where does the model fail on a 2-D feature plane?
+    The flat-task complement of the media error gallery (SPEC.md 28.3).
+
+    Applies only when `task.head == "softmax"`, `task.state_dim == 2`,
+    `task.class_values` is non-empty, `task.holdout_rows` (SPEC.md 28.2) is
+    callable, and `model is not None` — otherwise `None` (one feature, mse
+    head, episode tasks). One forward pass over the holdout (clamped by
+    `n_points`, the same `n` `holdout_diagnostics` uses) and one over an
+    `n_grid x n_grid` grid spanning the holdout's per-feature ranges
+    (padded 5%; a degenerate range → ±1); no RNG (G2). Returns the
+    JSON-safe dict of SPEC.md 30.3: `x0`/`x1` (feature names, or
+    `x0`/`x1`), `x0_range`/`x1_range`, `n_grid`, `grid_preds` (flat,
+    row-major: index `i*n + j` is cell (i, j), class index), `points`
+    (`{x, y, true, pred}` per holdout row), `classes` (labels via
+    `class_label_str`, SPEC.md 28.3), `n`, and `correct` = #{true == pred}.
+    """
+    if getattr(task, "head", None) != "softmax":
+        return None
+    if int(getattr(task, "state_dim", -1)) != 2:
+        return None
+    values = getattr(task, "class_values", None)
+    if not values:
+        return None
+    if not callable(getattr(task, "holdout_rows", None)):
+        return None
+    if model is None:
+        return None
+
+    n = max(1, int(n_grid))
+    x, y = task.holdout_rows(int(n_points), model)
+    x = np.asarray(x, dtype=np.float64)
+    if x.ndim != 2 or x.shape[1] != 2 or x.shape[0] == 0:
+        return None
+    k = len(values)
+    y_true = np.clip(np.asarray(y, dtype=np.int64).ravel()[: x.shape[0]],
+                     0, k - 1)
+    pred = np.clip(np.asarray(model.forward(x), dtype=np.float64).argmax(axis=1),
+                   0, k - 1)
+
+    def _padded(idx: int) -> list[float]:
+        lo, hi = float(x[:, idx].min()), float(x[:, idx].max())
+        span = hi - lo
+        if span > 0.0:  # padded 5% on both sides (SPEC.md 30.3)
+            return [lo - 0.05 * span, hi + 0.05 * span]
+        return [lo - 1.0, hi + 1.0]  # degenerate range → ±1 (SPEC.md 30.3)
+
+    r0, r1 = _padded(0), _padded(1)
+
+    def _nodes(lo: float, hi: float) -> list[float]:
+        if n == 1:
+            return [(lo + hi) / 2.0]
+        return [lo + (hi - lo) * i / (n - 1) for i in range(n)]
+
+    g0, g1 = _nodes(*r0), _nodes(*r1)
+    grid = np.array([[v0, v1] for v0 in g0 for v1 in g1], dtype=np.float64)
+    grid_pred = np.clip(
+        np.asarray(model.forward(grid), dtype=np.float64).argmax(axis=1),
+        0, k - 1)
+
+    names = getattr(task, "feature_names", None)
+    if isinstance(names, (list, tuple)) and len(names) >= 2:
+        x0name, x1name = str(names[0]), str(names[1])
+    else:
+        x0name, x1name = "x0", "x1"
+
+    m = int(x.shape[0])
+    return {
+        "x0": x0name,
+        "x1": x1name,
+        "x0_range": r0,
+        "x1_range": r1,
+        "n_grid": n,
+        "grid_preds": [int(p) for p in grid_pred],  # row-major i*n + j
+        "points": [
+            {"x": float(x[i, 0]), "y": float(x[i, 1]),
+             "true": int(y_true[i]), "pred": int(pred[i])}
+            for i in range(m)
+        ],
+        "classes": [class_label_str(c) for c in values],
+        "n": m,
+        "correct": int((y_true == pred).sum()),
+    }

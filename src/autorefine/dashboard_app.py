@@ -19,10 +19,12 @@ from autorefine.dashboard import DashboardRunner, ucb_trace
 from autorefine.plotting import (
     svg_action_probabilities,  # noqa: F401 (D2 view, SPEC.md 29.2)
     svg_audio_waveform,
+    svg_field_value_matrix,  # V2 view (SPEC.md 30.2)
     svg_loss_curves,
     svg_mutation_timeline,
     svg_score_gap_scatter,
     svg_score_strip,
+    svg_seed_curves,  # V1 view (SPEC.md 30.1)
     svg_seed_variance,  # D1 view (SPEC.md 29.1)
     svg_task_returns,  # noqa: F401 (D2 view, SPEC.md 29.2)
 )
@@ -165,8 +167,9 @@ def _run(csv_path: str, label: str, target: float, policy: str, seed: int,
     bar = st.progress(0.0, text="starting…")
     note = st.empty()
     # decision-view placeholders, live (SPEC.md 26.5): D1 win-rate bars,
-    # D3 mutation timeline, D4 UCB trace (bandit policy only)
+    # V2 field x value matrix, D3 mutation timeline, D4 UCB trace (bandit only)
     vbars = st.empty()
+    vmatrix = st.empty()  # V2 (SPEC.md 30.2)
     vtimeline = st.empty()
     vucb = st.empty() if policy == "bandit" else None
     # G1 + G2 gate views, live (SPEC.md 27.4): pure over the stream so far
@@ -209,6 +212,10 @@ def _run(csv_path: str, label: str, target: float, policy: str, seed: int,
             vbars.bar_chart(
                 pd.DataFrame.from_dict(u["field_stats"], orient="index")
                 .sort_index())
+        if u.get("field_value_stats"):  # V2: field x value matrix (SPEC.md 30.2)
+            vmatrix.markdown(
+                svg_field_value_matrix(u["field_value_stats"]),
+                unsafe_allow_html=True)
         vtimeline.markdown(  # D3: mutation timeline (SPEC.md 26.3)
             svg_mutation_timeline(stream), unsafe_allow_html=True)
         # G1 candidate score strip + G2 score vs gen-gap scatter (SPEC.md 27)
@@ -287,6 +294,10 @@ def _render_result(res: dict) -> None:
     fs = res.get("field_stats")
     if fs:  # D1: per-field win-rate bars (SPEC.md 26.1)
         st.bar_chart(pd.DataFrame.from_dict(fs, orient="index").sort_index())
+    if res.get("field_value_svg"):  # V2: field x value matrix (SPEC.md 30.2)
+        st.markdown(res["field_value_svg"], unsafe_allow_html=True)
+    if res.get("family_bars_svg"):  # V5: model-family bars (SPEC.md 30.5)
+        st.markdown(res["family_bars_svg"], unsafe_allow_html=True)
     if res.get("timeline_svg"):  # D3: mutation timeline (SPEC.md 26.3)
         st.markdown(res["timeline_svg"], unsafe_allow_html=True)
     ucb = res.get("ucb_trace")
@@ -305,7 +316,8 @@ def _render_result(res: dict) -> None:
     # learning views (SPEC.md 28): computed once in finish(), re-rendered
     # here from the stored result — the restored view shows the same views
     if any(res.get(k) for k in ("loss_curves", "per_class_svg",
-                                "confusion_svg", "error_gallery", "arch_svg")):
+                                "confusion_svg", "boundary_svg",
+                                "error_gallery", "arch_svg")):
         st.subheader("Learning views")
         curves = res.get("loss_curves") or {}
         if curves:  # C1 (SPEC.md 28.1): pick an experiment's train/holdout curves
@@ -317,6 +329,8 @@ def _render_result(res: dict) -> None:
             st.markdown(res["per_class_svg"], unsafe_allow_html=True)
         if res.get("confusion_svg"):  # C2 (SPEC.md 28.2)
             st.markdown(res["confusion_svg"], unsafe_allow_html=True)
+        if res.get("boundary_svg"):  # V3 (SPEC.md 30.3): where it fails on a 2-D plane
+            st.markdown(res["boundary_svg"], unsafe_allow_html=True)
         gallery = res.get("error_gallery")
         if gallery:  # C3 (SPEC.md 28.3): misclassified holdout items
             _render_gallery(gallery)
@@ -426,6 +440,9 @@ def _render_optin_views(path, label: str, target: float, policy: str,
                            f"{float(target):.1f} · {beats} beat their own baseline")
                 st.markdown(svg_seed_variance(sweep, target=float(target)),
                             unsafe_allow_html=True)
+                # V1 (SPEC.md 30.1): per-seed curves — when did they diverge?
+                st.markdown(svg_seed_curves(sweep, target=float(target)),
+                            unsafe_allow_html=True)
 
     # --- D2: RL policy view, precomputed (SPEC.md 29.2) ----------------------
     st.subheader("RL policy view (precomputed — never runs RL live)")
@@ -434,11 +451,15 @@ def _render_optin_views(path, label: str, target: float, policy: str,
     pol_dir = st.text_input("policy-report output dir", value="", key="pol_dir")
     if st.button("Load the policy view", key="pol_button") and pol_dir.strip():
         pd_ = Path(pol_dir.strip())
-        ap = pd_ / "action_probabilities.svg"
-        tr = pd_ / "task_returns.svg"
-        if ap.exists() and tr.exists():
-            st.markdown(ap.read_text(encoding="utf-8"), unsafe_allow_html=True)
-            st.markdown(tr.read_text(encoding="utf-8"), unsafe_allow_html=True)
+        # v0.16 (SPEC.md 30.6): render whichever of the three precomputed
+        # SVGs exist — a v0.15-era two-file directory still renders
+        cands = [pd_ / name for name in
+                 ("action_probabilities.svg", "task_returns.svg",
+                  "policy_trace_curve.svg")]
+        present = [p for p in cands if p.exists()]
+        if present:
+            for p in present:
+                st.markdown(p.read_text(encoding="utf-8"), unsafe_allow_html=True)
         else:
             st.warning(f"{pd_} has no action_probabilities.svg / "
                        f"task_returns.svg — run `autorefine policy-report "

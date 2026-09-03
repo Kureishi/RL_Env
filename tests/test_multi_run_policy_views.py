@@ -198,9 +198,15 @@ def test_seed_sweep_one_dict_per_seed_json_safe(tmp_path):
     assert len(sweep) == 3
     assert [s["seed"] for s in sweep] == [7, 8, 9]
     for s in sweep:
-        assert set(s) == {"seed", "baseline", "final", "target", "pass",
-                          "verdict", "experiments_run", "run_dir"}
+        # the A19 key set, extended with `curve` (SPEC.md 30.1; A20)
+        assert set(s) == {"seed", "baseline", "final", "curve", "target",
+                          "pass", "verdict", "experiments_run", "run_dir"}
         assert np.isfinite(s["baseline"]) and np.isfinite(s["final"])
+        curve = s["curve"]
+        assert len(curve) >= 2  # baseline + at least one step (SPEC.md 30.1)
+        assert all(np.isfinite(v) for v in curve)
+        assert curve[0] == s["baseline"]  # SPEC.md 30.1
+        assert curve[-1] == s["final"]  # SPEC.md 30.1
         assert s["target"] == pytest.approx(95.0)
         assert s["pass"] == (s["final"] >= s["target"])  # the §22.1 gate
         assert s["verdict"] == ("PASS" if s["pass"] else "MISS")
