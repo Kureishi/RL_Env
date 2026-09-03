@@ -235,6 +235,7 @@ class AutoRefineEnv:
             "train_seconds": result.train_seconds,
             "effective_score": eff,  # SPEC.md 18 (== score in legacy mode)
             "accepted": True,
+            "loss_history": result.loss_history,  # SPEC.md 28.1 (C1)
         })
         self._dup_streak = 0  # SPEC.md 20.2: fresh episode, fresh streak
         self._started = True
@@ -358,6 +359,7 @@ class AutoRefineEnv:
             "time_capped": result.time_capped,
             "effective_score": eff,  # SPEC.md 18 (== score in legacy mode)
             "accepted": accepted,
+            "loss_history": result.loss_history,  # SPEC.md 28.1 (C1)
         })
 
         # SPEC.md 20.1: curriculum — when the task saturates, step the
@@ -380,6 +382,7 @@ class AutoRefineEnv:
             # SPEC.md 18 (legacy mode: effective_score == candidate_score, se == 0)
             "effective_score": eff,
             "se": se,
+            "loss_history": result.loss_history,  # SPEC.md 28.1 (C1)
         }
         return self._state(), reward, done, info
 
@@ -422,6 +425,7 @@ class AutoRefineEnv:
             "ceiling": self.curriculum.ceiling,
             "best_before_step": best_before,
             "new_baseline_score": score,
+            "loss_history": result.loss_history,  # SPEC.md 28.1 (C1)
         }
         self.curriculum_events.append(event)
         self.memory.log({"kind": "curriculum", **event})

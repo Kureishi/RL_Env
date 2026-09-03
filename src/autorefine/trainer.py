@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Tuple, Union
 
 import numpy as np
@@ -38,6 +38,8 @@ Model = Union[MLP, TreeEnsemble, BoostingEnsemble, KNN, ConvNet]
 # the spec surface stays small; deterministic — no RNG).
 WARMUP_FRACTION = 0.1
 VAL_FRACTION = 0.1
+# SPEC.md 28.1: cap on TrainResult.loss_history records (bounded, C1)
+LOSS_HISTORY_MAX = 48
 
 
 def _scheduled_lr(schedule: str, base_lr: float, t: int, total: int) -> float:
@@ -83,6 +85,10 @@ class TrainResult:
     final_loss: float
     train_seconds: float
     time_capped: bool
+    # SPEC.md 28.1 (C1): bounded train/holdout loss-over-step history
+    # ({"step": int, "train": float, "holdout": float} records, cap 48).
+    # Defaulted so existing TrainResult(...) positional calls stay valid.
+    loss_history: list = field(default_factory=list)
 
 
 def _time_exceeded(start: float, limit: float | None) -> bool:
@@ -129,6 +135,24 @@ def _train_neural(
         n_tr = n
         Xv = yv = None
 
+    # SPEC.md 28.1 (C1): the holdout probe tail — reuse early stopping's val
+    # tail when it exists (same rows), else the last VAL_FRACTION of the split.
+    # Forward-only probes: no RNG, no weight changes (the T2 pin stays green).
+    if patience > 0 and Xv is not None:
+        probe_x, probe_y = Xv, yv
+    else:
+        n_tail = min(max(1, int(round(VAL_FRACTION * n))), max(1, n))
+        probe_x, probe_y = X[-n_tail:], y[-n_tail:]
+
+    # SPEC.md 28.1 (C1): deterministic even-step sampling over train_steps
+    T = int(spec.train_steps)
+    M = min(LOSS_HISTORY_MAX, T)
+    if M == 1:
+        sample_steps = {1}
+    else:
+        sample_steps = {1 + round(i * (T - 1) / (M - 1)) for i in range(M)}
+    hist: list[dict] = []
+
     rng = np.random.default_rng(seed)
     steps_run = 0
     final_loss = float("inf")
@@ -161,9 +185,26 @@ def _train_neural(
             opt.step(_b, gb, opt_states[i][1], t)
         steps_run = t
 
-        # SPEC.md 19.1: early stopping on the held-out tail (only when on)
+        # SPEC.md 19.1: early stopping on the held-out tail (only when on).
+        # Compute the val loss once; the C1 holdout probe reuses it below when
+        # it shares these same rows (patience > 0 -> the probe IS the val
+        # tail), so a sampled step makes exactly one forward-only val eval,
+        # not two (forward-only: no RNG, no weight mutation).
+        vloss = None
         if patience > 0 and Xv is not None:
             vloss = _training_loss(model, Xv, yv, head)
+
+        # SPEC.md 28.1 (C1): record this step if it is a sampled step — the
+        # batch loss plus a forward-only holdout probe (no mutation, so the
+        # early-stopping / weight-restore below is untouched).
+        if t in sample_steps:
+            if vloss is None:
+                vloss = _training_loss(model, probe_x, probe_y, head)
+            hist.append({"step": t, "train": loss, "holdout": vloss})
+
+        # SPEC.md 19.1: early-stopping decision on the held-out tail (only
+        # when on; the val loss was already computed above).
+        if patience > 0 and Xv is not None:
             if vloss < best_val:
                 best_val = vloss
                 best_layers = [(w.copy(), b.copy()) for w, b in model.layers]
@@ -188,6 +229,7 @@ def _train_neural(
         final_loss=final_loss,
         train_seconds=elapsed,
         time_capped=time_capped,
+        loss_history=hist,  # SPEC.md 28.1 (C1)
     )
 
 
@@ -217,7 +259,12 @@ def train(
         ).fit(X, y, input_noise=spec.input_noise)
         loss = _training_loss(model, X, y, head)
         elapsed = time.perf_counter() - start
-        return TrainResult(model, n_trees, loss, elapsed, False)
+        # SPEC.md 28.1 (C1): a blocking fit has no per-step loop → one record
+        n_tail = min(max(1, int(round(VAL_FRACTION * n))), max(1, n))
+        hist = [{"step": 1, "train": loss,
+                 "holdout": _training_loss(model, X[-n_tail:], y[-n_tail:], head)}]
+        return TrainResult(model, n_trees, loss, elapsed, False,
+                           loss_history=hist)
 
     if spec.model_family == "boost":
         # Gradient-boosted ensemble (SPEC.md 19.2): same surface as tree —
@@ -233,7 +280,12 @@ def train(
         ).fit(X, y, input_noise=spec.input_noise)
         loss = _training_loss(model, X, y, head)
         elapsed = time.perf_counter() - start
-        return TrainResult(model, n_trees, loss, elapsed, False)
+        # SPEC.md 28.1 (C1): a blocking fit has no per-step loop → one record
+        n_tail = min(max(1, int(round(VAL_FRACTION * n))), max(1, n))
+        hist = [{"step": 1, "train": loss,
+                 "holdout": _training_loss(model, X[-n_tail:], y[-n_tail:], head)}]
+        return TrainResult(model, n_trees, loss, elapsed, False,
+                           loss_history=hist)
 
     if spec.model_family == "knn":
         # Non-parametric family (SPEC.md 25.2): "training" = memorizing the
@@ -250,7 +302,10 @@ def train(
         m = min(n, 256)
         loss = _training_loss(model, X[:m], y[:m], head)
         elapsed = time.perf_counter() - start
-        return TrainResult(model, 1, loss, elapsed, False)
+        # SPEC.md 28.1 (C1): knn memorizes the first m rows → train == holdout
+        hist = [{"step": 1, "train": loss, "holdout": loss}]
+        return TrainResult(model, 1, loss, elapsed, False,
+                           loss_history=hist)
 
     if spec.model_family == "convnet":
         # Grid features (SPEC.md 25.3): a convnet spec on a flat task is a

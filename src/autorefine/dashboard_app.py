@@ -16,7 +16,16 @@ import streamlit as st
 
 from autorefine import __version__
 from autorefine.dashboard import DashboardRunner, ucb_trace
-from autorefine.plotting import svg_mutation_timeline
+from autorefine.plotting import (
+    svg_action_probabilities,  # noqa: F401 (D2 view, SPEC.md 29.2)
+    svg_audio_waveform,
+    svg_loss_curves,
+    svg_mutation_timeline,
+    svg_score_gap_scatter,
+    svg_score_strip,
+    svg_seed_variance,  # D1 view (SPEC.md 29.1)
+    svg_task_returns,  # noqa: F401 (D2 view, SPEC.md 29.2)
+)
 from autorefine.tasks import CsvTask
 
 
@@ -160,6 +169,9 @@ def _run(csv_path: str, label: str, target: float, policy: str, seed: int,
     vbars = st.empty()
     vtimeline = st.empty()
     vucb = st.empty() if policy == "bandit" else None
+    # G1 + G2 gate views, live (SPEC.md 27.4): pure over the stream so far
+    vstrip = st.empty()
+    vscatter = st.empty()
     stream: list[dict] = []          # updates so far: the views' only input
 
     while not runner.done:  # runner state machine (SPEC.md 23.1)
@@ -199,6 +211,9 @@ def _run(csv_path: str, label: str, target: float, policy: str, seed: int,
                 .sort_index())
         vtimeline.markdown(  # D3: mutation timeline (SPEC.md 26.3)
             svg_mutation_timeline(stream), unsafe_allow_html=True)
+        # G1 candidate score strip + G2 score vs gen-gap scatter (SPEC.md 27)
+        vstrip.markdown(svg_score_strip(stream), unsafe_allow_html=True)
+        vscatter.markdown(svg_score_gap_scatter(stream), unsafe_allow_html=True)
         if vucb is not None and u.get("ucb"):  # D4: bandit UCB (SPEC.md 26.4)
             # the same pure function as the result view: aligned per-field
             # series with None gaps for the steps before a field was credited
@@ -278,6 +293,35 @@ def _render_result(res: dict) -> None:
     if ucb:  # D4: bandit UCB trace (SPEC.md 26.4); None for the search policy
         st.line_chart(pd.DataFrame({f: ucb[f] for f in sorted(ucb)})
                       .astype("float64"))
+    # acceptance-gate views (SPEC.md 27): G1 + G2 always; G3 only when the
+    # run has a ladder (finish() returns None otherwise, SPEC.md 27.3)
+    if res.get("strip_svg"):  # G1: candidate score strip (SPEC.md 27.1)
+        st.markdown(res["strip_svg"], unsafe_allow_html=True)
+    if res.get("scatter_svg"):  # G2: score vs gen-gap (SPEC.md 27.2)
+        st.markdown(res["scatter_svg"], unsafe_allow_html=True)
+    if res.get("ladder_svg"):  # G3: curriculum ladder (SPEC.md 27.3)
+        st.markdown(res["ladder_svg"], unsafe_allow_html=True)
+
+    # learning views (SPEC.md 28): computed once in finish(), re-rendered
+    # here from the stored result — the restored view shows the same views
+    if any(res.get(k) for k in ("loss_curves", "per_class_svg",
+                                "confusion_svg", "error_gallery", "arch_svg")):
+        st.subheader("Learning views")
+        curves = res.get("loss_curves") or {}
+        if curves:  # C1 (SPEC.md 28.1): pick an experiment's train/holdout curves
+            pick = st.selectbox("Training curves — experiment",
+                                list(curves), key="curve_pick")
+            st.markdown(svg_loss_curves(curves[pick]),
+                        unsafe_allow_html=True)
+        if res.get("per_class_svg"):  # C2 (SPEC.md 28.2)
+            st.markdown(res["per_class_svg"], unsafe_allow_html=True)
+        if res.get("confusion_svg"):  # C2 (SPEC.md 28.2)
+            st.markdown(res["confusion_svg"], unsafe_allow_html=True)
+        gallery = res.get("error_gallery")
+        if gallery:  # C3 (SPEC.md 28.3): misclassified holdout items
+            _render_gallery(gallery)
+        if res.get("arch_svg"):  # C4 (SPEC.md 28.4): what we ended up building
+            st.markdown(res["arch_svg"], unsafe_allow_html=True)
 
     st.subheader("Artifacts")
     c1, c2, c3, c4 = st.columns(4)
@@ -295,6 +339,34 @@ def _render_result(res: dict) -> None:
     )
 
 
+def _render_gallery(items: list[dict]) -> None:
+    """C3 (SPEC.md 28.3): the misclassified holdout items — an image
+    thumbnail (Pillow imported lazily inside plotting) or a hand-rolled
+    audio waveform SVG, each captioned `file — true X -> predicted Y`."""
+    from autorefine.plotting import _image_data_uri
+    cols = st.columns(4)
+    for i, it in enumerate(items):
+        with cols[i % 4]:
+            caption = (f"{it.get('file', '')} — true {it.get('label')} -> "
+                       f"predicted {it.get('predicted')}")
+            path = it.get("path")
+            if path and Path(path).exists():
+                uri = _image_data_uri(path)
+                if uri:
+                    st.markdown(
+                        f'<img src="{uri}" style="width:96px;'
+                        f'height:96px;image-rendering:pixelated"/>',
+                        unsafe_allow_html=True)
+                    st.caption(caption)
+                    continue
+            wf = it.get("waveform")
+            if wf:
+                st.markdown(svg_audio_waveform(wf, it.get("sample_rate"),
+                                               title=str(it.get("file", ""))),
+                            unsafe_allow_html=True)
+            st.caption(caption)
+
+
 def _render_restored(payload: dict) -> None:
     """Re-show the last completed run after a widget re-run (download
     click, sidebar change) — SPEC.md 23.2 persistence."""
@@ -310,6 +382,67 @@ def _render_restored(payload: dict) -> None:
     st.dataframe(pd.DataFrame(payload["rows"]), width="stretch")
     st.line_chart(pd.DataFrame({"best score": payload["best_series"]}))
     _render_result(payload["res"])
+
+
+def _render_optin_views(path, label: str, target: float, policy: str,
+                        seed: int, experiments: int, max_train: float,
+                        runs_dir: str, quality: str) -> None:
+    """D1/D2 (SPEC.md 29): the opt-in multi-run / policy views — each renders
+    only when the user presses its button (inert otherwise; the §23.2 run/
+    clear flow and persistence are unchanged).
+
+    - **Seed variance** (D1, SPEC.md 29.1): a `DashboardRunner.seed_sweep`
+      over N seeds → `svg_seed_variance`. Needs a data path.
+    - **RL policy view (precomputed)** (D2, SPEC.md 29.2): renders the
+      `action_probabilities.svg` + `task_returns.svg` a `policy-report` run
+      already wrote. **Never runs RL live** (keeps RL CLI-only, SPEC.md 23.1).
+    """
+    st.divider()
+    st.subheader("Multi-run / policy views (v0.15)")
+
+    # --- D1: seed-variance box plot (SPEC.md 29.1) ---------------------------
+    st.subheader("Seed variance — is the improvement real?")
+    if path is None:
+        st.caption("Set a data path (or upload a CSV) to run a seed sweep.")
+    else:
+        var_n = st.number_input("Number of seeds", min_value=1, max_value=25,
+                                value=3, step=1, key="var_seeds")
+        if st.button("Run the seed sweep", key="var_button"):
+            var_runner = DashboardRunner(
+                csv_path=path, label=label.strip() or None, target=float(target),
+                policy=policy, seed=int(seed), experiments=int(experiments),
+                max_train_seconds=float(max_train),
+                runs_dir=runs_dir.strip() or "runs", search_quality=quality,
+            )
+            try:
+                sweep = var_runner.seed_sweep(
+                    list(range(int(seed), int(seed) + int(var_n))))
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                passing = sum(1 for s in sweep if s["pass"])
+                beats = sum(1 for s in sweep if s["final"] > s["baseline"])
+                st.caption(f"{len(sweep)} seeds · {passing} pass target "
+                           f"{float(target):.1f} · {beats} beat their own baseline")
+                st.markdown(svg_seed_variance(sweep, target=float(target)),
+                            unsafe_allow_html=True)
+
+    # --- D2: RL policy view, precomputed (SPEC.md 29.2) ----------------------
+    st.subheader("RL policy view (precomputed — never runs RL live)")
+    st.caption("Point at a `autorefine policy-report` output directory; this "
+               "renders its precomputed SVGs (RL stays CLI-only, SPEC.md 23.1).")
+    pol_dir = st.text_input("policy-report output dir", value="", key="pol_dir")
+    if st.button("Load the policy view", key="pol_button") and pol_dir.strip():
+        pd_ = Path(pol_dir.strip())
+        ap = pd_ / "action_probabilities.svg"
+        tr = pd_ / "task_returns.svg"
+        if ap.exists() and tr.exists():
+            st.markdown(ap.read_text(encoding="utf-8"), unsafe_allow_html=True)
+            st.markdown(tr.read_text(encoding="utf-8"), unsafe_allow_html=True)
+        else:
+            st.warning(f"{pd_} has no action_probabilities.svg / "
+                       f"task_returns.svg — run `autorefine policy-report "
+                       f"--runs-dir {pd_}` first.")
 
 
 def main() -> None:
@@ -384,6 +517,11 @@ def main() -> None:
         st.caption("Press **Run** — every experiment is shown as it happens "
                    "(live table + curve), then the verdict, plots, and "
                    "downloads (SPEC.md 23.2).")
+
+    # D1/D2 (SPEC.md 29): opt-in multi-run / policy views (inert until pressed)
+    _render_optin_views(path, label, float(target), policy, int(seed),
+                        int(experiments), float(max_train),
+                        runs_dir.strip() or "runs", quality)
 
 
 main()

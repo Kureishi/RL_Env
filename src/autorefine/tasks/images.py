@@ -16,7 +16,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .media import _IMAGE_EXTS, collect_items, resolve_labels, split_indices
+from .media import (_IMAGE_EXTS, class_label_str, collect_items,
+                    resolve_labels, split_indices)
 
 _PIL_HINT = (
     "decoding images needs Pillow: pip install autorefine[image] "
@@ -74,8 +75,12 @@ class ImageTask:
         self.state_dim = int(self.grid) ** 2
         self.feature_names = [f"{self.grid}x{self.grid} grayscale"]
         self.feature_grid = (1, self.grid, self.grid)  # SPEC.md 25.3
+        # SPEC.md 28.3 (C3): keep the items + holdout split indices so the
+        # error gallery can map holdout row i -> items[ho[i]].
+        self._items = list(items)
         tr, ho, ge = split_indices(len(items), self.seed, self.split_frac,
                                    b"image-split")
+        self._ho = ho
         mean = x[tr].mean(axis=0)
         std = x[tr].std(axis=0)
         std = np.where(std == 0.0, 1.0, std)
@@ -152,3 +157,43 @@ class ImageTask:
         ss_tot = float(((y[:n] - y[:n].mean()) ** 2).sum())
         r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
         return max(0.0, 100.0 * r2)
+
+    # --- holdout inspection (SPEC.md 28.2/28.3) ------------------------------
+    def holdout_rows(self, n: int, model=None) -> tuple[np.ndarray, np.ndarray]:
+        """SPEC.md 28.2 (C2): the holdout split `(x, y)`, clamped like
+        `score()`; a `wants_grid` model (convnet) gets grid rows (25.3)."""
+        if getattr(model, "wants_grid", False):
+            x, y = self._grid_rows_for("holdout")
+        else:
+            x, y = self._rows_for("holdout")
+        if len(x) == 0:
+            return x, y
+        n = min(int(n), len(x))
+        return x[:n], y[:n]
+
+    def holdout_errors(self, model, n: int = 200,
+                       n_max: int = 8) -> list[dict]:
+        """SPEC.md 28.3 (C3): the holdout items the model misclassifies
+        (argmax mismatch), in holdout order, <= `n_max` items, each
+        `{"file", "path", "label", "predicted"}` — labels from the task's
+        canonical `class_values`, not the raw item labels."""
+        if self.head != "softmax" or int(n_max) <= 0:
+            return []
+        x, y = self.holdout_rows(n, model)
+        if len(x) == 0:
+            return []
+        pred = np.asarray(model.forward(x), dtype=np.float64).argmax(axis=1)
+        out: list[dict] = []
+        for i in range(len(x)):
+            if pred[i] == y[i]:
+                continue
+            p, _ = self._items[int(self._ho[i])]  # holdout row i -> item
+            out.append({
+                "file": p.name,
+                "path": str(p),
+                "label": class_label_str(self.class_values[int(y[i])]),
+                "predicted": class_label_str(self.class_values[int(pred[i])]),
+            })
+            if len(out) >= int(n_max):
+                break
+        return out

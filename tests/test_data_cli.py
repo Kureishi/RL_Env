@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from autorefine import AutoRefineEnv, BanditPolicy, Budget, CsvTask
-from autorefine.cli import main as cli_main
+from autorefine.cli import _report_extras, main as cli_main
 from autorefine.memory import RunMemory
 from autorefine.plotting import html_report
 from autorefine.tasks import TASKS
@@ -211,12 +211,21 @@ def test_report_html_written_and_deterministic(tmp_path, capsys):
     html_path = Path(env.run_dir) / "report.html"
     text = html_path.read_text(encoding="utf-8")
     assert text.startswith("<!doctype html>")
-    assert text.count("<svg") == 2  # score curve + pareto embedded
+    # the two core plots are embedded (SPEC.md 21.2); the v0.14 learning
+    # views (C1-C4) add more SVGs, so assert the core ones by title, not a
+    # fixed count (SPEC.md 28.1-28.4)
+    assert text.count("<svg") >= 2
+    assert "score vs experiment" in text
+    assert "pareto frontier" in text
     assert f"{summary['final_best_score']:.3f}" in text
     assert "churn" in text  # task config section
-    # G2: pure function of (summary, entries)
+    # G2: pure function of (summary, entries) + the same None-safe extras
     mem = RunMemory(Path(env.run_dir))
-    assert html_report(summary, mem.load_experiments()) == text
+    extras = _report_extras(summary, Path(env.run_dir))
+    assert html_report(summary, mem.load_experiments(),
+                       diagnostics=extras["diagnostics"],
+                       gallery=extras["gallery"],
+                       arch_svg=extras["arch_svg"]) == text
 
 
 def test_report_html_json_keeps_stdout_pure(tmp_path, capsys):

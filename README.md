@@ -367,7 +367,56 @@ Fixed-dim `Box` observation, `Discrete` action space (the mutation catalog).
   in the note and table, a field × step mutation-timeline SVG (accepted /
   scored-rejected / unscored), and the bandit's UCB trace (bandit policy
   only) — rendered live during the run and again in the result section
-  (SPEC.md 26, A16).
+  (SPEC.md 26, A16). v0.13 adds three **acceptance-gate views** explaining
+  how the gate decided, derived purely from the same update stream plus the
+  experiment log: a **candidate-score strip** (accepted / scored-rejected /
+  unscored lanes — are the rejections near-misses or garbage?), a
+  **score-vs-gen-gap scatter** with the S18.5 5%-of-score tolerance line
+  (where the overfit penalty bites), and — for curriculum runs only — a
+  **ladder curve** with a marker at each difficulty step-up (n_bits /
+  p_flip); `report --html` gains the ladder section and `report --plot`
+  gains `ladder_curve.svg` when the run has one (SPEC.md 27, A17).
+  v0.14 adds four **learning views** explaining what the model actually
+  *learned*: per-experiment **training curves** (train/holdout loss over
+  steps — the only core change, `train()` now returns a bounded
+  `loss_history`, ≤ 48 records, logged per experiment, SPEC.md 28.1);
+  **final-model diagnostics** (per-class accuracy bars + a confusion matrix
+  on the holdout, turning "96.4%" into "fails on class X", SPEC.md 28.2);
+  an **error gallery** for media tasks (inline image thumbnails / audio
+  waveforms of the misclassified holdout items, ≤ 8, SPEC.md 28.3); and a
+  **spec → architecture diagram** (the best spec rendered as an annotated
+  block diagram — layers, activation, family, knn_k, conv filters,
+  SPEC.md 28.4). The dashboard renders all four under a "Learning views"
+  subheader, `report --html` gains the architecture / diagnostics / gallery
+  sections, and `report --plot` writes `architecture.svg` + `per_class.svg`
+  + `confusion.svg`. The core stays PIL/soundfile-free (optional extras,
+  §3/§21.1) and `import autorefine` never pulls them in (SPEC.md 28, A18).
+- **Multi-run / policy views (v0.15):** the two questions a single run
+  cannot answer. **Is the improvement real?** — `autorefine variance
+  --data PATH --seeds N` re-runs the same `fit` budget under N distinct
+  seeds (base `--seed`, default 7) and renders a **seed-variance box
+  plot** on a fixed 0–100 axis: min/q1/median/q3/max of the finals
+  (hand-rolled linear quantile), one paired baseline→final marker per
+  seed, a dashed target line, and `passing = P/N` — writing
+  `seed_variance.svg` + `seed_sweep.json` (the per-seed `verdict` carries
+  the §22.1 gate; a MISS seed still exits 0 — a variance report is a
+  measurement — and `--json` prints pure JSON). **What is the RL policy
+  doing?** — `autorefine policy-report --task TASK` (or `--multi --tasks
+  sine-v1,parity-v1,cartpole-v1`, SPEC.md 20.2) trains the meta-RL policy
+  with the **opt-in per-step trace** (off by default, so existing
+  `train_policy`/`train_multi_policy` callers and the §20.2 multi-task pin
+  stay bit-identical) and renders **per-step action-probability bars**
+  over the 77-action catalog (top-K + `rest`, the sampled action
+  highlighted) and **per-task episode-return curves** — writing
+  `action_probabilities.svg` + `task_returns.svg` + the raw
+  `policy_trace.json`/`policy_returns.json`; `MetaRLPolicy
+  .probabilities(env_state)` exposes the exact masked softmax `propose()`
+  would sample from (pure, no RNG draw). The dashboard gains the two
+  opt-in panels — a button-driven **Seed variance** sweep and an **RL
+  policy view (precomputed)** that renders a `policy-report` directory's
+  SVGs and **never runs RL live** (RL stays CLI-only, SPEC.md 23.1). Zero
+  new core dependencies (NumPy only; both SVGs are hand-rolled valid XML)
+  and `import autorefine` never pulls in streamlit (SPEC.md 29, A19, M18).
 - **Input modalities (v0.10):** `autorefine fit --data DIR` now accepts a
   labelled directory — one subfolder per class (or an `index.csv`) of
   **images** (PNG/JPG/JPEG/BMP/GIF; grayscale 32×32 features; optional

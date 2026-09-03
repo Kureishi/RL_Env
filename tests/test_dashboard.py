@@ -1,5 +1,6 @@
 """v0.9 visual dashboard: core runner + optional app + launcher (SPEC.md 23, A13),
-plus the v0.12 decision views (SPEC.md 26, A16).
+plus the v0.12 decision views (SPEC.md 26, A16) and the v0.13
+acceptance-gate views (SPEC.md 27, A17).
 
 The runner is streamlit-free and carries the run semantics (SPEC.md 23.1);
 the app tests follow the §3/§21.1 optional-dependency pattern (skipped when
@@ -17,7 +18,13 @@ import pytest
 
 from autorefine import DashboardRunner
 from autorefine.dashboard import field_stats, spec_diff, ucb_trace
-from autorefine.plotting import svg_mutation_timeline
+from autorefine.plotting import (
+    html_report,
+    svg_ladder_curve,
+    svg_mutation_timeline,
+    svg_score_gap_scatter,
+    svg_score_strip,
+)
 
 
 def _write_csv(tmp_path: Path, name: str = "data.csv") -> Path:
@@ -398,6 +405,185 @@ def test_app_renders_decision_views(tmp_path):
     assert sbars >= 1   # D1 renders for both policies
     assert slines == 1  # best-score curve only — no UCB chart (SPEC.md 26.4)
     assert "mutation timeline" in " ".join(m.value for m in s.markdown)
+
+
+# --- acceptance-gate views (SPEC.md 27, A17) ---------------------------------
+
+def test_score_strip_hand_computed():
+    # G1 (SPEC.md 27.1): one dot per update, in the right lane, scored dots
+    # at their exact position on the fixed 0-100 axis, unscored dots in the
+    # labelled no-score zone with the exact reason in the tooltip
+    stream = [
+        {"index": 1, "accepted": True, "reason": None, "candidate_score": 72.5},
+        {"index": 2, "accepted": False, "reason": None, "candidate_score": 60.0},
+        {"index": 3, "accepted": False, "reason": None, "candidate_score": 80.0},
+        {"index": 4, "accepted": False, "reason": "duplicate", "candidate_score": None},
+        {"index": 5, "accepted": False, "reason": "invalid_spec",
+         "candidate_score": None},
+    ]
+    svg = svg_score_strip(stream)
+    assert svg.startswith("<svg")
+    assert svg.count("<circle") == 5  # one dot per update
+    # the three outcome lanes (SPEC.md 27.1)
+    assert ">accepted</text>" in svg
+    assert ">scored-rejected</text>" in svg
+    assert ">unscored</text>" in svg
+    assert "no score" in svg  # the labelled zone at the left edge
+    # x(score) = L + pw * score/100 = 72 + 544 * s/100
+    assert 'cx="466.4"' in svg  # x(72.5), accepted lane
+    assert 'cx="398.4"' in svg  # x(60.0), scored-rejected lane
+    assert 'cx="507.2"' in svg  # x(80.0), scored-rejected lane
+    assert 'cx="86.0"' in svg and 'cx="104.0"' in svg  # unscored, stacked left
+    # the exact reason for the unscored rejections (SPEC.md 27.1)
+    assert "step 4: unscored (duplicate)" in svg
+    assert "step 5: unscored (invalid_spec)" in svg
+    # legend carries the per-class counts
+    assert "accepted (1)" in svg
+    assert "scored-rejected (2)" in svg
+    assert "unscored (2)" in svg
+    empty = svg_score_strip([])
+    assert empty.startswith("<svg")
+    assert empty.count("<circle") == 0
+    assert "no updates" in empty
+
+
+def test_score_gap_scatter_hand_computed():
+    # G2 (SPEC.md 27.2): one dot per scored update at (score, gen_gap) with
+    # the outcome color; the 5%-of-score tolerance line is drawn; unscored
+    # updates contribute no dots
+    stream = [
+        {"index": 1, "accepted": True, "candidate_score": 70.0, "gen_gap": 1.2},
+        {"index": 2, "accepted": False, "candidate_score": 80.0, "gen_gap": 4.0},
+        {"index": 3, "accepted": False, "candidate_score": None, "gen_gap": None},
+    ]
+    svg = svg_score_gap_scatter(stream)
+    assert svg.startswith("<svg")
+    assert svg.count("<circle") == 2  # the unscored update adds no dot
+    # axes: L=72, R=24, T=28, B=44 -> pw=544, ph=288; gaps {1.2, 4.0}
+    # -> y_hi = max(0.05*80, 4.0) * 1.15 = 4.6, y_lo = 0
+    assert 'cx="452.8"' in svg  # X(70) = 72 + 544 * 0.70
+    assert 'cx="507.2"' in svg  # X(80) = 72 + 544 * 0.80
+    assert 'cy="240.9"' in svg  # Y(1.2) = 28 + 288 * (1 - 1.2/4.6)
+    assert 'cy="65.6"' in svg   # Y(4.0) = 28 + 288 * (1 - 4.0/4.6)
+    assert 'fill="#15803d"' in svg  # accepted, green
+    assert 'fill="#b91c1c"' in svg  # scored-rejected, red
+    assert "stroke-dasharray" in svg  # the tolerance boundary
+    assert "0.05 * score" in svg  # the 18.5 tolerance label
+    empty = svg_score_gap_scatter([
+        {"index": 1, "accepted": False, "candidate_score": None, "gen_gap": None}])
+    assert empty.startswith("<svg")
+    assert empty.count("<circle") == 0
+    assert "no scored updates" in empty
+
+
+def test_ladder_curve_hand_computed():
+    # G3 (SPEC.md 27.3): one point per log row; running best = baseline,
+    # accepted bumps, rejected keeps, step-up resets to new_baseline_score
+    entries = [
+        {"kind": "baseline", "holdout_score": 50.0, "accepted": False},
+        {"kind": "experiment", "holdout_score": 60.0, "accepted": True},
+        {"kind": "experiment", "holdout_score": 55.0, "accepted": False},
+        {"kind": "curriculum", "level": 1, "n_bits": 4, "p_flip": 0.10,
+         "new_baseline_score": 40.0},
+        {"kind": "experiment", "holdout_score": 45.0, "accepted": True},
+    ]
+    levels = [{"level": 1, "n_bits": 4, "p_flip": 0.10, "ceiling": 73.0,
+               "best_before_step": 60.0, "new_baseline_score": 40.0}]
+    svg = svg_ladder_curve(entries, levels)
+    assert svg.startswith("<svg")
+    assert svg.count("<circle") == 5  # one point per log row
+    # one marker per level row, labelled with its n_bits / p_flip
+    assert svg.count('stroke-dasharray="5 4"') == 1
+    assert "4 bits" in svg and "p_flip 0.10" in svg
+    # running best: 50 -> 60 (accepted) -> 60 (rejected keeps) -> 40 (step-up)
+    # -> 45 (accepted); lo=40, hi=60 -> Y(v) = 28 + 288 * (1 - (v-40)/20)
+    for y in ("172.0", "28.0", "316.0", "244.0"):  # 50, 60, 40, 45
+        assert f'cy="{y}"' in svg
+    # no step-ups -> the empty-case text, not a curve
+    no_steps = svg_ladder_curve(
+        [{"kind": "baseline", "holdout_score": 50.0},
+         {"kind": "experiment", "holdout_score": 60.0, "accepted": True}], [])
+    assert no_steps.startswith("<svg")
+    assert no_steps.count("<circle") == 0
+    assert "no step-ups" in no_steps
+    # empty log -> the empty-case header
+    empty = svg_ladder_curve([], [])
+    assert empty.startswith("<svg")
+    assert empty.count("<circle") == 0
+    assert "no rows" in empty
+
+
+def test_runner_finish_carries_gate_views(tmp_path):
+    # A17: finish() carries G1 + G2 always; G3 is None for non-curriculum
+    # runs, and same-seed legacy runs give bit-identical gate views (G2)
+    r = _runner(tmp_path)  # bandit, 4 experiments
+    r.start()
+    res = r.run_all()
+    assert res["strip_svg"].startswith("<svg")
+    assert res["scatter_svg"].startswith("<svg")
+    assert res["ladder_svg"] is None  # CSV runs have no ladder (SPEC.md 27.3)
+    assert "Curriculum ladder" not in res["report_html"]  # nor the html
+    views = []
+    for i in range(2):
+        r2 = _runner(tmp_path, runs_dir=str(tmp_path / f"gv{i}"),
+                     search_quality="legacy")
+        r2.start()
+        res2 = r2.run_all()
+        views.append((res2["strip_svg"], res2["scatter_svg"],
+                      res2["ladder_svg"]))
+    assert views[0] == views[1]
+
+
+def test_curriculum_run_ladder_and_html_report(tmp_path):
+    # A17: a real parity curriculum run (the SPEC.md 20.1 recipe) -> one
+    # marker per summary level row; html_report embeds the ladder section
+    # while a non-curriculum summary gains no section
+    from autorefine import AutoRefineEnv, BanditPolicy, Budget, ParityCurriculum
+    env = AutoRefineEnv(
+        task="parity-v1", seed=7, budget=Budget(4, 300, 30),
+        runs_dir=tmp_path / "cur",
+        curriculum=ParityCurriculum(seed=7, trigger_fraction=0.3),
+    )
+    policy = BanditPolicy(seed=7)
+    state = env.reset()
+    while not env.done:
+        state = env.step(policy.propose(state))[0]
+    summary = env.memory.load_summary()
+    entries = env.memory.load_experiments()
+    levels = summary["curriculum"]["levels"]
+    assert levels  # trigger_fraction=0.3 -> the run actually stepped up
+    assert [e["kind"] for e in entries].count("curriculum") == len(levels)
+    svg = svg_ladder_curve(entries, levels)
+    assert svg.count('stroke-dasharray="5 4"') == len(levels)  # one per level
+    for lv in levels:
+        assert f'{lv["n_bits"]} bits' in svg
+        assert f'p_flip {lv["p_flip"]:.2f}' in svg
+    html = html_report(summary, entries)
+    assert "Curriculum ladder" in html  # the section is embedded (SPEC.md 27.4)
+
+
+def test_app_renders_gate_views(tmp_path):
+    # A17: G1 + G2 render live and in the result (SPEC.md 27.4); a CSV run
+    # has no ladder, so no ladder view appears anywhere
+    pytest.importorskip("streamlit", reason="dashboard app is optional (SPEC.md 23)")
+    from streamlit.testing.v1 import AppTest
+
+    csv = _write_csv(tmp_path, name="gate.csv")
+    at = AppTest.from_file(str(APP), default_timeout=300)
+    at.run()  # first render materializes the sidebar widgets
+    assert not at.exception
+    at.text_input(key="csv_path").set_value(str(csv))
+    at.text_input(key="runs_dir").set_value(str(tmp_path / "runs_gate"))
+    at.number_input(key="experiments").set_value(2)
+    at.number_input(key="max_train").set_value(5.0)
+    at.run()  # re-render: data preview + the Run button (idle stops earlier)
+    assert not at.exception
+    at.button(key="run_button").set_value(True).run()
+    assert not at.exception
+    md = " ".join(m.value for m in at.markdown)
+    assert md.count("candidate score strip") >= 2  # live + result
+    assert md.count("score vs gen-gap scatter") >= 2  # live + result
+    assert "curriculum ladder (best score)" not in md  # no ladder for CSV
 
 
 # --- launcher (SPEC.md 23.4) --------------------------------------------------

@@ -176,6 +176,17 @@ def resolve_labels(labels: list) -> tuple[str, int, list, np.ndarray]:
             np.array([idx[v] for v in labels], dtype=np.int64))
 
 
+def class_label_str(c: object) -> str:
+    """Display string for a canonical `class_values` entry (SPEC.md 28.3).
+
+    Numeric classes render without a trailing ".0" (1.0 -> "1"); string
+    class names pass through. Deterministic, ASCII-safe for captions.
+    """
+    if isinstance(c, float) and c.is_integer():
+        return str(int(c))
+    return str(c)
+
+
 def split_indices(n: int, seed: int, split_frac: float,
                   salt: bytes) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Seed-derived train/holdout/gen partition — the §22.1 rule (G2)."""

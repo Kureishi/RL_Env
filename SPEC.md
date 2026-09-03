@@ -1485,3 +1485,426 @@ or streamlit-native charts only).
 
 **M15** — v0.12 dashboard decision views: field win-rate, spec diff,
 mutation timeline, bandit UCB trace (A16).
+
+---
+
+## 27. Dashboard acceptance-gate views (v0.13)
+
+The v0.12 decision views (SPEC.md 26) explain *why the improver chose
+what it chose*. This section explains *how the acceptance gate decided*
+(SPEC.md 18.6, §22.1) — three views derived entirely from data the loop
+already records: the runner's update stream (per-step candidate score,
+outcome, gen gap, SPEC.md 23.1) and, for parity curriculum runs, the
+experiment log plus the summary's ladder history (SPEC.md 20.1).
+**Zero new logging, zero new dependencies**; the core stays streamlit-free
+and NumPy-only (SPEC.md 3, §23.1).
+
+### 27.1 G1 — candidate score strip
+`svg_score_strip(rows)` (plotting.py, pure, valid XML like the §21.2/§26.3
+charts): one horizontal lane per outcome class — accepted (green),
+scored-rejected (red), unscored (grey: the `duplicate` /
+`duplicate_stall` / `invalid_spec` rejections, which carry no score,
+SPEC.md 6 R3 / §25.4) — and one dot per update: scored candidates at
+their exact `candidate_score` on a fixed 0–100 score axis, unscored
+rejections stacked in a labelled "no score" zone at the left edge. Each
+dot carries a tooltip (step, class; the exact reason for unscored), and
+the legend carries the per-class counts. Answers "are the rejections
+near-misses or garbage" — i.e. whether the reward signal is still
+informative — which the best-score line alone hides. Empty stream →
+header text, like the other charts.
+
+### 27.2 G2 — score vs gen-gap scatter
+`svg_score_gap_scatter(rows)` (plotting.py, pure): one dot per scored
+update at (`candidate_score`, `gen_gap`), colored by outcome (accepted
+green, scored-rejected red), on the fixed 0–100 score axis and a
+data-driven gap axis. The §18.5 tolerance boundary `gen_gap = 0.05 ·
+score` is drawn as a dashed reference line — the region above it is
+where the overfit penalty bites — making "improved on holdout but
+overfit, so it was rejected" visible at a glance. Unscored updates
+contribute no dots. Empty (no scored updates) → header text.
+
+### 27.3 G3 — curriculum ladder curve (parity runs)
+`svg_ladder_curve(entries, levels)` (plotting.py, pure): the best-score
+curve over an experiment log that includes curriculum step-ups. Sequence
+= the `baseline` / `experiment` / `curriculum` rows in log order; the
+running best is the baseline's score, a candidate's score when accepted,
+unchanged on rejection, and `new_baseline_score` at each step-up (the
+re-baselining, SPEC.md 20.1). Each step-up gets a vertical marker labeled
+with its `n_bits` / `p_flip` from `summary["curriculum"]["levels"]`
+(matched by order — one level row per step-up, SPEC.md 20.1). Shows why
+the curve plateaus against the old ceiling, then drops and climbs at
+each difficulty change. Rendered only when the run actually has a
+ladder: `finish()` sets `ladder_svg` to `None` (not an empty-case SVG)
+unless `summary["curriculum"]` is present, `html_report` adds a
+"Curriculum ladder" section only then, and `report --plot` writes
+`ladder_curve.svg` only then. Non-curriculum runs are byte-identical to
+v0.12's output.
+
+### 27.4 Rendering
+- **Dashboard app** (SPEC.md 23.2): G1 + G2 as live placeholders,
+  recomputed from the update stream so far at each step (the §26.5 live
+  pattern; the views are global over the stream, so no new per-update
+  keys are added), and again in the result's "Decision views"
+  subheader — G3 as well, when present. The restored view re-renders
+  everything from the stored result (SPEC.md 23.2 persistence).
+- **Report**: `report.html` (§22.2) gains the G3 section when the
+  summary carries a ladder; `report --plot` (§21.2) gains
+  `ladder_curve.svg` under the same condition.
+
+### 27.5 Non-goals (v0.13)
+No new `experiments.jsonl` rows and no new update-stream keys (the views
+are derived); no built-in-task mode for the dashboard (G3 renders in the
+app only if the run has a ladder — parity runs stay CLI-driven,
+SPEC.md 20.1); no per-experiment CI-margin / eff-decomposition charts —
+the gate's per-step inputs (Δeff, SE, penalty terms) stay in the log and
+summary, this section visualizes the gate's outcomes over the run; no
+new dependencies (hand-rolled SVG or streamlit-native, §3/§21.1 pattern).
+
+### 27.6 Acceptance (A17)
+- The view functions are pure and deterministic: same inputs →
+  bit-identical SVG; every output is valid XML (starts `<svg`); empty
+  cases render header text, not an error.
+- G1: hand-computed stream → one dot per update, in the right lane
+  (accepted / scored-rejected / unscored), unscored dots in the no-score
+  zone with the exact reason in the tooltip, legend counts per class;
+  scored dots at their hand-computed x position; empty stream → header.
+- G2: hand-computed stream → one dot per scored update at its
+  hand-computed (score, gen-gap) position with the right outcome color;
+  the 5%-of-score tolerance line is present; unscored updates add no
+  dots; empty → header.
+- G3: hand-computed entries + levels → one point per log row, the
+  running-best series matches a hand computation (accepted bumps,
+  rejected keeps, step-up resets to `new_baseline_score`); one marker
+  per level row with its `n_bits`/`p_flip` in the label; no step-ups →
+  empty case. A real parity curriculum run (the SPEC.md 20.1 recipe)
+  produces one marker per summary level row, and `html_report` embeds
+  the ladder while a non-curriculum summary does not gain the section.
+- Runner: `finish()` carries `strip_svg` / `scatter_svg` (always) and
+  `ladder_svg` (`None` for non-curriculum runs); same-seed legacy runs →
+  bit-identical gate views; the existing A16 assertions (update keys,
+  determinism, JSON-safety) stay green.
+- App (streamlit optional, §3/§21.1): the end-to-end run renders G1 + G2
+  live and in the result; A13–A16 stay green; `import autorefine` never
+  pulls in streamlit.
+- Full suite green; the T2 and §18.7 pins untouched.
+
+### 27.7 Milestone
+
+**M16** — v0.13 dashboard acceptance-gate views: candidate-score strip,
+score-vs-gen-gap scatter, curriculum ladder curve (A17).
+
+---
+
+## 28. Dashboard learning views (v0.14)
+
+The v0.13 gate views (SPEC.md 27) explain *how the gate decided*; these views
+explain *what the model is actually learning* — its loss trajectory, its
+per-class behavior on the holdout, the items it still gets wrong, and the
+architecture that won. Four views, C1–C4 (matching the §26 D* / §27 G* naming
+pattern). C1 is the only one with a core change (the trainer returns a bounded
+`loss_history`); C2–C4 render over data the run already has — C2 is one extra
+forward pass, C3/C4 none. **No new core dependencies** (NumPy only; PIL optional
+for C3 image thumbnails, soundfile optional for C3 MP3 — the §3/§21.1 lazy-import
+pattern, so `import autorefine` stays clean); **no new JS/GUI** beyond the
+existing Streamlit app (SPEC.md 3); the T2 determinism pin (§18.7) stays green
+(the C1 probes are forward-only — no RNG, no weight changes).
+
+### 28.1 C1 — per-experiment training curves
+`train()` (SPEC.md 4/15) now returns `TrainResult.loss_history`: a bounded
+list of `{"step": int, "train": float, "holdout": float}` records, capped at
+`LOSS_HISTORY_MAX = 48`. The shape per family:
+- **neural (mlp / convnet)** — sampled at deterministic even steps over
+  `train_steps` (`T`): `M = min(48, T)`, `M == 1 → {1}`, else
+  `t_i = 1 + round(i·(T−1)/(M−1))` for `i in range(M)`. "train" is the batch
+  loss at that step; "holdout" is a forward-only probe on the deterministic
+tail (`max(1, round(VAL_FRACTION·n))` rows — the same tail early stopping uses,
+reusing the val split when patience > 0, else the last `n_tail` rows).
+- **tree / boost** — exactly one record `{"step": 1, "train": final_loss,
+  "holdout": tail-probe}` (blocking fits have no per-step loop).
+- **knn** — one record where both "train" and "holdout" are the loss on the
+  first `m = min(n, 256)` rows — the exact rows the reported final loss uses
+  (a memorized model, so they are equal by construction).
+- degenerate time-cap-0 early returns stay empty (the default `[]`).
+
+The env logs `loss_history` on the baseline row (reset), the experiment row
+(step, and the `info` dict), and the curriculum re-baseline row; duplicate and
+invalid-spec rows carry none (no key). `svg_loss_curves(history)` (plotting.py,
+pure, valid XML): two polylines (train = `_LINE`, holdout = `_BASELINE`),
+data-driven loss axis, step axis, a legend, and an empty case → header text.
+`finish()` builds `loss_curves: {label: history}` with labels "baseline",
+"experiment 1…", "curriculum 1…" (per-kind counters; entries without a
+non-empty `loss_history` are skipped). The app renders a selectbox over
+`res["loss_curves"]` → the SVG in a "Learning views" subheader (result-only,
+SPEC.md 23.2). `report.html`'s experiment table gains a per-row embedded curve
+SVG column ONLY when any entry has `loss_history` — old-run reports stay
+byte-identical (SPEC.md 22.2).
+
+### 28.2 C2 — final-model diagnostics
+New module `diagnostics.py`: `holdout_diagnostics(task, model, n=200) ->
+dict | None`. Returns `None` when `task.head != "softmax"`, or the task exposes
+no `holdout_rows` (episode tasks: cartpole/parity/sine/gridnav — non-goal,
+SPEC.md 28.5), or `class_values` is falsy, or there are 0 holdout rows.
+Otherwise `{"n": int, "correct": int, "per_class": [float 0–100],
+"confusion": [[int]], "class_counts": [int], "class_labels": [str]}`.
+Per-class accuracy is `per_class[i] = 100 · confusion[i][i] / class_counts[i]`
+(0.0 for an empty class); invariants: each row sums to `class_counts[i]` and
+`correct` = the diagonal sum (the confusion matrix is built with `np.add.at` —
+deterministic, correct for repeated indices).
+
+New task protocol method `holdout_rows(n, model=None)` on CsvTask / ImageTask /
+AudioTask: clamps `n` like `score()` and returns the holdout `(x, y)`, routing
+to grid rows when `model.wants_grid` (mirrors each `score()`'s routing,
+SPEC.md 25.3). `fit` output gains per-class accuracy lines + a weakest-class
+hint ("the model fails on class X") after the gate line. `report --plot`
+(SPEC.md 21.2) writes `per_class.svg` + `confusion.svg`; `report.html` (22.2)
+gains a "Holdout diagnostics" section (per-class bars + confusion SVG) when the
+data is present. plotting.py: `svg_per_class_bars(diag)`,
+`svg_confusion_matrix(diag)` (both pure, valid XML, empty-safe).
+
+### 28.3 C3 — error gallery (media tasks)
+`holdout_errors(model, n=200, n_max=8)` on ImageTask / AudioTask: the holdout
+items the model misclassifies (argmax mismatch), in holdout order, ≤ `n_max`
+items — `{"file", "path", "label", "predicted"}`; audio adds
+`{"waveform": [≤512 floats], "sample_rate": int}` (a deterministic block-mean
+downsample of the decoded signal via the existing `_load_signal`). Labels come
+from the task's canonical `class_values`, not the raw item labels.
+plotting.py: `svg_audio_waveform(values, sample_rate=None, title="")` (pure,
+data-driven y-axis, a zero line when 0 is in range, empty → header). App: an
+image thumbnail (`st.image`, PIL lazy) or an inline waveform SVG, each captioned
+`file — true → predicted`. `report.html` (22.2): an "Error gallery" section —
+image thumbnails as base64 PNG data URIs (PIL lazy-import; a text-list fallback
+when PIL is absent or a decode fails), audio inline waveform SVGs + captions.
+CSV tasks carry no gallery (SPEC.md 28.5); an empty gallery (0 errors) renders
+no section.
+
+### 28.4 C4 — spec → architecture diagram
+plotting.py: `svg_architecture(spec, state_dim, n_out)` — a small horizontal
+annotated block diagram: an input block (`state_dim`) → the family body → an
+output block (`n_out`). Per family: mlp one rect per hidden layer (depth-0 →
+"linear"); convnet the verified conv/pool/FC pipeline with its `c1`/`c2`;
+tree "N trees (depth D), bagged"; boost "N rounds (depth D), boosted" (in both
+`N = train_steps // 100` clamped 2..50 as in the trainer, `D = architecture[0]`);
+knn "k = knn_k (nearest neighbors)". An annotations row carries the optimizer
+(always) plus the LR schedule, early stopping, gradient clipping, and label
+smoothing when non-default. ASCII-only (e.g. "3x3", "->"). Rendered in the
+dashboard result (task from `self.env.task`, spec from `self.env.best_spec`),
+in `report.html` (the task reconstructed from the summary's `task`/`seed`/
+`task_config` exactly as `eval` does, incl. the curriculum fallback), and
+`report --plot` writes `architecture.svg`.
+
+### 28.5 Non-goals (v0.14)
+No JS/GUI beyond the existing app; no episode-task or mse diagnostics (C2 is
+classification-only — cartpole/parity/sine/gridnav carry no `holdout_rows`);
+no CSV error gallery (C3 is media-only); no live per-step curve chart in the
+app (C1 is result-only — live would need re-rendering a growing curve every
+step, out of scope); no unbounded loss history (cap 48); no new core
+dependencies (PIL/soundfile stay optional, §3/§21.1).
+
+### 28.6 Acceptance (A18)
+- **C1**: hand-computed `t_i` sampling for a known `train_steps`; records are
+  finite with increasing steps; tree/boost/knn each yield exactly one record;
+  the env's baseline / experiment / curriculum log rows carry `loss_history`
+  (duplicate / invalid rows carry none); the runner's updates carry it
+  JSON-safe; `finish()`'s `loss_curves` labels are correct per kind;
+  `svg_loss_curves` is valid/deterministic with hand-computed point coordinates
+  and an empty case; `report.html` embeds per-row curves when present and stays
+  byte-identical when absent; the T2 pin (§18.7) stays green.
+- **C2**: `holdout_diagnostics` invariants (row sums = class_counts, correct =
+  diag sum, the per-class formula) on a fixed CSV; `None` for an mse task and
+  for a task without `holdout_rows`; `fit` output has the per-class lines +
+  weakest-class hint; `report --plot` writes `per_class.svg` / `confusion.svg`;
+  the html section renders; `html_report(summary, entries)` is byte-identical
+  when the new kwargs are `None`.
+- **C3**: `holdout_errors` returns ≤ `n_max` items with labels from
+  `class_values`; audio waveforms are ≤ 512 floats; `svg_audio_waveform` is
+  valid and empty-safe; a media run's html carries the gallery.
+- **C4**: `svg_architecture` shows the right blocks + annotations per family
+  (mlp / convnet / tree / boost / knn); the html section and `report --plot`
+  file are present.
+- **Runner/app (A18)**: `finish()` carries all new keys (`loss_curves`,
+  `diagnostics`, `per_class_svg`, `confusion_svg`, `error_gallery`,
+  `arch_svg`); the app renders the "Learning views" subheader; `import
+  autorefine` never pulls in PIL / streamlit / soundfile.
+- Full suite green; the T2 and §18.7 pins untouched.
+
+### 28.7 Milestone
+
+**M17** — v0.14 dashboard learning views: training curves, final-model
+diagnostics, error gallery, architecture diagram (A18).
+
+---
+
+## 29. Multi-run / policy views (v0.15)
+
+The v0.13/v0.14 views explain one run. These two views answer the two
+questions a single run cannot: **is the improvement real** (D1 — the same
+budget under N seeds) and **what is the RL policy actually doing** (D2 — the
+per-step action distribution and per-task returns). D1 reuses the existing
+`DashboardRunner` loop (SPEC.md 23.1); D2 reuses the existing `train_policy` /
+`train_multi_policy` machinery (SPEC.md 15/20.2) — no new training, only new
+rendering and an opt-in trace. **No new core dependencies** (NumPy only; the
+two new SVGs are hand-rolled valid XML like the §21.2/§26/§27/§28 charts); the
+D2 trace is **off by default** so every existing `train_policy`/
+`train_multi_policy` caller and the §20.2 multi-task pin stay bit-identical;
+RL **stays CLI-only** (SPEC.md 23.1) — the app gains only an opt-in
+*precomputed* view that renders artifacts a `policy-report` run already wrote
+(it never runs RL live).
+
+### 29.1 D1 — seed-variance box plot
+`plotting.py`: `svg_seed_variance(seeds, target=None, width=640,
+height=360)` (pure, valid XML, deterministic G2, empty → header text, ASCII
+text). `seeds` is a list of per-seed dicts, each carrying `baseline` (float),
+`final` (float) and optionally `seed` (int). The chart:
+- a fixed vertical **0–100 score axis** (`y(s) = T + ph·(1−s/100)`), like the
+  §27.1/§27.2 fixed-score charts;
+- a **box-and-whisker** over the `final` scores: whiskers to min/max, the box
+  body spanning q1–q3, a median line — quartiles from a hand-rolled
+  linear-interpolation quantile `_quantile(sorted_vals, p)` (position
+  `p·(n−1)`, the NumPy `linear` method; n=1 → that single value). The median,
+  q1, q3, min, max are also written as text annotations so the SVG is
+  self-documenting and assertable;
+- one **paired baseline → final marker per seed** (a diamond at `baseline`, a
+  circle at `final`, a connecting line), laid out left-to-right in input order
+  and labelled with its `seed` when present — this is the "is the improvement
+  real?" half (the spread of the finals plus where each started);
+- a dashed **target line** at `y(target)` with a `target X.XX` label when
+  `target` is a finite number;
+- a summary line `n seeds = N · passing = P/N` (`P` = seeds whose `final >=
+  target`; when `target` is None it reads `passing = -`).
+
+`dashboard.py`: `DashboardRunner.seed_sweep(seeds, on_update=None) -> list`
+— the same flags re-run under N seeds. For each seed it builds a **fresh**
+`DashboardRunner` from `self`'s parameters (a private `_clone(seed)`),
+drives `start()` → `next()`…→ `finish()` (the exact §23.1 loop; `on_update`
+is forwarded per step), and appends one JSON-safe dict: `{seed, baseline,
+final, target, pass, verdict, experiments_run, run_dir}`. Empty `seeds` →
+`[]`. The caller's own runner is untouched (each sweep run is isolated, so
+this never disturbs a live single-seed run or the §18.7 pin).
+
+`cli.py`: `variance --data PATH [--label COL] [--task auto|csv|image|audio]
+[--split-frac F] [--target 95.0] --seeds N [--seed 7] [--experiments 30]
+[--policy bandit|search] [--search-quality v04|legacy] [--max-seconds S]
+[--max-train-seconds S] [--runs-dir runs]` (SPEC.md 22.1 task resolution,
+reusing `_resolve_fit_task`). `--seeds N` means the N distinct seeds
+`seed, seed+1, …, seed+N-1` (base `--seed`, default 7). It resolves the task
+as `fit` does, builds a `DashboardRunner`, calls `seed_sweep`, prints a
+text summary (per-seed `seed baseline final PASS/MISS`; then median/min/max
+of the finals, how many beat their own baseline, how many pass the target),
+and writes `seed_variance.svg` + `seed_sweep.json` into `--runs-dir`. `--json`
+prints the sweep as pure JSON to stdout (SPEC.md 21.2 pattern). MISS seeds
+print as MISS but the command exits 0 (a variance report is a measurement,
+not a gate — the per-seed `verdict` carries the gate).
+
+The app gains an opt-in **Seed variance** panel (a seed-count input + a
+button): when a data path is set it runs `seed_sweep` and renders
+`svg_seed_variance`. It is result-only and inert until the button is pressed
+(the §23.2 persistence flow is unchanged).
+
+### 29.2 D2 — RL policy view (CLI-surface; RL stays CLI-only)
+`rl_policy.py` (SPEC.md 15/18.2/20.2):
+- `MetaRLPolicy.probabilities(env_state) -> np.ndarray` — the full
+  action-probability vector (length `n_actions`, the 77-action catalog,
+  SPEC.md 19.4/25.x) that `propose()` would sample from at this state: the
+  exact masked softmax (family mask per SPEC.md 18.2, task bias per
+  SPEC.md 20.2). **Pure** — no sampling, no RNG draw, no state change; masked
+  actions read ≈ 0 and the relevant actions sum to 1.
+- `propose()` additionally records `self.last_proposal = (action_index, probs)`
+  (one attribute assignment; the RNG stream and the returned spec are
+  unchanged, so A1–A18 and the §20.2 pins stay bit-identical).
+- `train_policy(env, policy, n_episodes, verbose=False, trace=None)` and
+  `train_multi_policy(envs, policy, episodes_per_task, verbose=False,
+  trace=None)` — when `trace is not None`, append one record per step:
+  `{"task": str, "action": int, "probs": [float]·n_actions, "reward":
+  float}` (the task label from `env_state["task"]`, SPEC.md 20.2). The
+  return dicts are **unchanged** when `trace is None` (the default), so every
+  existing caller is bit-identical (G2).
+
+`plotting.py` (pure, valid XML, deterministic, ASCII, empty → header):
+- `svg_action_probabilities(trace, top_k=8, n_steps=12, width=640)` — the
+  last `n_steps` steps of the trace as horizontal bar rows: each row shows
+  that step's **top-`top_k` actions by probability** (ties broken by action
+  index) as bars plus one `rest` bar (the sum of the tail), on a fixed 0–1
+  probability axis. Each bar is labelled with the catalog action
+  (`field=value`; tuple values joined, e.g. `architecture=16,8`); the sampled
+  action's bar is highlighted and the row caption carries the step index and
+  reward.
+- `svg_task_returns(returns, width=640, height=360)` — one line per task
+  from `returns` (`{task: [episode_return, …]}`, the exact shape of
+  `train_multi_policy["episode_returns"]`, SPEC.md 20.2), data-driven axes,
+  a per-task legend. A single-task trace is `{task: [..]}` (one line).
+
+`cli.py`: `policy-report --task TASK --seed 7 [--episodes 3] [--experiments
+20] [--max-seconds S] [--max-train-seconds S] [--runs-dir runs] [--multi]
+[--tasks sine-v1,parity-v1,cartpole-v1] [--top-k 8] [--n-steps 12]`. Without
+`--multi` it trains `MetaRLPolicy(seed)` on one task via `train_policy(...,
+trace)`; with `--multi` it builds one env per `--tasks` entry and trains
+`MetaRLPolicy(seed, task_names=...)` via `train_multi_policy(..., trace)`
+(SPEC.md 20.2). It writes `action_probabilities.svg`, `task_returns.svg`, and
+the raw `policy_trace.json` + `policy_returns.json` into `--runs-dir`, and
+prints a text summary (per-task episode returns, `policy_updates`, trace
+length, and the final step's top actions).
+
+The app gains an opt-in **RL policy view (precomputed)** panel: given a
+`policy-report` output directory it renders `action_probabilities.svg` +
+`task_returns.svg`. It **never runs RL live** — this keeps RL CLI-only
+(SPEC.md 23.1); only the precomputed artifacts are shown.
+
+### 29.3 Non-goals (v0.15)
+No live RL in the app (the §23.1 boundary is unchanged; the app renders only
+precomputed policy artifacts — **a design decision the user should confirm**);
+no live per-step RL stream in the app (that would be the §23.1 contract
+change); no new core dependencies; no change to `train_policy`/
+`train_multi_policy` return dicts when the trace is off (bit-identical);
+no box-plot *statistical* tests beyond hand-computed quartile geometry
+(confidence bands / outliers are not the point — the paired markers are);
+the seed sweep is **opt-in** (default off) so a single-seed `fit`/`run`/live
+dashboard and the T2 (§18.7) + §18.7 legacy pins are untouched.
+
+### 29.4 Acceptance (A19)
+- **D1 (SVG)**: `svg_seed_variance` is valid XML; hand-computed quartile
+  geometry on a known `finals` set (median/q1/q3/min/max via the linear
+  quantile) is asserted both in text and by parsing the box rect; the paired
+  baseline→final markers and the target line are present when given; the
+  `passing = P/N` line is correct; the empty case renders a header + message
+  and is valid XML.
+- **D1 (runner)**: `seed_sweep([..])` returns one dict per seed with finite
+  `baseline`/`final`, the right `target`/`pass`/`verdict`, and JSON-safe
+  values; `seed_sweep([])` → `[]`; two sweeps under the same seeds are
+  bit-identical in `baseline`/`final` (G2 — the run dirs differ by
+timestamp/counter, the scores do not); the caller's own runner is left
+  untouched (phase, best score) after a sweep.
+- **D1 (CLI)**: `variance` resolves the task as `fit`, exits 0, writes
+  `seed_variance.svg` (valid XML) + `seed_sweep.json` (parses; one entry per
+  seed); `--json` prints pure JSON; a MISS seed still exits 0 and prints
+  MISS; an unknown/missing `--data` exits 1 with a clear error.
+- **D2 (policy)**: `probabilities(env_state)` has length `len(ACTIONS)`
+  (asserted from the catalog, not hardcoded), is finite, the relevant
+  actions sum to 1 (≈), and masked actions ≈ 0; `propose()`'s RNG stream is
+  unchanged (two same-seed policies still sample identical action sequences);
+  `train_policy`/`train_multi_policy` with `trace=None` return dicts are
+  byte-identical to before (the §20.2 multi-task pin and A1–A18 stay green);
+  with `trace=[...]` the trace has one record per step, each with `task`, a
+  valid `action`, a `probs` vector of the right length summing to 1 over the
+  relevant actions, and a finite `reward`.
+- **D2 (SVG)**: `svg_action_probabilities` is valid XML, shows the top-K bars
+  + a `rest` bar per row with correct labels, highlights the sampled action,
+  and is empty-safe; `svg_task_returns` is valid XML, one line per task with
+  a legend, and is empty-safe.
+- **D2 (CLI)**: `policy-report` (single and `--multi`) trains, captures the
+  trace, exits 0, and writes `action_probabilities.svg` + `task_returns.svg`
+  (both valid XML) + `policy_trace.json` + `policy_returns.json` (both
+  parse); `--multi` with mismatched env/task counts errors clearly (the §20.2
+  validation).
+- **App (A19)**: the app renders the opt-in **Seed variance** panel (a
+  button-driven `seed_sweep` → `svg_seed_variance`, no exceptions) and the
+  opt-in **RL policy view (precomputed)** panel (renders precomputed SVGs
+  from a given dir; never runs RL live); streamlit-optional (skipped when
+  absent); the existing `run`/`clear` flow and the §23.2 persistence stay
+  green; `import autorefine` never pulls in streamlit.
+- Full suite green; the T2 and §18.7 legacy pins untouched; A1–A18 stay green.
+
+### 29.5 Milestone
+
+**M18** — v0.15 multi-run / policy views: seed-variance box plot (CLI +
+runner + app) and the RL policy view (probabilities + trace + action-prob /
+task-return SVGs + CLI + precomputed app panel) (A19).

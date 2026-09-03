@@ -42,6 +42,10 @@ class MetaRLPolicy:
         self.n_updates = 0
         self.last_episode_return = 0.0
         self._traj: list[tuple] = []
+        # D2 (SPEC.md 29.2): the last propose()'s (action_index, probs) — one
+        # attribute so the opt-in train trace can read it (propose()'s RNG
+        # stream and returned spec are unchanged, so A1–A18 stay bit-identical)
+        self.last_proposal: tuple[int, np.ndarray] | None = None
         # SPEC.md 20.2: task conditioning — shared w/b (the transfer channel)
         # plus a per-task bias row B (task specificity):
         #   logits = x·w + b + B[task_idx]
@@ -111,8 +115,22 @@ class MetaRLPolicy:
         x = self.embed(env_state)
         p = self._probs(x, family, tidx)
         a = int(self.rng.choice(self.n_actions, p=p))
+        # D2 (SPEC.md 29.2): expose what was sampled (pure bookkeeping; set
+        # *after* the RNG draw so the stream and the returned spec are unchanged)
+        self.last_proposal = (a, p)
         self._traj.append((x, a, 0.0, family, tidx))
         return apply_action(env_state["best_spec"], a)
+
+    def probabilities(self, env_state: dict) -> np.ndarray:
+        """D2 (SPEC.md 29.2): the full action-probability vector (length
+        `n_actions`) that `propose()` would sample from at this state — the
+        exact masked softmax (family mask per SPEC.md 18.2, task bias per
+        SPEC.md 20.2). **Pure**: no sampling, no RNG draw, no state change
+        (G2); masked actions read ~0 and the relevant actions sum to 1."""
+        best = env_state.get("best_spec") or {}
+        family = str(best.get("model_family", "mlp"))
+        tidx = self._task_idx(env_state)
+        return self._probs(self.embed(env_state), family, tidx)
 
     def observe(self, reward: float, done: bool) -> None:
         """Record a step's reward; flush the gradient when the episode ends.
@@ -173,16 +191,31 @@ class MetaRLPolicy:
         return self.B.copy() if self.B is not None else None
 
 
-def train_policy(env, policy: MetaRLPolicy, n_episodes: int, verbose: bool = False) -> dict:
+def train_policy(env, policy: MetaRLPolicy, n_episodes: int, verbose: bool = False,
+                 trace: list | None = None) -> dict:
     """Drive `env` for `n_episodes` full runs, updating `policy` after each
-    episode (SPEC.md 15: the improver learning from the loop itself)."""
+    episode (SPEC.md 15: the improver learning from the loop itself).
+
+    D2 (SPEC.md 29.2): when `trace` (a list) is given, append one record per
+    step — `{"task", "action", "probs", "reward"}` — for the policy view. The
+    return dict is **unchanged** when `trace is None` (the default), so every
+    existing caller stays bit-identical (G2)."""
     returns = []
     for ep in range(n_episodes):
         state = env.reset()
         while not env.done:
+            step_task = state.get("task")  # the env_state the proposal is made under
             action = policy.propose(state)
             state, reward, done, info = env.step(action)
             policy.observe(reward, done)
+            if trace is not None:
+                a, p = policy.last_proposal
+                trace.append({
+                    "task": step_task,
+                    "action": int(a),
+                    "probs": [float(v) for v in p],
+                    "reward": float(reward),
+                })
         returns.append(policy.last_episode_return)
         if verbose:
             print(f"  episode {ep + 1}/{n_episodes}: return {policy.last_episode_return:+.4f}")
@@ -195,7 +228,8 @@ def train_policy(env, policy: MetaRLPolicy, n_episodes: int, verbose: bool = Fal
 
 
 def train_multi_policy(envs: list, policy: MetaRLPolicy,
-                       episodes_per_task: int, verbose: bool = False) -> dict:
+                       episodes_per_task: int, verbose: bool = False,
+                       trace: list | None = None) -> dict:
     """SPEC.md 20.2: multi-task meta-RL — round-robin episodes over several
     tasks with ONE shared policy (transfer via the shared w/b; task
     specificity in B). Deterministic given (envs, policy seed, counts): the
@@ -222,6 +256,14 @@ def train_multi_policy(envs: list, policy: MetaRLPolicy,
             action = policy.propose(state)
             state, reward, done, info = env.step(action)
             policy.observe(reward, done)
+            if trace is not None:  # D2 (SPEC.md 29.2), per-step record
+                a, p = policy.last_proposal
+                trace.append({
+                    "task": task,
+                    "action": int(a),
+                    "probs": [float(v) for v in p],
+                    "reward": float(reward),
+                })
         returns[task].append(policy.last_episode_return)
         if verbose:
             print(f"  ep {ep + 1}/{total} [{task}]: "

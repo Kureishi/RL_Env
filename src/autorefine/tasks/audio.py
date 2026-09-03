@@ -21,7 +21,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .media import _AUDIO_EXTS, collect_items, resolve_labels, split_indices
+from .media import (_AUDIO_EXTS, class_label_str, collect_items,
+                    resolve_labels, split_indices)
 
 _SF_HINT = (
     "decoding MP3 needs soundfile (libsndfile >= 1.2): "
@@ -136,8 +137,12 @@ class AudioTask:
             resolve_labels([lb for _, lb in items])
         self.state_dim = self.bands
         self.feature_names = [f"log-mel {self.bands} bands"]
+        # SPEC.md 28.3 (C3): keep the items + holdout split indices so the
+        # error gallery can map holdout row i -> items[ho[i]].
+        self._items = list(items)
         tr, ho, ge = split_indices(len(items), self.seed, self.split_frac,
                                    b"audio-split")
+        self._ho = ho
         mean = x[tr].mean(axis=0)
         std = x[tr].std(axis=0)
         std = np.where(std == 0.0, 1.0, std)
@@ -266,3 +271,60 @@ class AudioTask:
         ss_tot = float(((y[:n] - y[:n].mean()) ** 2).sum())
         r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
         return max(0.0, 100.0 * r2)
+
+    # --- holdout inspection (SPEC.md 28.2/28.3) ------------------------------
+    def holdout_rows(self, n: int, model=None) -> tuple[np.ndarray, np.ndarray]:
+        """SPEC.md 28.2 (C2): the holdout split `(x, y)`, clamped like
+        `score()`; a `wants_grid` model (convnet) gets grid rows (25.3)."""
+        if getattr(model, "wants_grid", False):
+            x, y = self._grid_rows_for("holdout")
+        else:
+            x, y = self._rows_for("holdout")
+        if len(x) == 0:
+            return x, y
+        n = min(int(n), len(x))
+        return x[:n], y[:n]
+
+    def holdout_errors(self, model, n: int = 200,
+                       n_max: int = 8) -> list[dict]:
+        """SPEC.md 28.3 (C3): the holdout items the model misclassifies
+        (argmax mismatch), in holdout order, <= `n_max` items — the image
+        entry shape `{"file", "path", "label", "predicted"}` plus
+        `{"waveform": [<=512 floats], "sample_rate": int}` (a deterministic
+        block-mean downsample of the decoded signal; omitted if the clip
+        cannot be re-decoded). Labels come from the canonical
+        `class_values`, not the raw item labels."""
+        if self.head != "softmax" or int(n_max) <= 0:
+            return []
+        x, y = self.holdout_rows(n, model)
+        if len(x) == 0:
+            return []
+        pred = np.asarray(model.forward(x), dtype=np.float64).argmax(axis=1)
+        out: list[dict] = []
+        for i in range(len(x)):
+            if pred[i] == y[i]:
+                continue
+            p, _ = self._items[int(self._ho[i])]  # holdout row i -> item
+            entry = {
+                "file": p.name,
+                "path": str(p),
+                "label": class_label_str(self.class_values[int(y[i])]),
+                "predicted": class_label_str(self.class_values[int(pred[i])]),
+            }
+            try:  # best-effort: a decode failure skips the waveform only
+                sig, sr = self._load_signal(p)
+                sig = np.asarray(sig, dtype=np.float64).ravel()
+                if sig.size > 512:
+                    block = int(sig.size) // 512
+                    wf = (sig[:block * 512].reshape(512, block)
+                          .mean(axis=1).tolist())
+                else:
+                    wf = [float(v) for v in sig]
+                entry["waveform"] = [float(v) for v in wf][:512]
+                entry["sample_rate"] = int(sr)
+            except Exception:
+                pass
+            out.append(entry)
+            if len(out) >= int(n_max):
+                break
+        return out

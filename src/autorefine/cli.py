@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 from .config import Budget, ModelSpec
+from .diagnostics import holdout_diagnostics
 from .improver.meta_env import AutoRefineEnv, search_quality_v04
 from .improver.bandit import BanditPolicy
 from .improver.curriculum import ParityCurriculum
@@ -23,7 +24,11 @@ from .plotting import (
     ascii_pareto,
     ascii_score_curve,
     html_report,
+    svg_architecture,
+    svg_confusion_matrix,
+    svg_ladder_curve,
     svg_pareto,
+    svg_per_class_bars,
     svg_score_curve,
 )
 from .plugins import (
@@ -197,12 +202,140 @@ def _cmd_fit(args: argparse.Namespace) -> int:
     if final >= args.target:
         print(f"PASS: final score {final:.2f} >= {args.target:.1f} on held-out data "
               "(the loop never trained on these points; gen_gap is the overfit guard)")
+        rc = 0
+    else:
+        print(f"MISS: {final:.2f} < {args.target:.1f} — the search space or budget is "
+              "exhausted for this task")
+        print("next: raise --experiments / --max-train-seconds, or extend the spec "
+              "space / model families (README 'Extending')")
+        rc = 2  # the user's acceptance step, machine-readable for pipelines
+    # C2/C3 (SPEC.md 28.2/28.3): after the gate line, per-class accuracy +
+    # weakest-class hint (and the media error gallery)
+    _print_fit_diagnostics(env)
+    return rc
+
+
+def _cmd_variance(args: argparse.Namespace) -> int:
+    """D1 (SPEC.md 29.1): the same budget under N seeds — "is the improvement
+    real?" = the `fit` task resolution + `DashboardRunner.seed_sweep`.
+
+    A variance report is a measurement, not a gate: per-seed `verdict` carries
+    the §22.1 gate, but the command exits 0 (even with MISS seeds). Writes
+    `seed_variance.svg` + `seed_sweep.json`; `--json` prints pure JSON (SPEC.md 21.2).
+    """
+    from .dashboard import DashboardRunner
+    from .plotting import _quantile, svg_seed_variance
+    data = Path(args.data)
+    try:
+        _resolve_fit_task(data, getattr(args, "task", "auto") or "auto")
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    runner = DashboardRunner(
+        csv_path=str(data), label=args.label, split_frac=args.split_frac,
+        target=args.target, policy=args.policy, seed=args.seed,
+        experiments=args.experiments, max_seconds=args.max_seconds,
+        max_train_seconds=args.max_train_seconds, runs_dir=args.runs_dir,
+        search_quality=args.search_quality, modality=args.task,
+    )
+    seeds = list(range(args.seed, args.seed + args.seeds))
+    sweep = runner.seed_sweep(seeds)
+    rd = Path(args.runs_dir)
+    rd.mkdir(parents=True, exist_ok=True)
+    svg = rd / "seed_variance.svg"
+    svg.write_text(svg_seed_variance(sweep, target=args.target), encoding="utf-8")
+    js = rd / "seed_sweep.json"
+    js.write_text(json.dumps(sweep, indent=2, sort_keys=True), encoding="utf-8")
+    if args.json:
+        print(json.dumps(sweep, indent=2, sort_keys=True))
         return 0
-    print(f"MISS: {final:.2f} < {args.target:.1f} — the search space or budget is "
-          "exhausted for this task")
-    print("next: raise --experiments / --max-train-seconds, or extend the spec "
-          "space / model families (README 'Extending')")
-    return 2  # the user's acceptance step, machine-readable for pipelines
+    print("seed  baseline   final  verdict")
+    for s in sweep:
+        print(f"{s['seed']:<5} {s['baseline']:>8.2f}  {s['final']:>7.2f}  {s['verdict']}")
+    finals = [s["final"] for s in sweep]
+    if finals:
+        sf = sorted(finals)
+        print(f"finals    : median {_quantile(sf, 0.5):.2f}  "
+              f"min {min(finals):.2f}  max {max(finals):.2f}")
+        beats = sum(1 for s in sweep if s["final"] > s["baseline"])
+        print(f"baseline  : {beats}/{len(sweep)} seed(s) beat their own baseline")
+    passing = sum(1 for s in sweep if s["pass"])
+    print(f"target    : {passing}/{len(sweep)} seed(s) pass {args.target:.1f} "
+          f"(a variance report is a measurement - the per-seed verdict carries the gate)")
+    print(f"svg     : {svg}")
+    print(f"json    : {js}")
+    return 0
+
+
+def _cmd_policy_report(args: argparse.Namespace) -> int:
+    """D2 (SPEC.md 29.2): train the meta-RL policy, capture the opt-in trace,
+    and render the per-step action-probability + per-task-return views.
+
+    RL stays CLI-only (SPEC.md 23.1): this writes `action_probabilities.svg`,
+    `task_returns.svg`, `policy_trace.json`, `policy_returns.json`. Single
+    (`--task`) or multi-task (`--multi --tasks ...`, SPEC.md 20.2).
+    """
+    from .improver.catalog import ACTIONS
+    from .improver.rl_policy import MetaRLPolicy, train_multi_policy, train_policy
+    from .plotting import svg_action_probabilities, svg_task_returns
+
+    seed, episodes = args.seed, args.episodes
+    trace: list[dict] = []
+    if args.multi:
+        task_names = [t.strip() for t in args.tasks.split(",") if t.strip()]
+        if not task_names:
+            print("--multi requires --tasks TASK[,TASK,...]", file=sys.stderr)
+            return 1
+        for t in task_names:
+            if t not in TASKS:
+                print(f"unknown task {t!r} in --tasks", file=sys.stderr)
+                return 1
+        envs = [AutoRefineEnv(task=t, seed=seed, budget=_budget(args),
+                              runs_dir=args.runs_dir) for t in task_names]
+        policy = MetaRLPolicy(seed=seed, task_names=task_names)
+        try:
+            report = train_multi_policy(envs, policy, episodes_per_task=episodes,
+                                        trace=trace)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        returns = report["episode_returns"]
+    else:
+        if args.task not in TASKS:
+            print(f"unknown task {args.task!r}", file=sys.stderr)
+            return 1
+        env = AutoRefineEnv(task=args.task, seed=seed, budget=_budget(args),
+                            runs_dir=args.runs_dir)
+        policy = MetaRLPolicy(seed=seed)
+        report = train_policy(env, policy, n_episodes=episodes, trace=trace)
+        returns = {args.task: report["episode_returns"]}
+
+    rd = Path(args.runs_dir)
+    rd.mkdir(parents=True, exist_ok=True)
+    ap = rd / "action_probabilities.svg"
+    ap.write_text(svg_action_probabilities(trace, top_k=args.top_k,
+                                           n_steps=args.n_steps), encoding="utf-8")
+    tr = rd / "task_returns.svg"
+    tr.write_text(svg_task_returns(returns), encoding="utf-8")
+    tj = rd / "policy_trace.json"
+    tj.write_text(json.dumps(trace, indent=2), encoding="utf-8")
+    pj = rd / "policy_returns.json"
+    pj.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+
+    for task, vals in returns.items():
+        print(f"{task}: " + " ".join(f"{v:+.3f}" for v in vals))
+    print(f"policy_updates: {report['policy_updates']}")
+    print(f"trace steps  : {len(trace)}")
+    if trace:
+        last = trace[-1]
+        order = sorted(range(len(last["probs"])), key=lambda i: (-last["probs"][i], i))
+        top = [i for i in order[:args.top_k] if last["probs"][i] > 0.0]
+        print("final step   : " + "  ".join(
+            f"{ACTIONS[i][0]}={ACTIONS[i][1]} {last['probs'][i]:.2f}" for i in top))
+    print(f"svg     : {ap}")
+    print(f"svg     : {tr}")
+    print(f"json    : {tj}  {pj}")
+    return 0
 
 
 def _cmd_report(args: argparse.Namespace) -> int:
@@ -214,6 +347,7 @@ def _cmd_report(args: argparse.Namespace) -> int:
         return 1
     entries = mem.load_experiments()
     run_dir = Path(args.run)
+    extras = _report_extras(summary, run_dir)  # SPEC.md 28.2-28.4 (None-safe)
     if args.plot:  # SPEC.md 21.2: SVG files always land in the run dir
         pareto_pts = summary.get("pareto_frontier") or [
             {"score": e["holdout_score"], "train_seconds": e.get("train_seconds", 0.0)}
@@ -223,12 +357,42 @@ def _cmd_report(args: argparse.Namespace) -> int:
         ]
         (run_dir / "score_curve.svg").write_text(svg_score_curve(entries), encoding="utf-8")
         (run_dir / "pareto_frontier.svg").write_text(svg_pareto(pareto_pts), encoding="utf-8")
+        if summary.get("curriculum"):  # SPEC.md 27.3: only runs with a ladder
+            (run_dir / "ladder_curve.svg").write_text(
+                svg_ladder_curve(entries, summary["curriculum"].get("levels")),
+                encoding="utf-8")
+        if extras["per_class_svg"]:  # SPEC.md 28.2 (C2)
+            (run_dir / "per_class.svg").write_text(extras["per_class_svg"],
+                                                   encoding="utf-8")
+        if extras["confusion_svg"]:  # SPEC.md 28.2 (C2)
+            (run_dir / "confusion.svg").write_text(extras["confusion_svg"],
+                                                   encoding="utf-8")
+        if extras["arch_svg"]:  # SPEC.md 28.4 (C4)
+            (run_dir / "architecture.svg").write_text(extras["arch_svg"],
+                                                      encoding="utf-8")
     if args.html:  # SPEC.md 22.2: one self-contained file in the run dir
-        (run_dir / "report.html").write_text(html_report(summary, entries),
-                                             encoding="utf-8")
+        (run_dir / "report.html").write_text(
+            html_report(summary, entries, diagnostics=extras["diagnostics"],
+                        gallery=extras["gallery"], arch_svg=extras["arch_svg"]),
+            encoding="utf-8")
     if args.json:  # SPEC.md 21.2: stdout is pure machine-readable JSON
         print(json.dumps(summary, indent=2, sort_keys=True))
         return 0
+    diag = extras["diagnostics"]
+    if diag:  # C2 (SPEC.md 28.2): per-class lines + weakest-class hint
+        print(f"\nholdout diagnostics: {diag['correct']}/{diag['n']} correct")
+        for i, lbl in enumerate(diag["class_labels"]):
+            print(f"  class {str(lbl):<12s} {diag['per_class'][i]:5.1f}% "
+                  f"({diag['confusion'][i][i]}/{diag['class_counts'][i]})")
+        worst = min(range(len(diag["class_labels"])),
+                    key=lambda i: diag["per_class"][i])
+        if diag["per_class"][worst] < 100.0:
+            print(f"  the model fails on class {diag['class_labels'][worst]}")
+        if extras["gallery"]:  # C3 (SPEC.md 28.3): media error gallery, text
+            print("holdout misclassifications:")
+            for it in extras["gallery"]:
+                print(f"  {it.get('file', '?')} - true {it.get('label')} -> "
+                      f"predicted {it.get('predicted')}")
     for k in ("task", "seed", "finished_reason", "baseline_score",
               "final_best_score", "improvement_factor", "experiments_run", "wall_seconds"):
         print(f"{k:20s}: {summary.get(k)}")
@@ -248,6 +412,14 @@ def _cmd_report(args: argparse.Namespace) -> int:
         print(ascii_pareto(pareto_pts))
         print(f"svg     : {run_dir / 'score_curve.svg'}")
         print(f"svg     : {run_dir / 'pareto_frontier.svg'}")
+        if summary.get("curriculum"):  # SPEC.md 27.3
+            print(f"svg     : {run_dir / 'ladder_curve.svg'}")
+        if extras["per_class_svg"]:  # SPEC.md 28.2
+            print(f"svg     : {run_dir / 'per_class.svg'}")
+        if extras["confusion_svg"]:  # SPEC.md 28.2
+            print(f"svg     : {run_dir / 'confusion.svg'}")
+        if extras["arch_svg"]:  # SPEC.md 28.4
+            print(f"svg     : {run_dir / 'architecture.svg'}")
     if args.html:  # SPEC.md 22.2: point at the generated file
         print(f"html    : {run_dir / 'report.html'}")
     return 0
@@ -321,6 +493,98 @@ def _load_convnet(path: str):
     return ConvNet.load(path)
 
 
+def _task_from_summary(summary: dict):
+    """The task a run trained (SPEC.md 22.1/28.4): `task`/`seed`/`task_config`
+    reconstruction with the curriculum-level fallback (SPEC.md 20.1) —
+    shared by `eval` and `report`. None when the name is unknown to both."""
+    task_name = summary.get("task")
+    seed = int(summary["seed"])
+    cfg = summary.get("task_config") or {}  # e.g. csv: path/label
+    if task_name in TASKS:
+        return TASKS[task_name](seed=seed, **cfg) if cfg \
+            else TASKS[task_name](seed=seed)
+    if summary.get("curriculum"):  # SPEC.md 20.1: a curriculum level name
+        lvl = summary["curriculum"]["levels"][-1]
+        return ParityTask(seed=seed, n_bits=lvl["n_bits"], p_flip=lvl["p_flip"])
+    return None
+
+
+def _best_model_loaders() -> dict:
+    """SPEC.md 25.5: family -> npz loader mapping (knn/convnet since v0.11)."""
+    return {
+        "mlp": lambda p: MLP.load(p),
+        "tree": lambda p: _load_tree(p),
+        "boost": lambda p: _load_boost(p),  # SPEC.md 19.2
+        "knn": lambda p: _load_knn(p),      # SPEC.md 25.2
+        "convnet": lambda p: _load_convnet(p),  # SPEC.md 25.3
+    }
+
+
+def _print_fit_diagnostics(env: AutoRefineEnv) -> None:
+    """C2 (SPEC.md 28.2): the `fit` output after the gate line — per-class
+    holdout accuracy lines + the weakest-class hint ("the model fails on
+    class X"); for media tasks the C3 text error gallery (SPEC.md 28.3).
+    Classification-only: episode/mse tasks print nothing (SPEC.md 28.5)."""
+    if getattr(env.task, "head", None) != "softmax" or env.best_model is None:
+        return
+    diag = holdout_diagnostics(env.task, env.best_model)
+    if not diag:
+        return
+    print(f"\nholdout diagnostics (SPEC.md 28.2): "
+          f"{diag['correct']}/{diag['n']} correct")
+    for i, lbl in enumerate(diag["class_labels"]):
+        print(f"  class {str(lbl):<12s} {diag['per_class'][i]:5.1f}% "
+              f"({diag['confusion'][i][i]}/{diag['class_counts'][i]})")
+    worst = min(range(len(diag["class_labels"])),
+                key=lambda i: diag["per_class"][i])
+    if diag["per_class"][worst] < 100.0:
+        print(f"  the model fails on class {diag['class_labels'][worst]} "
+              f"({diag['per_class'][worst]:.1f}%)")
+    hold_errors = getattr(env.task, "holdout_errors", None)
+    if callable(hold_errors):  # C3 (SPEC.md 28.3), media tasks only
+        errors = hold_errors(env.best_model)
+        if errors:
+            print("holdout misclassifications (SPEC.md 28.3):")
+            for it in errors:
+                print(f"  {it.get('file', '?')} - true {it.get('label')} -> "
+                      f"predicted {it.get('predicted')}")
+
+
+def _report_extras(summary: dict, run_dir: Path) -> dict:
+    """C2/C3/C4 (SPEC.md 28.2-28.4): the learning views for `report` /
+    `html`, when the task and best model are reconstructible from the run
+    (same rule as `eval`); empty when they are not or when the task is not
+    classification (SPEC.md 28.5) — the report still renders."""
+    out = {"diagnostics": None, "gallery": None, "arch_svg": None,
+           "per_class_svg": None, "confusion_svg": None}
+    try:
+        task = _task_from_summary(summary)
+        if task is None:
+            return out
+        family = (summary.get("best_spec") or {}).get("model_family", "mlp")
+        loaders = _best_model_loaders()
+        if family not in loaders:
+            return out
+        model = loaders[family](str(run_dir / "best_model.npz"))
+    except (FileNotFoundError, ValueError):
+        return out
+    diag = holdout_diagnostics(task, model)  # None for episode/mse (28.2)
+    out["diagnostics"] = diag
+    if diag:
+        out["per_class_svg"] = svg_per_class_bars(diag)
+        out["confusion_svg"] = svg_confusion_matrix(diag)
+    hold_errors = getattr(task, "holdout_errors", None)
+    if callable(hold_errors):  # C3 (SPEC.md 28.3), media tasks only
+        g = hold_errors(model)
+        out["gallery"] = g if g else None
+    best_spec = summary.get("best_spec")
+    if best_spec:  # C4 (SPEC.md 28.4)
+        out["arch_svg"] = svg_architecture(
+            best_spec, getattr(task, "state_dim", 1),
+            getattr(task, "n_outputs", 1))
+    return out
+
+
 def _cmd_eval(args: argparse.Namespace) -> int:
     mem = RunMemory(Path(args.run))
     try:
@@ -328,26 +592,12 @@ def _cmd_eval(args: argparse.Namespace) -> int:
     except FileNotFoundError:
         print("no summary.json in run dir", file=sys.stderr)
         return 1
-    task_name = summary["task"]
-    seed = int(summary["seed"])
-    cfg = summary.get("task_config") or {}  # SPEC.md 22.1 (e.g. csv: path/label)
-    if task_name in TASKS:
-        task = TASKS[task_name](seed=seed, **cfg) if cfg else TASKS[task_name](seed=seed)
-    elif summary.get("curriculum"):  # SPEC.md 20.1: a curriculum level name
-        lvl = summary["curriculum"]["levels"][-1]
-        task = ParityTask(seed=seed, n_bits=lvl["n_bits"], p_flip=lvl["p_flip"])
-    else:
-        print(f"unknown task {task_name!r} in summary", file=sys.stderr)
+    task = _task_from_summary(summary)
+    if task is None:
+        print(f"unknown task {summary.get('task')!r} in summary", file=sys.stderr)
         return 1
     family = summary["best_spec"].get("model_family", "mlp")
-    # SPEC.md 25.5: the family -> loader mapping (knn/convnet since v0.11)
-    loaders = {
-        "mlp": lambda p: MLP.load(p),
-        "tree": lambda p: _load_tree(p),
-        "boost": lambda p: _load_boost(p),  # SPEC.md 19.2
-        "knn": lambda p: _load_knn(p),      # SPEC.md 25.2
-        "convnet": lambda p: _load_convnet(p),  # SPEC.md 25.3
-    }
+    loaders = _best_model_loaders()
     if family not in loaders:
         print(f"unknown model_family {family!r} in summary", file=sys.stderr)
         return 1
@@ -462,6 +712,51 @@ def main(argv: list[str] | None = None) -> int:
     p_eval.add_argument("--run", required=True, help="path to a run directory")
     p_eval.add_argument("--episodes", type=int, default=200)
     p_eval.set_defaults(func=_cmd_eval)
+
+    p_var = sub.add_parser(
+        "variance", help="v0.15 (SPEC.md 29.1): the same budget under N seeds — "
+                         "\"is the improvement real?\" (seed-variance box plot)")
+    p_var.add_argument("--data", required=True,
+                       help="CSV file, or a directory of labelled images/audio")
+    p_var.add_argument("--task", default="auto", choices=("auto", "csv", "image", "audio"),
+                       help="force the data task; default auto (file -> csv, directory -> detected)")
+    p_var.add_argument("--label", default=None,
+                       help="label column (default: auto-detect)")
+    p_var.add_argument("--split", dest="split_frac", type=float, default=0.2)
+    p_var.add_argument("--target", type=float, default=95.0)
+    p_var.add_argument("--seeds", type=int, required=True,
+                       help="N distinct seeds (seed, seed+1, ... seed+N-1)")
+    p_var.add_argument("--seed", type=int, default=7, help="base seed (default 7)")
+    p_var.add_argument("--policy", default="bandit", choices=("search", "bandit"),
+                       help="improver: UCB field-bandit (default) or v1 search")
+    p_var.add_argument("--experiments", type=int, default=30)
+    p_var.add_argument("--max-seconds", type=float, default=900.0)
+    p_var.add_argument("--max-train-seconds", type=float, default=30.0)
+    p_var.add_argument("--runs-dir", default="runs")
+    p_var.add_argument("--search-quality", default="v04", choices=("v04", "legacy"),
+                       help="search-quality preset (SPEC.md 18)")
+    p_var.add_argument("--json", action="store_true",
+                       help="print the sweep as pure JSON (SPEC.md 21.2)")
+    p_var.set_defaults(func=_cmd_variance)
+
+    p_pol = sub.add_parser(
+        "policy-report", help="v0.15 (SPEC.md 29.2): train the meta-RL policy and "
+                              "render the action-probability + task-return views")
+    p_pol.add_argument("--task", default="sine-v1", choices=sorted(TASKS),
+                       help="task (single mode)")
+    p_pol.add_argument("--seed", type=int, default=7)
+    p_pol.add_argument("--episodes", type=int, default=3)
+    p_pol.add_argument("--experiments", type=int, default=20)
+    p_pol.add_argument("--max-seconds", type=float, default=900.0)
+    p_pol.add_argument("--max-train-seconds", type=float, default=30.0)
+    p_pol.add_argument("--runs-dir", default="runs")
+    p_pol.add_argument("--multi", action="store_true",
+                       help="multi-task (SPEC.md 20.2): one env per --tasks entry")
+    p_pol.add_argument("--tasks", default="sine-v1,parity-v1,cartpole-v1",
+                       help="comma-separated task names (with --multi)")
+    p_pol.add_argument("--top-k", type=int, default=8, help="top-K actions per row")
+    p_pol.add_argument("--n-steps", type=int, default=12, help="rows shown (last N steps)")
+    p_pol.set_defaults(func=_cmd_policy_report)
 
     args = parser.parse_args(argv)
     return int(args.func(args))

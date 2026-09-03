@@ -202,3 +202,13 @@ class CsvTask:
         ss_tot = float(((y[:n] - y[:n].mean()) ** 2).sum())
         r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
         return max(0.0, 100.0 * r2)
+
+    def holdout_rows(self, n: int, model=None) -> tuple[np.ndarray, np.ndarray]:
+        """SPEC.md 28.2 (C2): the holdout split `(x, y)`, clamped to its
+        length — the rows `holdout_diagnostics` scores. CsvTask is flat-only,
+        so `model` is accepted for a uniform protocol but ignored."""
+        x, y = self._rows_for("holdout")
+        if len(x) == 0:
+            return x, y
+        n = min(int(n), len(x))
+        return x[:n], y[:n]

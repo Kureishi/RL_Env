@@ -13,14 +13,22 @@ import math
 from pathlib import Path
 
 from .config import Budget
+from .diagnostics import holdout_diagnostics
 from .improver.bandit import BanditPolicy
 from .improver.meta_env import AutoRefineEnv, search_quality_v04
 from .improver.policy import SearchPolicy
 from .plotting import (
     html_report,
+    svg_architecture,
+    svg_confusion_matrix,
+    svg_ladder_curve,
+    svg_loss_curves,
     svg_mutation_timeline,
     svg_pareto,
+    svg_per_class_bars,
     svg_score_curve,
+    svg_score_gap_scatter,
+    svg_score_strip,
 )
 from .tasks import TASKS, detect_modality
 
@@ -181,6 +189,9 @@ class DashboardRunner:
                                          self.env.bm.experiments_left),
             "mutation": mutation,
             "spec_diff": spec_diff(prev_best, action_dict, mutation),
+            # C1 (SPEC.md 28.1): the candidate's bounded loss history, for the
+            # live learning-curve view (empty for dup/invalid rejections)
+            "loss_history": info.get("loss_history") or [],
             "best_score": self.env.best_score,
             "reward": reward,
             "done": bool(done),
@@ -205,6 +216,53 @@ class DashboardRunner:
                 on_update(update)
         return self.finish()
 
+    # --- D1 seed-variance (SPEC.md 29.1) ------------------------------------
+    def _clone(self, seed: int) -> "DashboardRunner":
+        """D1 (SPEC.md 29.1): a fresh runner from `self`'s parameters (same
+        flags, a new seed) so a sweep run is fully isolated — this never
+        disturbs the caller's own runner or the §18.7 pin."""
+        return DashboardRunner(
+            csv_path=self.csv_path, label=self.label, split_frac=self.split_frac,
+            target=self.target, policy=self.policy_name, seed=int(seed),
+            experiments=self.experiments, max_seconds=self.max_seconds,
+            max_train_seconds=self.max_train_seconds, runs_dir=self.runs_dir,
+            search_quality=self.search_quality, modality=self.modality,
+        )
+
+    def seed_sweep(self, seeds, on_update=None) -> list:
+        """D1 (SPEC.md 29.1): the same flags re-run under N seeds — the
+        "is the improvement real?" question (SPEC.md 29).
+
+        For each seed it builds a fresh `DashboardRunner` (`_clone`), drives
+        the exact §23.1 loop `start()` → `next()`…→ `finish()` (`on_update`
+        forwarded per step), and appends one JSON-safe dict
+        `{seed, baseline, final, target, pass, verdict, experiments_run,
+        run_dir}`. Empty `seeds` → `[]`. The caller's own runner is untouched.
+        """
+        out: list[dict] = []
+        for seed in (seeds or []):
+            seed = int(seed)
+            runner = self._clone(seed)
+            runner.start()
+            while not runner.done:
+                update = runner.next()
+                if on_update is not None:
+                    on_update(update)
+            res = runner.finish()
+            final = float(res["final_best_score"])
+            target = float(res["target"])
+            out.append({
+                "seed": seed,
+                "baseline": float(res["baseline_score"]),
+                "final": final,
+                "target": target,
+                "pass": bool(final >= target),  # the §22.1 gate, exactly
+                "verdict": res["verdict"],
+                "experiments_run": res["experiments_run"],
+                "run_dir": str(res["run_dir"]),
+            })
+        return out
+
     # --- results ------------------------------------------------------------
     def finish(self) -> dict:
         """Verdict (§22.1 gate) + summary + plots + artifact payloads."""
@@ -222,6 +280,17 @@ class DashboardRunner:
             if e.get("kind") in ("baseline", "experiment")
             and isinstance(e.get("holdout_score"), (int, float))
         ]
+        # learning views (SPEC.md 28), computed live from memory (no reloads)
+        diag = holdout_diagnostics(self.env.task, self.env.best_model)
+        gallery: list | None = None
+        hold_errors = getattr(self.env.task, "holdout_errors", None)
+        if callable(hold_errors) and self.env.best_model is not None:
+            g = hold_errors(self.env.best_model)
+            gallery = g if g else None  # no misclassifications -> no gallery
+        arch_svg = (svg_architecture(self.env.best_spec.to_dict(),
+                                     self.env.task.state_dim,
+                                     self.env.task.n_outputs)
+                    if self.env.best_spec else None)
         return {
             "verdict": "PASS" if pass_ else "MISS",
             "target": self.target,
@@ -243,7 +312,24 @@ class DashboardRunner:
             "ucb_trace": (ucb_trace(self._updates, alpha=self.policy.alpha)
                           if self.policy_name == "bandit" else None),
             "timeline_svg": svg_mutation_timeline(self._updates),
-            "report_html": html_report(summary, entries),
+            # acceptance-gate views (SPEC.md 27): G1 + G2 always (derived
+            # from the update stream); G3 only when the run has a ladder
+            # (None for non-curriculum runs, SPEC.md 27.3)
+            "strip_svg": svg_score_strip(self._updates),
+            "scatter_svg": svg_score_gap_scatter(self._updates),
+            "ladder_svg": (svg_ladder_curve(
+                entries, summary.get("curriculum", {}).get("levels"))
+                if summary.get("curriculum") else None),
+            # learning views (SPEC.md 28): C1 curves, C2 diagnostics +
+            # per-class/confusion SVGs, C3 error gallery, C4 architecture SVG
+            "loss_curves": self._loss_curves(entries),
+            "diagnostics": diag,
+            "per_class_svg": svg_per_class_bars(diag) if diag else None,
+            "confusion_svg": svg_confusion_matrix(diag) if diag else None,
+            "error_gallery": gallery,
+            "arch_svg": arch_svg,
+            "report_html": html_report(summary, entries, diagnostics=diag,
+                                       gallery=gallery, arch_svg=arch_svg),
             "artifacts": {
                 "best_spec.json": (run_dir / "best_spec.json").read_bytes(),
                 "best_model.npz": (run_dir / "best_model.npz").read_bytes(),
@@ -253,6 +339,26 @@ class DashboardRunner:
         }
 
     # --- helpers ------------------------------------------------------------
+    @staticmethod
+    def _loss_curves(entries) -> dict[str, list]:
+        """C1 (SPEC.md 28.1): `{label: loss_history}` for every logged row
+        that has one — baseline, experiment 1..n, curriculum 1..n — in log
+        order; rows without a history (dup/invalid rejections) are skipped.
+        Deterministic (G2); JSON-safe (the history is already JSON-safe)."""
+        counters: dict[str, int] = {}
+        curves: dict[str, list] = {}
+        for e in entries or []:
+            kind = e.get("kind")
+            hist = e.get("loss_history")
+            if kind not in ("baseline", "experiment", "curriculum") \
+                    or not hist:
+                continue
+            counters[kind] = counters.get(kind, 0) + 1
+            label = ("baseline" if kind == "baseline"
+                     else f"{kind} {counters[kind]}")
+            curves[label] = hist
+        return curves
+
     def updates_json(self) -> str:
         """The full update stream as JSON (machine-readable live feed)."""
         return json.dumps(self._updates, indent=2, sort_keys=True)
