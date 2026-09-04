@@ -2139,3 +2139,203 @@ sequence (A1–A18, §18.7, §20.2, §18.7-legacy).
 **M19** — v0.16 comprehension visuals II: per-seed curves, field × value
 win matrix, decision-boundary scatter, CI band on the score curve,
 model-family bars, and the RL return-to-go/baseline trace (A20).
+
+## 31. Optimization (v0.17)
+
+Two loop-level optimizations, both opt-in, both G2-safe: the search stops
+when it saturates (31.1), and the seed-variance sweep runs its independent
+seeds in parallel processes (31.2). Both are off by default at their
+existing surfaces, so every pinned run (A1–A20, the §18.7 legacy
+sequence) is unchanged.
+
+### 31.1 Plateau early stop (stall patience)
+`meta_env.py`: `AutoRefineEnv` gains `stall_patience: int | None = None`
+(None = off — pre-v0.17 exactly; opt-in `K ≥ 1`). Semantics:
+- every *scored* candidate experiment that is **not accepted** (did not
+  clear the §18.6 gate) increments a streak; every **accepted**
+  experiment resets it to 0;
+- free duplicate rejections (R3) and invalid-spec rejections
+  (SPEC.md 25.4) do **not** count — patience counts experiments (budget
+  units), matching `experiments_run`; the §20.2 duplicate-stall guard is
+  unchanged;
+- a curriculum step-up (SPEC.md 20.1) resets the streak — the new
+  difficulty level is a new ceiling, so patience re-arms per level;
+- `reset()` (a fresh episode) resets the streak;
+- when the streak reaches K, `_check_done` reports done with
+  `finished_reason="stalled"` (checked *after* `budget_exhausted` /
+  `wall_time_exhausted`, so an existing reason on the same step still
+  wins); the run finishes exactly like any other (artifacts, summary,
+  and the §22.1 gate on `final_best_score` are unchanged — the gate is a
+  property of the final score, not of the reason).
+
+CLI: `fit` and `run` gain `--stall-patience K` (default: off); the
+`variance` subcommand gains the same flag (passed through
+`DashboardRunner`, so each sweep seed can stop at its own plateau).
+`DashboardRunner` gains `stall_patience: int | None = None` (default
+None = off; `start()` forwards it to `AutoRefineEnv`; `_clone` carries
+it to every sweep seed). The `gym.py` adapter contract is unchanged (the
+kwarg remains available on `AutoRefineEnv` directly).
+
+### 31.2 Parallel seed sweep
+`dashboard.py`: `DashboardRunner.seed_sweep(seeds, on_update=None,
+workers=1)`:
+- `workers == 1` (the default) keeps the **exact** serial loop — the N=1
+  path and every existing caller are byte-identical;
+- `workers > 1` runs one full isolated sweep seed per task on a
+  `concurrent.futures.ProcessPoolExecutor(max_workers=workers)`: a
+  module-level worker builds the same `_clone(seed)` runner and drives
+  the same `start()` → `next()`…→ `finish()` loop, returning the same
+  JSON-safe per-seed dict (SPEC.md 29.1); results are collected in
+  input seed order;
+- each seed is a self-contained deterministic run (G2) and the workers
+  never share state, so per-seed results are bit-identical to the serial
+  path (except `run_dir`, which is timestamped by design);
+- `on_update` is a callback and not picklable: passing it with
+  `workers > 1` raises `ValueError`; empty `seeds` returns `[]` without
+  spawning a pool.
+
+CLI: `variance` gains `--workers N` (default 1 = serial). No new
+dependencies (`concurrent.futures` is stdlib); `import autorefine` stays
+clean (the pool is created only inside `seed_sweep`).
+
+### 31.3 Non-goals (v0.17)
+No change to the acceptance rule, scoring, budget semantics, or any
+pinned sequence with the new flags off (A1–A20 stay green as-is); no
+live RL; no thread-based parallelism (processes only — seeds stay fully
+isolated); no dashboard UI controls for the two new flags (the app keeps
+its defaults: patience off, `workers=1`); no `gym.py` contract change;
+no change to `fit`/`run` exit codes or the §22.1 gate.
+
+### 31.4 Acceptance (A21)
+- **Stall patience**: on a constant-score fake task (no candidate can
+  ever be accepted), `stall_patience=2` with a 5-experiment budget stops
+  after exactly 2 experiments with `finished_reason="stalled"` and
+  `experiments_run=2`; with a scripted 50 → 60 → 55 → 52 score sequence
+  and `stall_patience=2`, the 60 is accepted (streak reset) and the run
+  stops at experiment 3 with `final_best_score=60`; with `stall_patience`
+  unset the same constant-score run burns the full 3-experiment budget
+  with `finished_reason="budget_exhausted"` (pre-v0.17 exactly); a
+  curriculum step-up resets the streak; `fit`/`run`/`variance` accept
+  `--stall-patience`, and a small `run --stall-patience 1` finishes with
+  a reason in {stalled, budget_exhausted}.
+- **Parallel sweep**: `seed_sweep([7, 8], workers=2)` returns the same
+  per-seed dicts (excluding `run_dir`) as `workers=1`, in the same
+  order; `workers=1` is the default and matches the pre-v0.17 serial
+  path; `on_update` with `workers > 1` raises `ValueError`; empty seeds
+  → `[]`; `variance --workers 2` writes the same artifacts (valid SVGs,
+  a 2-entry `seed_sweep.json`) and exits 0.
+- Full suite green (A1–A20 unchanged); `import autorefine` never pulls
+  in streamlit/PIL/soundfile.
+
+### 31.5 Milestone
+
+**M20** — v0.17 optimization: plateau early stop (`stall_patience`,
+`finished_reason="stalled"`) and the process-parallel seed sweep
+(`seed_sweep(workers=N)`, `variance --workers`) (A21).
+
+## 32. Optimization (v0.18)
+
+Two optimization items: one app-only perceived-performance fix (32.1), and
+one opt-in core search optimization (32.2). The third candidate — trainer
+float micro-opts (fused MLP forward/backward, vectorized tree bagging) — is
+deferred: any float-order change would break the bit-exact pins (A1–A21,
+the §18.7 legacy sequence), and it is only worth the pin re-derivation if
+screening proves insufficient (32.3).
+
+### 32.1 App perceived perf (app-only)
+`dashboard_app.py` (runner/CLI unchanged; SPEC.md 23/29):
+- **Streamed seed sweep** — the "Run the seed sweep" button (the SPEC.md
+  29.1 panel) opens an `st.progress` bar before calling `seed_sweep` and
+  forwards the runner's per-step `on_update` into it (the SPEC.md 31.2
+  serial callback path — the app uses `workers=1`). The fraction is
+  clamped to `[0, 1]` and the denominator `seeds × experiments` is an
+  **upper bound**: free duplicate rejections (R3) may exceed it. On
+  success the bar finishes at `1.0` with "complete" text; the after-sweep
+  SVG rendering (SPEC.md 29.1/30.1) is unchanged.
+- **Cached data preview** — the preview computation moves to a
+  `@st.cache_data` function `_preview_data(csv_path, stamp, size)` (pure:
+  no `st.*` calls) returning a JSON-safe dict
+  `{"kind": "csv" | "media", "caption": str, "header": list | None,
+  "rows": ...}` or `{"error": msg}`. `stamp`/`size` are the file's
+  `st_mtime_ns`/`st_size` in the cache key — the upload flow reuses one
+  temp dir, so a changed file re-probes. The thin `_preview()` renderer
+  shows exactly what it did before (same caption, dataframe, and warning
+  texts, SPEC.md 23.2/24.5).
+
+### 32.2 Two-stage candidate screening (opt-in)
+`meta_env.py`: `AutoRefineEnv` gains `screen_frac: float = 1.0` (default
+off = pre-v0.18 exactly; opt-in `0 < frac < 1.0`; valid values are
+non-bool finite numbers with `0 < frac <= 1.0`, anything else
+`ValueError`). Semantics when active:
+- **Screen stage** — before full training, the candidate is trained on the
+  first `max(1, floor(frac·n))` rows of the *same* dataset the full stage
+  would use (`_dataset_for(spec)` — a convnet spec screens on the grid
+  view too, SPEC.md 25.3) and is scored on the usual holdout. The
+  subsample is a prefix slice — no new RNG — so per-seed runs stay
+  bit-deterministic (G2).
+- **Promotion** — a candidate is promoted to the full stage iff
+  `screen_score > _screen_champion` (strict). The champion is the
+  baseline (`DEFAULT_SPEC`) spec **screened once at `reset()`** — free,
+  like the reset baseline. K=1 against this *fixed* champion: the current
+  best is not re-screened per step, so no extra training per step.
+- **Promoted** → full train on the full dataset → the unchanged §18.6
+  gate (accept/reject, budget, Pareto, ensemble, curriculum all as
+today).
+- **Screen rejections** — logged with `kind="screen"` (all existing
+  consumers filter on `baseline/experiment/curriculum`, so charts,
+  summaries, and win-rates are unchanged) carrying float
+  `holdout_score` (the screen holdout score), `std`, `gen_score`,
+  `gen_gap`, `train_seconds`, `time_capped`, `loss_history`,
+  `accepted=False`, `screen_rejected=True`. The fingerprint joins `seen`
+  (R3 still applies), **one budget experiment is spent**
+  (`experiments_run` counts it — it was scored and trained), and it
+  counts for the v0.17 stall patience (SPEC.md 31.1: a scored
+  non-improving experiment). It is appended to the `history` digest. It
+  never touches the Pareto frontier, the ensemble top-k, or the
+  curriculum saturation check.
+- `report` prints the screen rows in its text table (the float
+  `holdout_score`/`gen_gap` satisfy the formatter); `--plot` charts,
+  `--json`, and the HTML report are unchanged (kind filters).
+- The summary gains `"screening": {"frac": f,
+  "baseline_screen_score": s}` when active (additive; absent when off).
+- Preset `candidate_screening(frac=0.25)` returns the kwargs dict (the
+  `search_quality_v04()` pattern, SPEC.md 18.6).
+
+CLI: `run` and `fit` gain `--screen-frac F` (type=float, default `1.0`
+= off). Not added to `variance`, the dashboard app, or `gym.py`
+(non-goal, 32.3).
+
+### 32.3 Non-goals (v0.18)
+No trainer float micro-opts (fused MLP forward/backward, vectorized tree
+bagging) — any float-order change breaks the bit-exact pins (A1–A21,
+§18.7); deferred until screening proves insufficient. No screening surface
+in `variance`, the dashboard app, or `gym.py`. The app sweep stays
+`workers=1`. No change to the acceptance rule, budget semantics, or the
+`fit`/`run` exit codes / §22.1 gate.
+
+### 32.4 Acceptance (A22)
+- **App**: with streamlit installed the app renders with a CSV; pressing
+  "Run the seed sweep" completes the run and the progress bar finishes at
+  `1.0` with "complete" text; `_preview_data` is cached — a second call
+  with the same `(path, stamp, size)` does not re-probe (a counting
+  wrapper on the task `__init__` fires once), while a changed stamp
+  re-probes.
+- **Screening pin** — scripted fake task, `screen_frac=0.25`, budget 3:
+  screen scores 50 (baseline) → 40 → 60 → 55; full scores 50 → 70 → 65.
+  Log kinds are exactly `baseline, screen, experiment, experiment`: exp 1
+  is screen-rejected (40 ≤ champion 50; no full train), exp 2 is promoted
+  and accepted (full 70 > 50), exp 3 is promoted and gate-rejected (65 <
+  70). `experiments_run=3`, `finished_reason="budget_exhausted"`,
+  `final_best_score=70`, the summary has the `screening` block; `report
+  --run <dir>` exits 0 and prints the `screen` row.
+- Default off (`1.0`) → no `screen` rows and no `screening` key; invalid
+  `screen_frac` (`≤ 0`, `> 1`, str, bool) → `ValueError`; `run`/`fit`
+  accept `--screen-frac` and a small screened run finishes with a reason.
+- Full suite green (A1–A21); `import autorefine` stays clean
+  (subprocess pattern).
+
+### 32.5 Milestone
+
+**M21** — v0.18 optimization: app perceived perf (streamed seed-sweep
+progress + cached data preview) and opt-in two-stage candidate screening
+(`screen_frac`, `run`/`fit --screen-frac`) (A22).

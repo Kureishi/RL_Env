@@ -465,6 +465,43 @@ Fixed-dim `Box` observation, `Discrete` action space (the mutation catalog).
   produces: zero new core dependencies, the SVGs are hand-rolled valid
   XML, and every pinned sequence (A1–A19, §18.7) stays green.
   (SPEC.md 30.1–30.6, A20.)
+- **Optimization (v0.17):** two loop-level wins, both opt-in, both
+  determinism-safe. **Stop at the plateau** — `run`, `fit`, and `variance`
+  accept `--stall-patience K` (or `AutoRefineEnv(stall_patience=K)` /
+  `DashboardRunner(stall_patience=K)`): K consecutive non-improving
+  experiments end the run early with `finished_reason="stalled"` instead of
+  burning the rest of the budget — an acceptance, a fresh `reset()`, or a
+  curriculum step-up (a new ceiling) re-arms it; free duplicate/invalid
+  rejections don't count. Default is **off**, so every pinned sequence
+  (A1–A20, the §18.7 legacy run) is byte-identical, and the §22.1 gate
+  still reads only the final score. **Parallel seed sweep** —
+  `DashboardRunner.seed_sweep(seeds, workers=N)` and `variance --workers N`
+  run the independent seeds on stdlib `concurrent.futures`
+  processes: each seed is a self-contained deterministic run, so per-seed
+  results are bit-identical to the serial path (except the timestamped
+  `run_dir`); `workers=1` (the default) keeps the exact serial loop, and
+  `on_update` raises with `workers > 1` (a callback can't cross a process
+  boundary). Zero new dependencies; `import autorefine` stays clean
+  (SPEC.md 31.1–31.2, A21.)
+- **Optimization (v0.18):** **App perceived-perf** (app-only) — the
+  "Run the seed sweep" button now streams the per-step `on_update`
+  callback (the SPEC.md 31.2 serial path; the app keeps `workers=1`) into
+  an `st.progress` bar that finishes at 100% with "complete", and the
+  data-preview computation is `st.cache_data`-cached on
+  (path, mtime, size) so an unchanged file is never re-probed. **Two-stage
+  candidate screening** — opt-in `run`/`fit --screen-frac F` (or
+  `AutoRefineEnv(screen_frac=F)` with `0 < F < 1`, preset
+  `candidate_screening(frac)`): each candidate is first trained on the
+  first `floor(F·n)` rows and only a strict beat of the fixed champion
+  (the baseline spec screened once at `reset()`) spends the full
+  training; screen rejections are logged `kind="screen"`, spend one budget
+  experiment, and count for the v0.17 stall patience. Default
+  (`screen_frac=1.0`) is pre-v0.18 exactly — every pinned sequence
+  (A1–A21) stays green; the screening path has its own scripted pin (A22).
+  **Trainer micro-opts** (fused MLP ops, vectorized bagging) are deferred:
+  any float-order change would break bit-identical determinism (G2), and
+  they're only worth the pin re-derivation if the loop-level wins fall
+  short (SPEC.md 32.3). Zero new dependencies (SPEC.md 32.1–32.3, A22, M21.)
 - **Input modalities (v0.10):** `autorefine fit --data DIR` now accepts a
   labelled directory — one subfolder per class (or an `index.csv`) of
   **images** (PNG/JPG/JPEG/BMP/GIF; grayscale 32×32 features; optional

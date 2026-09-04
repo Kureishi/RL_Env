@@ -56,7 +56,8 @@ class DashboardRunner:
                  target: float = 95.0, policy: str = "bandit", seed: int = 7,
                  experiments: int = 30, max_seconds: float = 900.0,
                  max_train_seconds: float = 30.0, runs_dir: str = "runs",
-                 search_quality: str = "v04", modality: str | None = None) -> None:
+                 search_quality: str = "v04", modality: str | None = None,
+                 stall_patience: int | None = None) -> None:
         if policy not in ("bandit", "search"):
             raise ValueError(f"unsupported policy {policy!r}: {_RL_HINT}")
         if search_quality not in ("v04", "legacy"):
@@ -78,6 +79,7 @@ class DashboardRunner:
         self.max_train_seconds = float(max_train_seconds)
         self.runs_dir = str(runs_dir)
         self.search_quality = search_quality
+        self.stall_patience = stall_patience  # v0.17 (SPEC.md 31.1; None = off)
         self.env: AutoRefineEnv | None = None
         self.policy: SearchPolicy | BanditPolicy | None = None
         self._state: dict | None = None
@@ -142,7 +144,9 @@ class DashboardRunner:
             task_config=config,
             # the CLI default (SPEC.md 18.6); 'legacy' = the deterministic
             # v0.3 rule (strict score comparison, no wall-clock eff term)
-            **({} if self.search_quality == "legacy" else search_quality_v04())
+            **({} if self.search_quality == "legacy" else search_quality_v04()),
+            # v0.17 (SPEC.md 31.1): plateau early stop (None = off)
+            stall_patience=self.stall_patience,
         )
         self.policy = (SearchPolicy(seed=self.seed) if self.policy_name == "search"
                        else BanditPolicy(seed=self.seed))
@@ -225,19 +229,25 @@ class DashboardRunner:
         return self.finish()
 
     # --- D1 seed-variance (SPEC.md 29.1) ------------------------------------
+    def _sweep_params(self) -> dict:
+        """The plain-value `DashboardRunner` constructor kwargs (picklable,
+        SPEC.md 31.2) — everything a sweep seed carries except its seed."""
+        return dict(
+            csv_path=self.csv_path, label=self.label, split_frac=self.split_frac,
+            target=self.target, policy=self.policy_name,
+            experiments=self.experiments, max_seconds=self.max_seconds,
+            max_train_seconds=self.max_train_seconds, runs_dir=self.runs_dir,
+            search_quality=self.search_quality, modality=self.modality,
+            stall_patience=self.stall_patience,  # v0.17 (SPEC.md 31.1)
+        )
+
     def _clone(self, seed: int) -> "DashboardRunner":
         """D1 (SPEC.md 29.1): a fresh runner from `self`'s parameters (same
         flags, a new seed) so a sweep run is fully isolated — this never
         disturbs the caller's own runner or the §18.7 pin."""
-        return DashboardRunner(
-            csv_path=self.csv_path, label=self.label, split_frac=self.split_frac,
-            target=self.target, policy=self.policy_name, seed=int(seed),
-            experiments=self.experiments, max_seconds=self.max_seconds,
-            max_train_seconds=self.max_train_seconds, runs_dir=self.runs_dir,
-            search_quality=self.search_quality, modality=self.modality,
-        )
+        return DashboardRunner(seed=int(seed), **self._sweep_params())
 
-    def seed_sweep(self, seeds, on_update=None) -> list:
+    def seed_sweep(self, seeds, on_update=None, workers: int = 1) -> list:
         """D1 (SPEC.md 29.1): the same flags re-run under N seeds — the
         "is the improvement real?" question (SPEC.md 29).
 
@@ -249,32 +259,37 @@ class DashboardRunner:
         `[baseline, best after step 1, …]`, one point per `next()` call
         (free duplicate rejections are steps too, R3). Empty `seeds` → `[]`.
         The caller's own runner is untouched.
+
+        v0.17 (SPEC.md 31.2): `workers > 1` runs the independent seeds on
+        a `ProcessPoolExecutor` — each seed is a self-contained
+deterministic run, so per-seed results are bit-identical to the serial
+        path (except the timestamped `run_dir`); `workers == 1` (default)
+        keeps the exact pre-v0.17 serial loop. `on_update` is a callback
+        and cannot run in worker processes (it raises with `workers > 1`).
         """
+        seeds = [int(s) for s in (seeds or [])]
+        if not seeds:
+            return []
+        if not isinstance(workers, int) or isinstance(workers, bool) \
+                or workers < 1:
+            raise ValueError(f"workers must be an int >= 1, got {workers!r} "
+                             f"(SPEC.md 31.2)")
+        if workers > 1:
+            if on_update is not None:
+                raise ValueError(
+                    "on_update is a callback and cannot run in worker "
+                    "processes — pass workers=1 for the serial loop "
+                    "(SPEC.md 31.2)")
+            from concurrent.futures import ProcessPoolExecutor  # stdlib
+            params = self._sweep_params()
+            with ProcessPoolExecutor(max_workers=workers) as pool:
+                # pool.map preserves input order (SPEC.md 31.2)
+                return list(pool.map(_sweep_seed_worker,
+                                     [(params, s) for s in seeds]))
+        # workers == 1 (default): the exact pre-v0.17 serial loop (31.2)
         out: list[dict] = []
-        for seed in (seeds or []):
-            seed = int(seed)
-            runner = self._clone(seed)
-            info = runner.start()
-            curve = [float(info["baseline_score"])]  # V1 (SPEC.md 30.1)
-            while not runner.done:
-                update = runner.next()
-                curve.append(float(update["best_score"]))
-                if on_update is not None:
-                    on_update(update)
-            res = runner.finish()
-            final = float(res["final_best_score"])
-            target = float(res["target"])
-            out.append({
-                "seed": seed,
-                "baseline": float(res["baseline_score"]),
-                "final": final,
-                "curve": curve,  # curve[0] == baseline, curve[-1] == final
-                "target": target,
-                "pass": bool(final >= target),  # the §22.1 gate, exactly
-                "verdict": res["verdict"],
-                "experiments_run": res["experiments_run"],
-                "run_dir": str(res["run_dir"]),
-            })
+        for seed in seeds:
+            out.append(_drive_sweep_runner(self._clone(seed), on_update))
         return out
 
     # --- results ------------------------------------------------------------
@@ -389,6 +404,56 @@ class DashboardRunner:
     def updates_json(self) -> str:
         """The full update stream as JSON (machine-readable live feed)."""
         return json.dumps(self._updates, indent=2, sort_keys=True)
+
+
+# --- v0.17 sweep worker (SPEC.md 31.2) ----------------------------------------
+# Module-level plain functions: picklable, so the parallel seed sweep can run
+# one full isolated run per worker process (Windows `spawn` re-imports the
+# package; bound methods and lambdas would not be picklable — SPEC.md 31.2).
+
+def _drive_sweep_runner(runner: "DashboardRunner", on_update=None) -> dict:
+    """Drive one sweep seed — `start()` → `next()`… → `finish()` — and
+    return its JSON-safe dict (SPEC.md 29.1).
+
+    The exact serial body of the pre-v0.17 `seed_sweep` loop (SPEC.md 31.2):
+    the serial path uses it per seed with `on_update` forwarded, the
+    parallel worker uses it without one (31.2). `curve[0] == baseline`,
+    `curve[-1] == final` (SPEC.md 30.1).
+    """
+    info = runner.start()
+    curve = [float(info["baseline_score"])]  # V1 (SPEC.md 30.1)
+    while not runner.done:
+        update = runner.next()
+        curve.append(float(update["best_score"]))
+        if on_update is not None:
+            on_update(update)
+    res = runner.finish()
+    final = float(res["final_best_score"])
+    target = float(res["target"])
+    return {
+        "seed": runner.seed,
+        "baseline": float(res["baseline_score"]),
+        "final": final,
+        "curve": curve,
+        "target": target,
+        "pass": bool(final >= target),  # the §22.1 gate, exactly
+        "verdict": res["verdict"],
+        "experiments_run": res["experiments_run"],
+        "run_dir": str(res["run_dir"]),
+    }
+
+
+def _sweep_seed_worker(job: tuple[dict, int]) -> dict:
+    """v0.17 (SPEC.md 31.2): one independent sweep seed on a worker process.
+
+    Builds the same `_clone(seed)` runner from the picklable constructor
+    kwargs (`_sweep_params`) and drives the same loop — the seeds share no
+    state, so the per-seed result is bit-identical to the serial path
+    (except the timestamped `run_dir`). No `on_update` here: it is a
+    callback and `seed_sweep` raises with `workers > 1` (31.2).
+    """
+    params, seed = job
+    return _drive_sweep_runner(DashboardRunner(seed=int(seed), **params), None)
 
 
 # --- decision views (SPEC.md 26) ---------------------------------------------

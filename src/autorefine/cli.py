@@ -92,6 +92,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         task=args.task, seed=args.seed, budget=_budget(args), runs_dir=args.runs_dir,
         ensemble_top_k=2 if args.ensemble_final else 0,
         curriculum=curriculum,
+        stall_patience=args.stall_patience,  # v0.17 (SPEC.md 31.1; None = off)
+        screen_frac=args.screen_frac,  # v0.18 (SPEC.md 32.2; 1.0 = off)
         **quality,
     )
     _drive(args, env)
@@ -193,6 +195,8 @@ def _cmd_fit(args: argparse.Namespace) -> int:
         ensemble_top_k=2 if args.ensemble_final else 0,
         dataset_episodes=int(probe.default_dataset_size),
         task_config=config,
+        stall_patience=args.stall_patience,  # v0.17 (SPEC.md 31.1; None = off)
+        screen_frac=args.screen_frac,  # v0.18 (SPEC.md 32.2; 1.0 = off)
         **quality,
     )
     _drive(args, env)
@@ -238,9 +242,10 @@ def _cmd_variance(args: argparse.Namespace) -> int:
         experiments=args.experiments, max_seconds=args.max_seconds,
         max_train_seconds=args.max_train_seconds, runs_dir=args.runs_dir,
         search_quality=args.search_quality, modality=args.task,
+        stall_patience=args.stall_patience,  # v0.17 (SPEC.md 31.1; per-seed)
     )
     seeds = list(range(args.seed, args.seed + args.seeds))
-    sweep = runner.seed_sweep(seeds)
+    sweep = runner.seed_sweep(seeds, workers=args.workers)  # v0.17 (SPEC.md 31.2)
     rd = Path(args.runs_dir)
     rd.mkdir(parents=True, exist_ok=True)
     svg = rd / "seed_variance.svg"
@@ -656,6 +661,16 @@ def main(argv: list[str] | None = None) -> int:
                        help="v0.6 (SPEC.md 20.1): adaptive difficulty — step the "
                             "parity task up (p_flip, then n_bits) as the "
                             "improver saturates")
+    p_run.add_argument("--stall-patience", type=int, default=None,
+                       help="v0.17 (SPEC.md 31.1): stop after K consecutive "
+                            "non-improving experiments (finished_reason='stalled'); "
+                            "default: off (pre-v0.17 behavior)")
+    p_run.add_argument("--screen-frac", type=float, default=1.0,
+                       help="v0.18 (SPEC.md 32.2): two-stage candidate "
+                            "screening fraction — screen each candidate on the "
+                            "first F·n rows and full-train only strict beats of "
+                            "the (screened) baseline; 0 < F < 1 to enable, "
+                            "default 1.0 = off (pre-v0.18 behavior)")
     p_run.set_defaults(func=_cmd_run)
 
     p_rep = sub.add_parser("report", help="print a run's summary and experiment log")
@@ -701,6 +716,14 @@ def main(argv: list[str] | None = None) -> int:
                        help="search-quality preset (SPEC.md 18)")
     p_fit.add_argument("--ensemble-final", action="store_true",
                        help="v0.5 (SPEC.md 19.3): also report an ensemble final score")
+    p_fit.add_argument("--stall-patience", type=int, default=None,
+                       help="v0.17 (SPEC.md 31.1): stop after K consecutive "
+                            "non-improving experiments (finished_reason='stalled'); "
+                            "default: off (pre-v0.17 behavior)")
+    p_fit.add_argument("--screen-frac", type=float, default=1.0,
+                       help="v0.18 (SPEC.md 32.2): two-stage candidate "
+                            "screening fraction (0 < F < 1 to enable; default "
+                            "1.0 = off, pre-v0.18 behavior)")
     p_fit.set_defaults(func=_cmd_fit)
 
     p_dash = sub.add_parser(
@@ -744,6 +767,14 @@ def main(argv: list[str] | None = None) -> int:
     p_var.add_argument("--runs-dir", default="runs")
     p_var.add_argument("--search-quality", default="v04", choices=("v04", "legacy"),
                        help="search-quality preset (SPEC.md 18)")
+    p_var.add_argument("--stall-patience", type=int, default=None,
+                       help="v0.17 (SPEC.md 31.1): each sweep seed stops after K "
+                            "consecutive non-improving experiments (per-seed "
+                            "finished_reason='stalled'); default: off")
+    p_var.add_argument("--workers", type=int, default=1,
+                       help="v0.17 (SPEC.md 31.2): worker processes for the seed "
+                            "sweep (default 1 = the exact serial path; per-seed "
+                            "results bit-identical either way)")
     p_var.add_argument("--json", action="store_true",
                        help="print the sweep as pure JSON (SPEC.md 21.2)")
     p_var.set_defaults(func=_cmd_variance)

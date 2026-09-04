@@ -95,6 +95,13 @@ def search_quality_v04() -> dict:
     )
 
 
+def candidate_screening(frac: float = 0.25) -> dict:
+    """SPEC.md 32.2: opt-in two-stage candidate screening as AutoRefineEnv
+    kwargs (screen on the first frac·n rows; full-train only strict
+    champion beats; the `search_quality_v04()` preset pattern)."""
+    return dict(screen_frac=frac)
+
+
 class AutoRefineEnv:
     def __init__(
         self,
@@ -118,9 +125,34 @@ class AutoRefineEnv:
         curriculum: ParityCurriculum | None = None,
         # --- v0.8 task config (SPEC.md 22.1; None = off, pre-v0.8 exact) -----
         task_config: dict | None = None,
+        # --- v0.17 stall patience (SPEC.md 31.1; None = off, pre-v0.17 exact)
+        stall_patience: int | None = None,
+        # --- v0.18 two-stage screening (SPEC.md 32.2; 1.0 = off, pre-v0.18)
+        screen_frac: float = 1.0,
     ) -> None:
         if task not in TASKS:  # registry: SPEC.md 15 "more tasks"
             raise ValueError(f"unknown task {task!r} (available: {sorted(TASKS)})")
+        # SPEC.md 31.1: K consecutive non-improving experiments -> "stalled"
+        if stall_patience is not None and \
+                (not isinstance(stall_patience, int) or stall_patience < 1):
+            raise ValueError(
+                f"stall_patience must be an int >= 1 or None (off), "
+                f"got {stall_patience!r} (SPEC.md 31.1)")
+        # SPEC.md 32.2: non-bool finite number in (0, 1]; 1.0 = off
+        if screen_frac is None or isinstance(screen_frac, bool):
+            raise ValueError(
+                f"screen_frac must be a number in (0, 1] (1.0 = off), "
+                f"got {screen_frac!r} (SPEC.md 32.2)")
+        try:
+            _sf = float(screen_frac)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"screen_frac must be a number in (0, 1] (1.0 = off), "
+                f"got {screen_frac!r} (SPEC.md 32.2)") from None
+        if not math.isfinite(_sf) or not (0.0 < _sf <= 1.0):
+            raise ValueError(
+                f"screen_frac must be a number in (0, 1] (1.0 = off), "
+                f"got {screen_frac!r} (SPEC.md 32.2)")
         task_cls = TASKS[task]
         self.task_name = task
         self.seed = int(seed)
@@ -170,6 +202,12 @@ class AutoRefineEnv:
         self.done = False
         self.done_reason: str | None = None
         self._dup_streak = 0  # SPEC.md 20.2 (stall guard)
+        self.stall_patience = stall_patience  # SPEC.md 31.1 (None = off)
+        self._stall_streak = 0  # SPEC.md 31.1: non-improving experiment streak
+        # SPEC.md 32.2: opt-in two-stage screening (1.0 = off, pre-v0.18)
+        self.screen_frac = _sf
+        self.screen_active = self.screen_frac < 1.0
+        self._screen_champion: float | None = None  # set at reset (32.2)
         self._started = False
 
     # --- lifecycle ----------------------------------------------------------
@@ -239,6 +277,18 @@ class AutoRefineEnv:
             "loss_history": result.loss_history,  # SPEC.md 28.1 (C1)
         })
         self._dup_streak = 0  # SPEC.md 20.2: fresh episode, fresh streak
+        self._stall_streak = 0  # SPEC.md 31.1: fresh episode, fresh patience
+        # SPEC.md 32.2: the screening champion — the baseline spec screened
+        # once on the prefix subsample (free, like the reset baseline);
+        # K=1 against this fixed champion for the whole episode
+        self._screen_champion = None
+        if self.screen_active:
+            sres = train(
+                self._subsample(self.dataset), DEFAULT_SPEC, self.seed,
+                time_limit_seconds=self.bm.train_time_limit(),
+                n_out=self.task.n_outputs, head=self.task.head,
+            )
+            self._screen_champion = float(self._evaluate(sres.model)[0])
         self._started = True
         return self._state()
 
@@ -249,6 +299,11 @@ class AutoRefineEnv:
             return True, "budget_exhausted"
         if self.bm.wall_exhausted:
             return True, "wall_time_exhausted"
+        # SPEC.md 31.1: plateau early stop — K non-improving experiments in
+        # a row (checked last: an existing reason on the same step wins)
+        if self.stall_patience is not None \
+                and self._stall_streak >= self.stall_patience:
+            return True, "stalled"
         return False, None
 
     def step(self, action: dict | ModelSpec) -> tuple[dict, float, bool, dict]:
@@ -308,8 +363,23 @@ class AutoRefineEnv:
         # SPEC.md 25.3: the convnet family trains on the grid dataset; a
         # convnet spec on a flat task raises SpecError here -> SPEC.md 25.4
         try:
+            full_dataset = self._dataset_for(spec)
+            # SPEC.md 32.2: opt-in two-stage screening — the candidate is
+            # first trained on a prefix subsample and scored; only a strict
+            # beat of the fixed champion (32.2) spends the full training
+            if self.screen_active:
+                sres = train(
+                    self._subsample(full_dataset), spec, self.seed,
+                    time_limit_seconds=self.bm.train_time_limit(),
+                    n_out=self.task.n_outputs, head=self.task.head,
+                )
+                s_score, s_std, s_gen, s_gap = self._evaluate(sres.model)
+                if not s_score > self._screen_champion:
+                    return self._reject_screened(
+                        spec, fp, mutation_fields, sres,
+                        s_score, s_std, s_gen, s_gap)
             result = train(
-                self._dataset_for(spec), spec, self.seed,
+                full_dataset, spec, self.seed,
                 time_limit_seconds=self.bm.train_time_limit(),
                 n_out=self.task.n_outputs, head=self.task.head,
             )
@@ -343,6 +413,10 @@ class AutoRefineEnv:
         self.seen.add(fp)
         self.pareto.add(score, result.train_seconds, fp)  # raw score (SPEC.md 15)
         self.last = {"accepted": accepted, "fields": mutation_fields}
+        # SPEC.md 31.1: patience counts scored experiments only — an
+        # acceptance (strict improvement) resets, a rejection extends
+        if self.stall_patience is not None:
+            self._stall_streak = 0 if accepted else self._stall_streak + 1
         self.history.append({
             "spec_hash": fp,
             "score": score,
@@ -396,6 +470,7 @@ class AutoRefineEnv:
         ensemble top-k) while keeping the full experiment log and the first
         baseline (v0.4 summary contract)."""
         assert self.curriculum is not None and self.best_spec is not None
+        self._stall_streak = 0  # SPEC.md 31.1: new level = new ceiling
         best_before = self.best_score
         self.task = self.curriculum.task()
         self.task_name = self.task.name
@@ -453,6 +528,68 @@ class AutoRefineEnv:
                     "grid_dataset() (SPEC.md 25.3)")
             return grid_dataset(self.dataset_size)
         return self.dataset
+
+    # --- two-stage screening (SPEC.md 32.2) ---------------------------------
+    def _subsample(self, dataset: Any) -> Any:
+        """SPEC.md 32.2: the first max(1, floor(frac·n)) rows of the (X, y)
+        train-split dataset — a prefix slice, no new RNG (G2)."""
+        x, y = dataset
+        m = max(1, int(math.floor(len(x) * self.screen_frac)))
+        return x[:m], y[:m]
+
+    def _reject_screened(self, spec: ModelSpec, fp: str, fields: list[str],
+                         sres, s_score: float, s_std: float, s_gen: float,
+                         s_gap: float) -> tuple[dict, float, bool, dict]:
+        """SPEC.md 32.2: a screened candidate that does not strictly beat
+        the fixed champion (the baseline screened at reset) is rejected
+        without the full training. One budget experiment is spent (it was
+        scored and trained), the fingerprint joins `seen` (R3 still
+        applies), and it counts for the v0.17 stall patience (SPEC.md
+        31.1: a scored non-improving experiment). Pareto / ensemble /
+        curriculum are untouched (32.2)."""
+        self.bm.spend_experiment()
+        self.seen.add(fp)
+        self.last = {"accepted": False, "fields": list(fields)}
+        if self.stall_patience is not None:
+            self._stall_streak += 1
+        self.history.append({
+            "spec_hash": fp,
+            "score": s_score,
+            "delta": s_score - self.best_score,
+        })
+        self.memory.log({
+            "kind": "screen",
+            "spec": spec.to_dict(),
+            "spec_hash": fp,
+            "mutation": list(fields),
+            "holdout_score": s_score,
+            "std": s_std,  # SPEC.md 30.4 (V4): holdout sigma (0.0 legacy)
+            "gen_score": s_gen,
+            "gen_gap": s_gap,
+            "train_seconds": sres.train_seconds,
+            "time_capped": sres.time_capped,
+            "effective_score": s_score,  # legacy mode: == screen score
+            "accepted": False,
+            "screen_rejected": True,
+            "loss_history": sres.loss_history,  # SPEC.md 28.1 (C1)
+        })
+        done, reason = self._check_done()
+        if done:
+            self._finish(reason)
+        info = {
+            "accepted": False,
+            "reason": "screen_rejected" if not done else reason,
+            "candidate_score": s_score,
+            "gen_gap": s_gap,
+            "experiments_left": self.bm.experiments_left,
+            "train_seconds": sres.train_seconds,
+            "time_capped": sres.time_capped,
+            "effective_score": s_score,
+            "se": 0.0,
+            "loss_history": sres.loss_history,  # SPEC.md 28.1 (C1)
+            "screen_rejected": True,
+        }
+        return self._state(), 0.0, done, info
 
     # --- invalid-spec rejection (SPEC.md 25.4) --------------------------------
     def _reject_invalid(self, spec_dict: dict, fields: list[str],
@@ -558,6 +695,12 @@ class AutoRefineEnv:
                 "final_difficulty": self.curriculum.level_description(),
                 "final_ceiling": self.curriculum.ceiling,
                 "levels_left": self.curriculum.levels_left(),
+            }
+        # SPEC.md 32.2: two-stage screening config (only when active)
+        if self.screen_active:
+            summary["screening"] = {
+                "frac": self.screen_frac,
+                "baseline_screen_score": self._screen_champion,
             }
         # SPEC.md 19.3: opt-in ensemble final evaluation (top-k frontier models)
         if self.ensemble_top_k > 0 and len(self._top) >= 1:

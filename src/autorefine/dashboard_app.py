@@ -71,39 +71,41 @@ def _resolve_csv(upload, path_str: str) -> str | None:
     return None
 
 
-def _preview(csv_path: str) -> None:
-    """Inferred head/splits + first rows (SPEC.md 23.2 data preview);
+# SPEC.md 32.1: the preview computation is cached on (path, mtime_ns, size)
+# — the upload flow reuses one temp dir, so a changed file re-probes;
+# same file + same stamp is served from the cache
+@st.cache_data
+def _preview_data(csv_path: str, stamp: int, size: int) -> dict:
+    """SPEC.md 32.1: pure preview computation (no `st.*` calls) —
+    inferred head/splits caption + first rows; returns
+    {"kind", "caption", "header", "rows"} or {"error": msg}.
     v0.10 (SPEC.md 24.5): media directories preview their items."""
     from autorefine.tasks import TASKS, detect_modality
     p = Path(csv_path)
+    if not p.is_file() and not p.is_dir():
+        return {"error": f"no such file or directory: {p}"}
     if p.is_file():
         cls = CsvTask
-    elif p.is_dir():
+    else:
         m = detect_modality(p)
         if m is None or m == "mixed":
-            st.warning(f"Directory {p} holds no image/audio items (or is "
-                       f"mixed) — one subfolder per class, or an index.csv "
-                       f"(SPEC.md 24.2/24.5)")
-            return
+            return {"error": (f"Directory {p} holds no image/audio items "
+                             f"(or is mixed) — one subfolder per class, "
+                             f"or an index.csv (SPEC.md 24.2/24.5)")}
         cls = TASKS[m]
-    else:
-        st.warning(f"no such file or directory: {p}")
-        return
     try:
         probe = cls(seed=0, path=csv_path)
     except ValueError as exc:
-        st.warning(f"data not usable as a task: {exc}")
-        return
+        return {"error": f"data not usable as a task: {exc}"}
     head_txt = (f"softmax ({probe.n_outputs} classes: "
                 f"{probe.class_values})" if probe.head == "softmax"
                 else "mse (regression)")
-    st.caption(
+    caption = (
         f"label **{probe.label_name}** · head **{head_txt}** · "
         f"features {', '.join(probe.feature_names)} · "
         f"items {len(probe._x_tr)}/{len(probe._x_ho)}/{len(probe._x_ge)} "
         f"(train/holdout/gen)"
     )
-    import pandas as pd  # a streamlit dependency, app-only
     if p.is_file():
         # simple deterministic preview: header + first 5 data rows
         with p.open(encoding="utf-8", newline="") as f:
@@ -111,22 +113,44 @@ def _preview(csv_path: str) -> None:
             header = next(reader)
             data = [next(reader, None) for _ in range(5)]
             data = [r for r in data if r]
-        if data:
-            st.dataframe(pd.DataFrame(data, columns=header).head(5),
-                         width="stretch")
+        return {"kind": "csv", "caption": caption,
+                "header": header, "rows": data}
+    rows = []
+    for sub in sorted(p.iterdir()):
+        if sub.is_dir():
+            for f in sorted(sub.iterdir()):
+                if f.is_file():
+                    rows.append({"class": sub.name, "file": f.name})
+                    if len(rows) >= 5:
+                        break
+        if len(rows) >= 5:
+            break
+    return {"kind": "media", "caption": caption,
+            "header": None, "rows": rows}
+
+
+def _preview(csv_path: str) -> None:
+    """Inferred head/splits + first rows (SPEC.md 23.2 data preview) —
+    the thin renderer over the cached `_preview_data` (SPEC.md 32.1);
+    v0.10 (SPEC.md 24.5): media directories preview their items."""
+    p = Path(csv_path)
+    if not p.exists():
+        st.warning(f"no such file or directory: {p}")
+        return
+    stat = p.stat()
+    data = _preview_data(csv_path, stat.st_mtime_ns, stat.st_size)
+    if "error" in data:
+        st.warning(data["error"])
+        return
+    st.caption(data["caption"])
+    import pandas as pd  # a streamlit dependency, app-only
+    if not data["rows"]:
+        return
+    if data["kind"] == "csv":
+        st.dataframe(pd.DataFrame(data["rows"], columns=data["header"]).head(5),
+                     width="stretch")
     else:
-        rows = []
-        for sub in sorted(p.iterdir()):
-            if sub.is_dir():
-                for f in sorted(sub.iterdir()):
-                    if f.is_file():
-                        rows.append({"class": sub.name, "file": f.name})
-                        if len(rows) >= 5:
-                            break
-            if len(rows) >= 5:
-                break
-        if rows:
-            st.dataframe(pd.DataFrame(rows).head(5), width="stretch")
+        st.dataframe(pd.DataFrame(data["rows"]).head(5), width="stretch")
 
 
 def _run(csv_path: str, label: str, target: float, policy: str, seed: int,
@@ -428,12 +452,27 @@ def _render_optin_views(path, label: str, target: float, policy: str,
                 max_train_seconds=float(max_train),
                 runs_dir=runs_dir.strip() or "runs", search_quality=quality,
             )
+            seeds = list(range(int(seed), int(seed) + int(var_n)))
+            # SPEC.md 32.1: stream the per-step `on_update` (the SPEC.md 31.2
+            # serial callback path — the app keeps workers=1) into a
+            # progress bar; the denominator is an upper bound (free duplicate
+            # rejections, R3, may exceed it), so the fraction is clamped
+            total_steps = max(1, len(seeds) * max(1, int(experiments)))
+            bar = st.progress(0.0, text=f"seed sweep: 0 of ≤{total_steps} steps")
+            steps = {"n": 0}
+
+            def _on_update(_update: dict) -> None:
+                steps["n"] += 1
+                bar.progress(min(1.0, steps["n"] / total_steps),
+                             text=f"seed sweep: step {steps['n']} "
+                                  f"(of ≤{total_steps})")
+
             try:
-                sweep = var_runner.seed_sweep(
-                    list(range(int(seed), int(seed) + int(var_n))))
+                sweep = var_runner.seed_sweep(seeds, on_update=_on_update)
             except ValueError as exc:
                 st.error(str(exc))
             else:
+                bar.progress(1.0, text="seed sweep: complete")  # SPEC.md 32.1
                 passing = sum(1 for s in sweep if s["pass"])
                 beats = sum(1 for s in sweep if s["final"] > s["baseline"])
                 st.caption(f"{len(sweep)} seeds · {passing} pass target "
