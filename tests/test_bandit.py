@@ -1,5 +1,6 @@
 """BanditPolicy tests (SPEC.md 17: the UCB field-bandit improver;
-SPEC.md 18.1/18.2: local mutation mode + family-conditioned proposals)."""
+SPEC.md 18.1/18.2: local mutation mode + family-conditioned proposals);
+acceptance A7 (SPEC.md 12: the v0.3 bandit extension coverage)."""
 import numpy as np
 import pytest
 

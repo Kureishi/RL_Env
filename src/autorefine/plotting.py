@@ -14,6 +14,8 @@ import html
 import json
 import math
 
+from .memory import KIND_BASELINE, KIND_CURRICULUM, KIND_EXPERIMENT  # 35.1 (C4)
+
 _AXIS = "#333333"
 _LINE = "#1a66c2"
 _BASELINE = "#c2410c"
@@ -38,8 +40,8 @@ def _score_rows(rows) -> list[tuple[str, float, bool]]:
     out = []
     for r in rows or []:
         kind = r.get("kind")
-        if kind not in ("baseline", "experiment") or not _finite(r.get("holdout_score")):
-            continue
+        if kind not in (KIND_BASELINE, KIND_EXPERIMENT) or not _finite(r.get("holdout_score")):
+            continue  # SPEC.md 35.1 (C4): the kind registry
         out.append((kind, float(r["holdout_score"]), bool(r.get("accepted"))))
     return out
 
@@ -79,7 +81,7 @@ def ascii_score_curve(rows, width: int = 48, height: int = 12) -> str:
     n = len(pts)
     grid = _axis_frame(width, height)
     for i, (kind, s, accepted) in enumerate(pts):
-        ch = "B" if kind == "baseline" else ("+" if accepted else "o")
+        ch = "B" if kind == KIND_BASELINE else ("+" if accepted else "o")  # 35.1
         _mark(grid, width, height, n, i, i / (n - 1) if n > 1 else 0.5,
               (s - lo) / (hi - lo), ch)
     lines = []
@@ -143,8 +145,8 @@ def _band_stds(rows) -> list[float]:
     out = []
     for r in rows or []:
         kind = r.get("kind")
-        if kind not in ("baseline", "experiment") or not _finite(r.get("holdout_score")):
-            continue
+        if kind not in (KIND_BASELINE, KIND_EXPERIMENT) or not _finite(r.get("holdout_score")):
+            continue  # SPEC.md 35.1 (C4): the kind registry
         s = r.get("std")
         ok = (isinstance(s, (int, float)) and not isinstance(s, bool)
               and math.isfinite(s) and float(s) > 0.0)
@@ -181,7 +183,7 @@ def svg_score_curve(rows, width: int = 640, height: int = 360) -> str:
     pw, ph = width - L - R, height - T - B
     xs = [L + pw * (i / (n - 1) if n > 1 else 0.5) for i in range(n)]
     ys = [T + ph * (1.0 - (s - lo) / (hi - lo)) for s in scores]
-    colors = [_BASELINE if k == "baseline" else (_ACCEPTED if a else _REJECTED)
+    colors = [_BASELINE if k == KIND_BASELINE else (_ACCEPTED if a else _REJECTED)  # 35.1
               for k, s, a in pts]
     titles = [f"{k} #{i}: {s:.2f}" for i, (k, s, a) in enumerate(pts)]
     parts = _svg_header(width, height, "score vs experiment")
@@ -267,7 +269,7 @@ def html_report(summary: dict, entries, diagnostics: dict | None = None,
     pareto_pts = summary.get("pareto_frontier") or [
         {"score": e["holdout_score"], "train_seconds": e.get("train_seconds", 0.0)}
         for e in entries
-        if e.get("kind") in ("baseline", "experiment")
+        if e.get("kind") in (KIND_BASELINE, KIND_EXPERIMENT)  # 35.1 (C4)
         and isinstance(e.get("holdout_score"), (int, float))
     ]
 
@@ -565,8 +567,9 @@ def svg_ladder_curve(entries, levels, width: int = 640, height: int = 360) -> st
     (SPEC.md 27.3/27.4).
     """
     rows = [e for e in (entries or [])
-            if e.get("kind") in ("baseline", "experiment", "curriculum")]
-    cur_idx = [i for i, e in enumerate(rows) if e.get("kind") == "curriculum"]
+            if e.get("kind") in (KIND_BASELINE, KIND_EXPERIMENT,  # 35.1 (C4)
+                                KIND_CURRICULUM)]
+    cur_idx = [i for i, e in enumerate(rows) if e.get("kind") == KIND_CURRICULUM]
     if not rows:
         parts = _svg_header(width, height, "curriculum ladder (best score) (empty)")
         parts.append(
@@ -588,13 +591,13 @@ def svg_ladder_curve(entries, levels, width: int = 640, height: int = 360) -> st
     pts: list[tuple[int, str, float]] = []
     for i, e in enumerate(rows):
         kind = e["kind"]
-        if kind == "baseline":
+        if kind == KIND_BASELINE:  # SPEC.md 35.1 (C4): the kind registry
             if _finite(e.get("holdout_score")):
                 best = float(e["holdout_score"])
-        elif kind == "experiment":
+        elif kind == KIND_EXPERIMENT:
             if e.get("accepted") and _finite(e.get("holdout_score")):
                 best = float(e["holdout_score"])
-        elif kind == "curriculum":
+        elif kind == KIND_CURRICULUM:
             if _finite(e.get("new_baseline_score")):
                 best = float(e["new_baseline_score"])
         if best is not None:
@@ -632,17 +635,17 @@ def svg_ladder_curve(entries, levels, width: int = 640, height: int = 360) -> st
                          f'{lv.get("n_bits")} bits, p_flip {lv["p_flip"]:.2f}</text>')
     colors = []
     for i, k, _v in pts:
-        if k == "curriculum":
+        if k == KIND_CURRICULUM:  # SPEC.md 35.1 (C4)
             colors.append(_LADDER)
-        elif k == "baseline":
+        elif k == KIND_BASELINE:
             colors.append(_BASELINE)
         else:
             colors.append(_ACCEPTED if rows[i].get("accepted") else _REJECTED)
     titles = []
     for i, k, v in pts:
-        if k == "baseline":
+        if k == KIND_BASELINE:
             titles.append(f"baseline: best {v:.2f}")
-        elif k == "curriculum":
+        elif k == KIND_CURRICULUM:
             titles.append(f"step-up: re-baselined, best {v:.2f}")
         else:
             ok = bool(rows[i].get("accepted"))

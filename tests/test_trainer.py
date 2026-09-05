@@ -1,4 +1,5 @@
-"""Trainer/model tests (SPEC.md T2, T3, T6 + gradient correctness)."""
+"""Trainer/model tests (SPEC.md T2, T3, T6 + gradient correctness);
+acceptance A9 (SPEC.md 12: the v0.5 trainer/model-space coverage)."""
 import numpy as np
 import pytest
 

@@ -1,9 +1,32 @@
-"""Run artifacts: JSONL experiment log + best-spec/model/summary (SPEC.md 9)."""
+"""Run artifacts: JSONL experiment log + best-spec/model/summary (SPEC.md 9).
+
+Also the experiment-log kind registry (SPEC.md 35.1, v0.21): the `kind`
+of an `experiments.jsonl` row is one of LOG_KINDS, and the emitter
+(improver/meta_env.py) plus every consumer (plotting.py, cli.py,
+dashboard.py) route through these constants — the values are
+byte-identical to the historical literals (A25).
+"""
 from __future__ import annotations
 
 import json
 import time
 from pathlib import Path
+
+# SPEC.md 35.1 (C4, A25): the log kind registry — one set, five kinds.
+# Values are the byte-identical historical literals (existing logs,
+# pins, and the A22 screen-row tests are untouched; 35.1).
+KIND_BASELINE = "baseline"
+KIND_EXPERIMENT = "experiment"
+KIND_SCREEN = "screen"
+KIND_CURRICULUM = "curriculum"
+KIND_INVALID_SPEC = "invalid_spec"
+LOG_KINDS = frozenset({
+    KIND_BASELINE,
+    KIND_EXPERIMENT,
+    KIND_SCREEN,
+    KIND_CURRICULUM,
+    KIND_INVALID_SPEC,
+})
 
 
 class RunMemory:

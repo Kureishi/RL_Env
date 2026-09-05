@@ -19,7 +19,7 @@ from .improver.bandit import BanditPolicy
 from .improver.curriculum import ParityCurriculum
 from .improver.policy import SearchPolicy
 from .improver.rl_policy import MetaRLPolicy, train_policy
-from .memory import RunMemory
+from .memory import KIND_BASELINE, KIND_EXPERIMENT, RunMemory
 from .plotting import (
     ascii_pareto,
     ascii_score_curve,
@@ -366,7 +366,7 @@ def _cmd_report(args: argparse.Namespace) -> int:
         pareto_pts = summary.get("pareto_frontier") or [
             {"score": e["holdout_score"], "train_seconds": e.get("train_seconds", 0.0)}
             for e in entries
-            if e.get("kind") in ("baseline", "experiment")
+            if e.get("kind") in (KIND_BASELINE, KIND_EXPERIMENT)  # 35.1 (C4)
             and isinstance(e.get("holdout_score"), (int, float))
         ]
         (run_dir / "score_curve.svg").write_text(svg_score_curve(entries), encoding="utf-8")
@@ -625,14 +625,11 @@ def _cmd_eval(args: argparse.Namespace) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    # SPEC.md 21.3: external packages may contribute tasks via entry points;
-    # register them before the parser is built so `--task` choices include them
-    try:
-        register_tasks()
-    except PluginError as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
+def build_parser() -> argparse.ArgumentParser:
+    """The full argparse tree (SPEC.md 33.2, C2): exposed separately so
+    the KNOBS registry's CLI claims (which subcommand exposes which
+    `--knob`) can be checked against the real parser by the A23 tests.
+    Pure extraction from `main` — identical flags, no behavior change."""
     parser = argparse.ArgumentParser(prog="autorefine",
                                      description="Autonomous iterative model-improvement environment")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -798,5 +795,17 @@ def main(argv: list[str] | None = None) -> int:
     p_pol.add_argument("--n-steps", type=int, default=12, help="rows shown (last N steps)")
     p_pol.set_defaults(func=_cmd_policy_report)
 
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    # SPEC.md 21.3: external packages may contribute tasks via entry points;
+    # register them before the parser is built so `--task` choices include them
+    try:
+        register_tasks()
+    except PluginError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    parser = build_parser()
     args = parser.parse_args(argv)
     return int(args.func(args))

@@ -16,13 +16,21 @@ from __future__ import annotations
 
 import math
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ..budget import BudgetManager
 from ..config import DEFAULT_SPEC, Budget, ModelSpec, SpecError
 from ..evaluator import evaluate_full, score_with_ci
-from ..memory import RunMemory
+from ..memory import (
+    KIND_BASELINE,
+    KIND_CURRICULUM,
+    KIND_EXPERIMENT,
+    KIND_INVALID_SPEC,
+    KIND_SCREEN,
+    RunMemory,
+)
 from ..pareto import ParetoFrontier
 from ..tasks import TASKS
 from ..trainer import train
@@ -84,22 +92,111 @@ def should_accept(d_eff: float, se: float, z: float) -> bool:
     return float(d_eff) > max(0.0, float(z) * float(se))
 
 
+# --- knob registry (SPEC.md 33.2, C2) -------------------------------------
+# One table for every tunable AutoRefineEnv knob with a default: the
+# default, the validator (one home for validation — the env's __init__
+# routes through it), the spec ref, the CLI subcommands exposing
+# `--{kebab-name}`, and the dashboard widget key (None = CLI/env only).
+# Presets (33.2.2) and the CLI (33.2.3) are checked against this table by
+# the A23 tests; adding a knob is one row here + the env kwarg.
+
+def _v_int(value: Any) -> int:
+    return int(value)
+
+
+def _v_float(value: Any) -> float:
+    return float(value)
+
+
+def _v_top_k(value: Any) -> int:
+    return max(0, int(value))
+
+
+def _v_stall_patience(value: Any) -> Any:
+    if value is not None and \
+            (not isinstance(value, int) or value < 1):
+        raise ValueError(
+            f"stall_patience must be an int >= 1 or None (off), "
+            f"got {value!r} (SPEC.md 31.1)")
+    return value
+
+
+def _v_screen_frac(value: Any) -> float:
+    if value is None or isinstance(value, bool):
+        raise ValueError(
+            f"screen_frac must be a number in (0, 1] (1.0 = off), "
+            f"got {value!r} (SPEC.md 32.2)")
+    try:
+        frac = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"screen_frac must be a number in (0, 1] (1.0 = off), "
+            f"got {value!r} (SPEC.md 32.2)") from None
+    if not math.isfinite(frac) or not (0.0 < frac <= 1.0):
+        raise ValueError(
+            f"screen_frac must be a number in (0, 1] (1.0 = off), "
+            f"got {value!r} (SPEC.md 32.2)")
+    return frac
+
+
+@dataclass(frozen=True)
+class Knob:
+    """One registry row (SPEC.md 33.2). `validate` normalizes + checks a
+    single value, raising `ValueError` with the env's message."""
+    name: str
+    default: Any
+    spec_ref: str
+    cli: tuple[str, ...] = ()          # subcommands exposing --{kebab}
+    app_widget: str | None = None      # dashboard key (None = not in app)
+    validate: Callable[[Any], Any] = lambda value: value
+
+
+# Order = the AutoRefineEnv.__init__ kwarg order (the env defaults are the
+# single source of truth the A23 default test compares against)
+KNOBS: dict[str, Knob] = {
+    "ci_blocks": Knob("ci_blocks", 0, "18.3", (), None, _v_int),
+    "z_accept": Knob("z_accept", 0.0, "18.6", (), None, _v_float),
+    "efficiency_weight": Knob("efficiency_weight", 0.0, "18.4", (), None, _v_float),
+    "gen_gap_penalty": Knob("gen_gap_penalty", 0.0, "18.5", (), None, _v_float),
+    "block_size": Knob("block_size", 512, "18.3", (), None, _v_int),
+    "ensemble_top_k": Knob("ensemble_top_k", 0, "19.3", (), None, _v_top_k),
+    "stall_patience": Knob("stall_patience", None, "31.1",
+                           ("run", "fit", "variance"), None, _v_stall_patience),
+    "screen_frac": Knob("screen_frac", 1.0, "32.2",
+                        ("run", "fit"), None, _v_screen_frac),
+}
+
+
+def _preset(name: str, values: dict[str, Any]) -> dict[str, Any]:
+    """SPEC.md 33.2 (C2): a preset may only set registry knobs with values
+    that pass the registry validator — a typo'd knob name is a
+    construction-time error, not a runtime surprise."""
+    for key, value in values.items():
+        if key not in KNOBS:
+            raise KeyError(
+                f"preset {name!r} sets unknown knob {key!r} (SPEC.md 33.2)")
+        KNOBS[key].validate(value)  # raises ValueError on a bad value
+    return dict(values)
+
+
 def search_quality_v04() -> dict:
     """SPEC.md 18.6: the recommended v0.4 preset as AutoRefineEnv kwargs
-    (ci_blocks/z/η/P_GEN per §18.3–§18.5; block_size stays the default)."""
-    return dict(
+    (ci_blocks/z/η/P_GEN per §18.3–§18.5; block_size stays the default).
+    SPEC.md 33.2: checked against the KNOBS registry."""
+    return _preset("search_quality_v04", dict(
         ci_blocks=8,             # 18.3: 8 blocks × block_size per split
         z_accept=1.0,            # 18.6: ~95% two-sided, deliberately not 1.96
         efficiency_weight=0.5,   # 18.4: η points per training second (T_CAP 10s)
         gen_gap_penalty=0.5,     # 18.5: P_GEN points per excess gap point
-    )
+    ))
 
 
 def candidate_screening(frac: float = 0.25) -> dict:
     """SPEC.md 32.2: opt-in two-stage candidate screening as AutoRefineEnv
     kwargs (screen on the first frac·n rows; full-train only strict
-    champion beats; the `search_quality_v04()` preset pattern)."""
-    return dict(screen_frac=frac)
+    champion beats; the `search_quality_v04()` preset pattern).
+    SPEC.md 33.2: checked against the KNOBS registry."""
+    return _preset("candidate_screening", dict(screen_frac=frac))
 
 
 class AutoRefineEnv:
@@ -132,27 +229,10 @@ class AutoRefineEnv:
     ) -> None:
         if task not in TASKS:  # registry: SPEC.md 15 "more tasks"
             raise ValueError(f"unknown task {task!r} (available: {sorted(TASKS)})")
-        # SPEC.md 31.1: K consecutive non-improving experiments -> "stalled"
-        if stall_patience is not None and \
-                (not isinstance(stall_patience, int) or stall_patience < 1):
-            raise ValueError(
-                f"stall_patience must be an int >= 1 or None (off), "
-                f"got {stall_patience!r} (SPEC.md 31.1)")
-        # SPEC.md 32.2: non-bool finite number in (0, 1]; 1.0 = off
-        if screen_frac is None or isinstance(screen_frac, bool):
-            raise ValueError(
-                f"screen_frac must be a number in (0, 1] (1.0 = off), "
-                f"got {screen_frac!r} (SPEC.md 32.2)")
-        try:
-            _sf = float(screen_frac)
-        except (TypeError, ValueError):
-            raise ValueError(
-                f"screen_frac must be a number in (0, 1] (1.0 = off), "
-                f"got {screen_frac!r} (SPEC.md 32.2)") from None
-        if not math.isfinite(_sf) or not (0.0 < _sf <= 1.0):
-            raise ValueError(
-                f"screen_frac must be a number in (0, 1] (1.0 = off), "
-                f"got {screen_frac!r} (SPEC.md 32.2)")
+        # SPEC.md 33.2 (C2): validation routes through the KNOBS registry —
+        # one home for the rules, the A21/A22 error messages unchanged
+        _sp = KNOBS["stall_patience"].validate(stall_patience)
+        _sf = KNOBS["screen_frac"].validate(screen_frac)
         task_cls = TASKS[task]
         self.task_name = task
         self.seed = int(seed)
@@ -202,12 +282,13 @@ class AutoRefineEnv:
         self.done = False
         self.done_reason: str | None = None
         self._dup_streak = 0  # SPEC.md 20.2 (stall guard)
-        self.stall_patience = stall_patience  # SPEC.md 31.1 (None = off)
+        self.stall_patience = _sp  # SPEC.md 31.1 (None = off)
         self._stall_streak = 0  # SPEC.md 31.1: non-improving experiment streak
         # SPEC.md 32.2: opt-in two-stage screening (1.0 = off, pre-v0.18)
         self.screen_frac = _sf
         self.screen_active = self.screen_frac < 1.0
         self._screen_champion: float | None = None  # set at reset (32.2)
+        self._screen_baseline_score: float | None = None  # 33.3: reset champion
         self._started = False
 
     # --- lifecycle ----------------------------------------------------------
@@ -263,7 +344,7 @@ class AutoRefineEnv:
         if self.ensemble_top_k > 0:  # SPEC.md 19.3: the baseline is a member
             self._top.append((score, result.model))
         self.memory.log({
-            "kind": "baseline",
+            "kind": KIND_BASELINE,  # SPEC.md 35.1 (C4): the kind registry
             "spec": DEFAULT_SPEC.to_dict(),
             "spec_hash": DEFAULT_SPEC.fingerprint(),
             "mutation": None,
@@ -282,6 +363,7 @@ class AutoRefineEnv:
         # once on the prefix subsample (free, like the reset baseline);
         # K=1 against this fixed champion for the whole episode
         self._screen_champion = None
+        self._screen_baseline_score = None
         if self.screen_active:
             sres = train(
                 self._subsample(self.dataset), DEFAULT_SPEC, self.seed,
@@ -289,6 +371,10 @@ class AutoRefineEnv:
                 n_out=self.task.n_outputs, head=self.task.head,
             )
             self._screen_champion = float(self._evaluate(sres.model)[0])
+            # SPEC.md 33.3: the summary's baseline_screen_score (32.2) is the
+            # reset champion; a curriculum step-up re-pins the champion, and
+            # each re-pinned value rides its curriculum event row instead
+            self._screen_baseline_score = self._screen_champion
         self._started = True
         return self._state()
 
@@ -423,7 +509,7 @@ class AutoRefineEnv:
             "delta": eff - prev_best_eff,
         })
         self.memory.log({
-            "kind": "experiment",
+            "kind": KIND_EXPERIMENT,  # SPEC.md 35.1 (C4)
             "spec": spec.to_dict(),
             "spec_hash": fp,
             "mutation": mutation_fields,
@@ -494,6 +580,19 @@ class AutoRefineEnv:
                         self.best_spec.fingerprint())
         if self.ensemble_top_k > 0:
             self._top = [(score, result.model)]
+        # SPEC.md 33.3 (C3, screening × curriculum): a step-up is a new
+        # difficulty, so the screening champion re-pins — the baseline spec
+        # is re-screened on the new dataset (free, like the reset champion;
+        # 32.2's K=1 semantics are per curriculum level). Without this, a
+        # harder level would reject every candidate against a stale
+        # easy-level champion.
+        if self.screen_active:
+            sc = train(
+                self._subsample(self.dataset), DEFAULT_SPEC, self.seed,
+                time_limit_seconds=self.bm.train_time_limit(),
+                n_out=self.task.n_outputs, head=self.task.head,
+            )
+            self._screen_champion = float(self._evaluate(sc.model)[0])
         event = {
             "level": self.curriculum.level,
             "difficulty": self.curriculum.level_description(),
@@ -505,8 +604,10 @@ class AutoRefineEnv:
             "std": std,  # SPEC.md 30.4 (V4): the §18.3 holdout sigma (0.0 legacy)
             "loss_history": result.loss_history,  # SPEC.md 28.1 (C1)
         }
+        if self.screen_active:  # SPEC.md 33.3: additive key (A10 rows unchanged)
+            event["screen_champion"] = self._screen_champion
         self.curriculum_events.append(event)
-        self.memory.log({"kind": "curriculum", **event})
+        self.memory.log({"kind": KIND_CURRICULUM, **event})  # 35.1 (C4)
 
     # --- datasets (SPEC.md 25.3) ---------------------------------------------
     def _dataset_for(self, spec: ModelSpec) -> Any:
@@ -558,7 +659,7 @@ class AutoRefineEnv:
             "delta": s_score - self.best_score,
         })
         self.memory.log({
-            "kind": "screen",
+            "kind": KIND_SCREEN,  # SPEC.md 35.1 (C4)
             "spec": spec.to_dict(),
             "spec_hash": fp,
             "mutation": list(fields),
@@ -601,7 +702,7 @@ class AutoRefineEnv:
         self.last = {"accepted": False, "fields": list(fields)}
         if self.memory is not None:
             self.memory.log({
-                "kind": "invalid_spec",
+                "kind": KIND_INVALID_SPEC,  # SPEC.md 35.1 (C4)
                 "spec": spec_dict,
                 "error": str(error),
                 "accepted": False,
@@ -650,7 +751,7 @@ class AutoRefineEnv:
         # per-mutation-type win rate (each field of a mutation counts a trial)
         win_rate: dict[str, dict] = {}
         for entry in self.memory.load_experiments():
-            if entry.get("kind") != "experiment":
+            if entry.get("kind") != KIND_EXPERIMENT:  # 35.1 (C4)
                 continue
             for fld in entry.get("mutation") or []:
                 slot = win_rate.setdefault(fld, {"trials": 0, "wins": 0})
@@ -698,9 +799,11 @@ class AutoRefineEnv:
             }
         # SPEC.md 32.2: two-stage screening config (only when active)
         if self.screen_active:
+            # SPEC.md 33.3: the reset champion (curriculum step-ups re-pin
+            # self._screen_champion; per-level values are in the event rows)
             summary["screening"] = {
                 "frac": self.screen_frac,
-                "baseline_screen_score": self._screen_champion,
+                "baseline_screen_score": self._screen_baseline_score,
             }
         # SPEC.md 19.3: opt-in ensemble final evaluation (top-k frontier models)
         if self.ensemble_top_k > 0 and len(self._top) >= 1:

@@ -502,6 +502,67 @@ Fixed-dim `Box` observation, `Discrete` action space (the mutation catalog).
   any float-order change would break bit-identical determinism (G2), and
   they're only worth the pin re-derivation if the loop-level wins fall
   short (SPEC.md 32.3). Zero new dependencies (SPEC.md 32.1–32.3, A22, M21.)
+- **Coherency (v0.19):** three cross-check contracts over the accumulated
+  knobs and features — no new features, no behavior change with any flag
+  off (A1–A22 stay green). **Version story (33.1):** `pyproject.toml`
+  `[project].version` and `autorefine.__version__` are one version, bumped
+  together each round (v0.19 ⇒ `0.19.0`); the dashboard caption renders the
+  same number; there is no third copy. **Knob registry (33.2):**
+  `autorefine.KNOBS` is the one table for every tunable `AutoRefineEnv`
+  knob (name, default, validator, spec ref, CLI subcommands, app widget);
+  env validation and both presets (`search_quality_v04`,
+  `candidate_screening`) route through it, and `cli.build_parser()` (a pure
+  extraction of the parser from `main()`) is tested for CLI honesty — each
+  claimed `--flag` per subcommand present and *absent* elsewhere (no
+  `--screen-frac` on `variance`, 32.3) with parser defaults equal to
+  registry defaults. **Interaction matrix (33.3):** defined, tested
+  behavior for every pair of combinable round features; the one new
+  semantic — a curriculum step-up **re-pins the screen champion** (the
+  baseline spec re-screened on the harder dataset, free), so the 32.2
+  K=1 champion semantics are per curriculum level; a screen-rejected spec
+  never enters the Pareto frontier or the ensemble top-k. The summary's
+  `baseline_screen_score` keeps reporting the reset champion; each
+  re-pinned value rides its curriculum event row (`screen_champion`).
+  Enforced by A23 (SPEC.md 33.1–33.3, M22.)
+- **Coherency II (v0.20):** the cross-check discipline extends from the
+  env knobs (33) to the two remaining cross-surface artifacts — no new
+  features, no behavior change (A1–A23 stay green), and the version steps
+  per 33.1 (v0.20 ⇒ `0.20.0`, both sources together). **Spec-space
+  coherency (34.1):** the spec space is one object with three surfaces —
+  the law (`config.py` constants + `ModelSpec.validate`), the
+  `FIELD_CATALOG` catalog (RL/Gym/bandit), and the `FIELD_SAMPLERS`
+  samplers — and the A24 tests pin their agreement: exact-value fields
+  equal the config constants (order included), range-field catalog values
+  sit inside the config ranges, every catalog architecture is legal for a
+  non-knn family, a fixed-seed battery of every sampler draw stays in the
+  registered space (field classes exhaustive), and the field sets are one
+  set (`FIELD_NAMES == CATALOG_FIELDS`, the 25.7 `SEARCH_FIELDS`
+  exclusion, `ORDERED_FIELDS`, `FAMILY_FIELDS`). **Summary contract
+  (34.2):** `summary.json` is the cross-surface artifact (env writes;
+  `report`/`eval`/dashboard/plotting read), and A24 pins its **exact
+  top-level key set** for the legacy run (17 keys) and the full-flag run
+  (+ `task_config`/`curriculum`/`screening`/`ensemble`), plus each
+  internal dict's exact key set — a renamed or dropped key is now a suite
+  failure, not a dashboard runtime surprise (SPEC.md 34.1–34.2, A24, M23.)
+- **Coherency III (v0.21):** the loop closes over the last two
+  convention-policed artifacts — no new features, no behavior change
+  (A1–A24 stay green, logged bytes byte-identical), version per 33.1
+  (v0.21 ⇒ `0.21.0`, both sources together). **Log kind registry (35.1):**
+  the five `experiments.jsonl` row kinds (`baseline`, `experiment`,
+  `screen`, `curriculum`, `invalid_spec`) are now one constant set —
+  `KIND_*` + `LOG_KINDS` in `memory.py` (the log module) — and the
+  emitter (`meta_env.py`) plus the consumers (`plotting.py`, `cli.py`,
+  `dashboard.py`) route through it; the A25 source scans fail on a raw
+  `"kind"` literal, an unregistered `KIND_` name, or a bare
+  kind-literal comparison, and a live run's rows all carry registry
+  kinds — the next new kind added to the logger is a suite failure
+  instead of a silently-missing report row (the v0.18 gotcha).
+  **Acceptance index (35.2):** the M# → SPEC § → A# → test-file table
+  at the top of SPEC.md is the single source of truth, and the A25
+  consistency tests close the spec/code drift loop — every A# defined
+  in the SPEC is cited by ≥ 1 test, every `tests/test_*.py` cites an
+  A#, and each index row's test file exists and cites that row's A#
+  (SPEC.md 35.1–35.2, A25, M24.)
 - **Input modalities (v0.10):** `autorefine fit --data DIR` now accepts a
   labelled directory — one subfolder per class (or an `index.csv`) of
   **images** (PNG/JPG/JPEG/BMP/GIF; grayscale 32×32 features; optional

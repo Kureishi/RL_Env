@@ -1,4 +1,6 @@
-"""Task-level tests (SPEC.md T1 + split/dataset invariants)."""
+"""Task-level tests (SPEC.md T1 + split/dataset invariants);
+acceptance A1 (SPEC.md 12: the core task invariants behind the A1-A4 core
+acceptance on cartpole-v1)."""
 import numpy as np
 import pytest
 

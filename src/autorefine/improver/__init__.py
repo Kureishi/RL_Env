@@ -1,4 +1,9 @@
-from .meta_env import AutoRefineEnv, search_quality_v04
+from .meta_env import (
+    AutoRefineEnv,
+    KNOBS,
+    candidate_screening,
+    search_quality_v04,
+)
 from .policy import SearchPolicy
 from .bandit import BanditPolicy
 from .actions import FIELD_NAMES, mutate_spec_dict, uniform_random_spec
@@ -30,4 +35,6 @@ __all__ = [
     "MetaRLPolicy",
     "train_policy",
     "search_quality_v04",
+    "candidate_screening",
+    "KNOBS",
 ]

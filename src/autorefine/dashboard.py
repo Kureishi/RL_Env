@@ -19,6 +19,7 @@ from .diagnostics import holdout_diagnostics
 from .improver.bandit import BanditPolicy
 from .improver.meta_env import AutoRefineEnv, search_quality_v04
 from .improver.policy import SearchPolicy
+from .memory import KIND_BASELINE, KIND_CURRICULUM, KIND_EXPERIMENT  # 35.1 (C4)
 from .plotting import (
     html_report,
     svg_architecture,
@@ -306,7 +307,7 @@ deterministic run, so per-seed results are bit-identical to the serial
         pareto_pts = summary.get("pareto_frontier") or [
             {"score": e["holdout_score"], "train_seconds": e.get("train_seconds", 0.0)}
             for e in entries
-            if e.get("kind") in ("baseline", "experiment")
+            if e.get("kind") in (KIND_BASELINE, KIND_EXPERIMENT)  # 35.1 (C4)
             and isinstance(e.get("holdout_score"), (int, float))
         ]
         # learning views (SPEC.md 28), computed live from memory (no reloads)
@@ -392,11 +393,11 @@ deterministic run, so per-seed results are bit-identical to the serial
         for e in entries or []:
             kind = e.get("kind")
             hist = e.get("loss_history")
-            if kind not in ("baseline", "experiment", "curriculum") \
-                    or not hist:
+            if kind not in (KIND_BASELINE, KIND_EXPERIMENT, KIND_CURRICULUM) \
+                    or not hist:  # SPEC.md 35.1 (C4)
                 continue
             counters[kind] = counters.get(kind, 0) + 1
-            label = ("baseline" if kind == "baseline"
+            label = (KIND_BASELINE if kind == KIND_BASELINE
                      else f"{kind} {counters[kind]}")
             curves[label] = hist
         return curves
@@ -543,7 +544,7 @@ def family_stats(entries) -> list[dict]:
     for e in entries or []:
         if not isinstance(e, dict):
             continue
-        if e.get("kind") not in ("baseline", "experiment"):
+        if e.get("kind") not in (KIND_BASELINE, KIND_EXPERIMENT):  # 35.1 (C4)
             continue
         s = e.get("holdout_score")
         if isinstance(s, bool) or not isinstance(s, (int, float)) \

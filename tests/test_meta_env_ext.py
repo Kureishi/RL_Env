@@ -1,4 +1,5 @@
-"""Meta-environment extension tests (SPEC.md 15: tasks, families, pareto)."""
+"""Meta-environment extension tests (SPEC.md 15: tasks, families, pareto);
+acceptance A6 (SPEC.md 12: the v0.2 extension coverage)."""
 import json
 
 import pytest

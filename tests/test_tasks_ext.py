@@ -1,4 +1,5 @@
-"""Extension-task tests: SineRegressionV1, GridNavV1 (SPEC.md 15), Parity4V1 (SPEC.md 17)."""
+"""Extension-task tests: SineRegressionV1, GridNavV1 (SPEC.md 15), Parity4V1 (SPEC.md 17);
+acceptance A7 (SPEC.md 12: the v0.3 parity-task extension coverage)."""
 from pathlib import Path
 
 import numpy as np

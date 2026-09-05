@@ -1,0 +1,67 @@
+{
+  "baseline_effective": 33.32092353336823,
+  "baseline_score": 33.33333333333333,
+  "best_score_at_1s": 50.0,
+  "best_spec": {
+    "activation": "tanh",
+    "architecture": [
+      16,
+      8
+    ],
+    "batch_size": 32,
+    "early_stopping_patience": 0,
+    "gradient_clipping": 0.0,
+    "init_scale": 1.0,
+    "input_noise": 0.02,
+    "knn_k": 5,
+    "label_smoothing": 0.0,
+    "learning_rate": 0.001,
+    "lr_schedule": "constant",
+    "model_family": "mlp",
+    "optimizer": "momentum",
+    "train_steps": 1000,
+    "weight_decay": 0.001
+  },
+  "effective_improvement_factor": 1.4996814058863148,
+  "efficiency_at_1s": 1.0,
+  "experiments_run": 2,
+  "final_best_effective": 49.97076944995206,
+  "final_best_score": 50.0,
+  "finished_reason": "budget_exhausted",
+  "improvement_factor": 1.5000000000000002,
+  "mutation_win_rate": {
+    "train_steps": {
+      "trials": 1,
+      "wins": 1
+    },
+    "weight_decay": {
+      "trials": 1,
+      "wins": 1
+    }
+  },
+  "pareto_frontier": [
+    {
+      "score": 33.33333333333333,
+      "spec_hash": "3a6af383e1f7d6b0",
+      "train_seconds": 0.023733100155368447
+    },
+    {
+      "score": 50.0,
+      "spec_hash": "4f9eef8ca9e44898",
+      "train_seconds": 0.05846110009588301
+    }
+  ],
+  "search_quality": {
+    "block_size": 512,
+    "ci_blocks": 8,
+    "efficiency_weight": 0.5,
+    "gen_gap_penalty": 0.5,
+    "z_accept": 1.0
+  },
+  "seed": 7,
+  "task": "csv",
+  "task_config": {
+    "path": "C:\\tmp\\pytest-of-kurei\\pytest-146\\test_app_seed_sweep_progress_s0\\data.csv"
+  },
+  "wall_seconds": 0.111
+}

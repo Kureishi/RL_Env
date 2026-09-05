@@ -1,4 +1,5 @@
-"""Gymnasium adapter tests (SPEC.md 15; gymnasium is optional, skipped if absent)."""
+"""Gymnasium adapter tests (SPEC.md 15; gymnasium is optional, skipped if
+absent); acceptance A6 (SPEC.md 12: the v0.2 extension coverage)."""
 import numpy as np
 import pytest
 

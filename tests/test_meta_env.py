@@ -1,4 +1,5 @@
-"""Meta-environment tests (SPEC.md R1-R5, T4, T5) and acceptance A1-A4."""
+"""Meta-environment tests (SPEC.md R1-R5, T4, T5) and acceptance A1-A5
+(SPEC.md 12; A5 is the M4 green-suite/README gate this suite verifies)."""
 import json
 
 import pytest

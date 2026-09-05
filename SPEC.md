@@ -6,6 +6,45 @@
 
 ---
 
+## 0. Acceptance Index (v0.21, SPEC.md 35.2)
+
+The single source of truth for milestone → SPEC section → acceptance
+number → test file (C5, 35.2). Contract A25: the suite verifies that
+every A# defined in this document is cited by ≥ 1 test file, that
+every `tests/test_*.py` cites an A#, and that each row's listed test
+file exists and cites that row's A#. (M0–M3 predate acceptance
+numbers and carry none.)
+
+| M#  | version | SPEC § | A#  | test file(s) |
+|-----|---------|--------|-----|--------------|
+| M0  | —       | 1–4    | —   | — (scaffold) |
+| M1  | —       | 5–8    | —   | — |
+| M2  | —       | 6      | —   | — |
+| M3  | —       | 11     | —   | — |
+| M4  | v0.1    | 12     | A1–A5 | tests/test_meta_env.py |
+| M5  | v0.2    | 15     | A6  | tests/test_gym.py, tests/test_meta_env_ext.py, tests/test_pareto.py, tests/test_rl_policy.py |
+| M6  | v0.3    | 17     | A7  | tests/test_bandit.py, tests/test_tasks_ext.py |
+| M7  | v0.4    | 18     | A8  | tests/test_search_quality.py |
+| M8  | v0.5    | 19     | A9  | tests/test_model_spec_space.py, tests/test_trainer.py |
+| M9  | v0.6    | 20     | A10 | tests/test_env_loop_design.py |
+| M10 | v0.7    | 21     | A11 | tests/test_gym_dqn.py, tests/test_infra_dx.py |
+| M11 | v0.8    | 22     | A12 | tests/test_data_cli.py |
+| M12 | v0.9    | 23     | A13 | tests/test_dashboard.py |
+| M13 | v0.10   | 24     | A14 | tests/test_media_tasks.py |
+| M14 | v0.11   | 25     | A15 | tests/test_modality_families.py |
+| M15 | v0.12   | 26     | A16 | tests/test_dashboard.py |
+| M16 | v0.13   | 27     | A17 | tests/test_dashboard.py |
+| M17 | v0.14   | 28     | A18 | tests/test_learning_views.py |
+| M18 | v0.15   | 29     | A19 | tests/test_multi_run_policy_views.py |
+| M19 | v0.16   | 30     | A20 | tests/test_comprehension_visuals2.py |
+| M20 | v0.17   | 31     | A21 | tests/test_optimization_v017.py |
+| M21 | v0.18   | 32     | A22 | tests/test_app_perf_screening_v018.py |
+| M22 | v0.19   | 33     | A23 | tests/test_coherency_v019.py |
+| M23 | v0.20   | 34     | A24 | tests/test_coherency_v020.py |
+| M24 | v0.21   | 35     | A25 | tests/test_coherency_v021.py |
+
+---
+
 ## 1. Purpose
 
 AutoRefine is a local, reproducible reinforcement-learning-style environment in which an
@@ -2339,3 +2378,342 @@ in `variance`, the dashboard app, or `gym.py`. The app sweep stays
 **M21** — v0.18 optimization: app perceived perf (streamed seed-sweep
 progress + cached data preview) and opt-in two-stage candidate screening
 (`screen_frac`, `run`/`fit --screen-frac`) (A22).
+
+## 33. Coherency (v0.19)
+
+Feature rounds M1–M21 accumulated knobs, presets, and cross-feature
+interactions that were each individually specced but never cross-checked
+as a whole. v0.19 closes that gap with three coherency contracts — no new
+features, and **no behavior change with any flag off** (A1–A22 stay green
+untouched):
+
+- **33.1 (C1)** the version story — one version, one meaning;
+- **33.2 (C2)** the knob registry — one table for every tunable knob;
+- **33.3 (C3)** the interaction matrix — defined behavior for every pair
+  of combinable round features.
+
+Each contract is enforced by a test (A23), so drift that was previously
+policed by convention becomes a suite failure.
+
+### 33.1 Version story (C1)
+
+The **package version is the single version number in the project**:
+`pyproject.toml` (`[project].version`) and `autorefine.__version__` must
+agree, and both are bumped together, one step per feature round — round
+v0.19 ⇒ package `0.19.0` (M22). The README/SPEC feature-round labels
+("v0.3"…"v0.19") are *milestone* labels, not an independent version
+scheme: a round is both an `M#` and a `v0.#`, and the two advance
+together. The dashboard caption (`v{__version__}`) shows the same number
+automatically.
+
+Enforced: a test asserts `pyproject [project].version ==
+autorefine.__version__` (A23). There is deliberately no third copy of the
+version anywhere (no `VERSION` constant, no `pip`-only truth).
+
+### 33.2 Knob registry (C2)
+
+Every tunable `AutoRefineEnv` knob with a default lives in one table —
+`autorefine.KNOBS: dict[str, Knob]` — with `(name, default, validator,
+spec_ref, cli subcommands, app widget)`. Consequences:
+
+1. **One home for validation.** `AutoRefineEnv.__init__` validates every
+   knob through the registry's validator. Error messages are unchanged
+   (the A21/A22 message pins still hold); the validation *logic* has one
+   source of truth.
+2. **Presets are checked against the registry.** `search_quality_v04()`
+   (18.6) and `candidate_screening(frac)` (32.2) may only set registry
+   knobs with values that pass the registry validator; a preset keying an
+   unknown knob is a construction-time error, not a runtime surprise.
+3. **CLI honesty.** Each registry row lists the subcommands exposing
+   `--{kebab-name}`: `stall_patience` → `run`, `fit`, `variance`; `screen_frac`
+   → `run`, `fit` (32.3 non-goal: not `variance`/app/gym). A test drives
+   the **real argparse parser** (`cli.build_parser()`, extracted from
+   `main()` — a pure refactor, identical flags) and asserts presence
+   *and absence* per subcommand, plus that parser defaults equal
+   registry defaults.
+4. **Adding a knob** = one registry row + the env kwarg. The A23 tests
+   fail immediately if any surface (env default, preset, CLI flag,
+   validator) is forgotten.
+
+Registry (name — default — spec — CLI subcommands):
+
+| knob | default | spec | CLI subcommands |
+|---|---|---|---|
+| `ci_blocks` | `0` | 18.3 | — (via `--search-quality v04` preset) |
+| `z_accept` | `0.0` | 18.6 | — (preset) |
+| `efficiency_weight` | `0.0` | 18.4 | — (preset) |
+| `gen_gap_penalty` | `0.0` | 18.5 | — (preset) |
+| `block_size` | `512` | 18.3 | — (preset) |
+| `ensemble_top_k` | `0` | 19.3 | — (`--ensemble-final`) |
+| `stall_patience` | `None` | 31.1 | `run`, `fit`, `variance` |
+| `screen_frac` | `1.0` | 32.2 | `run`, `fit` |
+
+Knobs consumed only via presets are recorded with an empty CLI list; the
+preset test (2.) covers them. `dataset_episodes` (20.3) and `task_config`
+(22.1) are task-level, not search knobs — they stay outside the table.
+
+### 33.3 Interaction matrix (C3)
+
+Defined behavior for every pair of round features that can be enabled
+together. Each defined pair has a test — an A23 test (new) or a cited
+existing pin.
+
+| pair | defined behavior | test |
+|---|---|---|
+| stall × screening | a screen rejection is a scored non-improving experiment: it extends the stall streak (32.2, 31.1) | A22 (`test_screen_rejections_count_for_stall_patience`) |
+| stall × curriculum | a step-up is a new ceiling: it re-arms (resets) the stall streak (31.1, 20.1) | A21 (v0.17 curriculum step-up test) |
+| **screening × curriculum** | **new in v0.19**: a step-up **re-pins the screen champion** — the baseline spec is re-screened on the new (harder) dataset, free (no budget spend), exactly like the existing curriculum re-baseline (20.1 pattern). The 32.2 K=1 fixed-champion semantics are therefore **per curriculum level**, not per episode; without this, a harder level would reject every candidate against a stale easy-level champion | A23 (`test_screening_curriculum_repins_champion`) |
+| screening × ensemble | a screen-rejected spec never full-trains ⇒ never enters the Pareto frontier or the top-k ensemble (19.3) | A23 (`test_screen_rejected_never_enters_frontier_or_ensemble`) |
+| screening × search-quality | the screen gate is the strict champion beat (32.2); the §18 CI/efficiency gate applies only to promoted (full-trained) candidates | 32.2 (A22) |
+| curriculum × ensemble | a step-up resets the top-k to the re-baselined best spec (20.1, 19.3) | A10 (v0.6 curriculum run pin) |
+
+Decision recorded (screening × curriculum): the re-pin uses the
+**baseline spec** (`DEFAULT_SPEC`), consistent with 32.2's "champion =
+the baseline spec" — *not* the current best spec (which is what the
+curriculum's own re-baseline carries over). Both champion screenings are
+free (reset + each step-up), budget-free and deterministic (G2). The
+step-up's curriculum event row gains a `screen_champion` key (only when
+screening is active — additive, existing A10 rows unchanged). The
+summary's `screening.baseline_screen_score` (32.2) keeps reporting the
+**reset** champion in curriculum runs; each re-pinned value rides its
+own curriculum event row, so the summary dict stays exactly
+`{frac, baseline_screen_score}` (the A22 pin).
+
+### 33.4 Acceptance (A23)
+- **Version (33.1)** — `pyproject [project].version ==
+  autorefine.__version__`; the dashboard caption renders the same
+  number.
+- **Knob registry (33.2)** — every registry row's default equals the
+  env kwarg default (`inspect`); both presets set only registry knobs
+  with validator-passing values; the registry validator and the env agree
+  accept/reject on the same value batteries (A21/A22 batteries
+  re-run); `cli.build_parser()` exposes each claimed flag per
+  subcommand and *not* elsewhere (`--screen-frac` absent from
+  `variance` — 32.3), with parser defaults equal to registry defaults;
+  registry `app_widget` claims (none today) appear in the dashboard
+  source when set.
+- **Interaction matrix (33.3)** — the screening × curriculum pin:
+  scripted fake task + two-level fake curriculum, `screen_frac=0.25` —
+  after the step-up, a candidate that beats the *old* champion but loses
+  to the re-pinned one is screen-rejected, one that beats both is
+  promoted (full-trained) even when gate-rejected; the champion value
+  and the curriculum event's `screen_champion` are exact; bit-
+  reproducible (G2). The screening × ensemble leak test: a screen-
+  rejected fingerprint is absent from `pareto.points` and the ensemble
+  top-k. stall × screening, stall × curriculum, and curriculum ×
+  ensemble stay covered by their cited pins.
+- **Regression** — full suite green (A1–A22); `import autorefine`
+  stays clean (subprocess pattern).
+
+### 33.5 Milestone
+
+**M22** — v0.19 coherency: version story (33.1), knob registry (33.2),
+interaction matrix (33.3) (A23).
+
+## 34. Coherency II (v0.20)
+
+C1–C3 (33) closed the env-knob surface (version, KNOBS, CLI honesty,
+interactions). v0.20 extends the same cross-check discipline to the two
+remaining cross-surface artifacts — the **spec space** (what the improver
+may propose) and the **summary contract** (what every downstream surface
+reads). Same house rules: no new features, **no behavior change**
+(A1–A23 stay green untouched), and the version steps per 33.1
+(`0.19.0` → `0.20.0`, both sources together; the A23 round assertion
+advances with it: v0.20 ⇒ `0.20.0`).
+
+### 34.1 Spec-space coherency (C4)
+
+The spec space is one object with three surfaces, each enumerated
+independently:
+
+- **the law** — `config.py` constants + `ModelSpec.validate` (5.1, 19.1,
+  25.2/25.3): what is legal;
+- **the catalog** — `improver/catalog.py` `FIELD_CATALOG` (15, 17, 19.4,
+  25): the discrete value space shared by the RL improver, the Gym
+  adapter, and the bandit;
+- **the samplers** — `improver/actions.py` `FIELD_SAMPLERS` (8, 15): what
+  the bandit/search actually draw.
+
+Coherency contracts (A24; a violation is a suite failure, not a runtime
+surprise):
+
+1. **Exact-value fields equal the config constants** (order included):
+   `optimizer == OPTIMIZERS`, `activation == ACTIVATIONS`,
+   `batch_size == BATCH_SIZES`, `model_family == MODEL_FAMILIES`,
+   `lr_schedule == LR_SCHEDULES`, `knn_k == KNN_K_VALUES`.
+2. **Range-field catalog values lie inside the config ranges**:
+   `learning_rate`, `weight_decay`, `train_steps`, `input_noise`,
+   `label_smoothing`, `early_stopping_patience`, `init_scale`,
+   `gradient_clipping`.
+3. **Every catalog `architecture` value is legal for at least one
+   non-knn family** — mlp widths (15), tree/boost depth (15, 19.2), or
+   convnet filter pairs (25.3). The knn family's accept-any-architecture
+   escape hatch (25.2) is documented, not a validation path, so it is
+   deliberately excluded from this check.
+4. **Samplers only draw in the registered space**: a fixed-seed battery
+   (100 draws per field, `task=None`) of every `FIELD_SAMPLERS` entry
+   lands inside the field's registered space — exact-value fields in
+   their catalog values, range fields in their config ranges,
+   `architecture` legal for some non-knn family. The field classes are
+   exhaustive over `FIELD_NAMES` (a new field that is in none of them
+   fails the test).
+5. **The field sets are one set**: `set(FIELD_NAMES) ==
+   set(CATALOG_FIELDS)`; `SEARCH_FIELDS` is `FIELD_NAMES` minus the
+   documented legacy exclusion (25.7: `knn_k`, 14 fields);
+   `ORDERED_FIELDS ⊆ FIELD_NAMES`; every `FAMILY_FIELDS` row covers a
+   known family and stays inside the catalog fields.
+
+Cited existing pins (unchanged): the 77-action catalog (19.4/25,
+`test_search_quality`); every action valid against the mlp and tree best
+specs (`test_rl_policy`); per-family relevant fields (18.2,
+`test_search_quality`).
+
+### 34.2 Summary contract (C5)
+
+`summary.json` is the cross-surface artifact: the env writes it
+(`_write_artifacts`), and `report`, `eval`, the dashboard, and the
+plotting surfaces read it. Its keys were documented across ~8 SPEC
+sections with no single pin of the whole contract. Contract (A24): the
+**exact top-level key set** is pinned for the two canonical
+configurations, and each internal dict pins its exact key set:
+
+- **legacy run** (no optional flags) — 17 keys;
+- **full-flag run** (`task_config` + `curriculum` + `screen_frac < 1.0`
+  + `ensemble_top_k > 0`) — those 17 + the 4 conditional keys.
+
+| key | producer | condition | spec |
+|---|---|---|---|
+| `task`, `seed`, `finished_reason` | env | always | 5 |
+| `baseline_score`, `final_best_score`, `improvement_factor` | env | always | 5.3 |
+| `baseline_effective`, `final_best_effective`, `effective_improvement_factor` | env | always | 18.4 |
+| `search_quality` `{ci_blocks, z_accept, efficiency_weight, gen_gap_penalty, block_size}` | env | always | 18 |
+| `experiments_run`, `wall_seconds` | env | always | 5 |
+| `best_spec` (the full 15-field spec dict) | env | always | 5.1 |
+| `mutation_win_rate` | env | always | 5.3 |
+| `pareto_frontier`, `best_score_at_1s`, `efficiency_at_1s` | pareto | always | 15 |
+| `task_config` (the user's kwargs) | env | `task_config` non-empty | 22.1 |
+| `curriculum` `{levels, final_difficulty, final_ceiling, levels_left}` | env | `curriculum` given | 20.1 |
+| `screening` `{frac, baseline_screen_score}` | env | `screen_frac < 1.0` | 32.2, 33.3 |
+| `ensemble` `{top_k, member_scores, ensemble_score}` | env | `ensemble_top_k > 0` and ≥ 1 full-trained member | 19.3 |
+
+Adding a summary key = adding a row here + extending the A24 key sets;
+removing/renaming one breaks the A24 pin (and the reading surface) at
+test time, not at dashboard runtime.
+
+### 34.3 Acceptance (A24)
+- **Spec space (34.1)** — the five contracts tested: exact-value fields
+  equal the config constants (order included); range-field catalog values
+  inside the config ranges; catalog architectures legal for some non-knn
+  family; fixed-seed sampler draws in the registered space for every
+  field (exhaustive field classes); the field sets are one set (incl.
+  the 25.7 `SEARCH_FIELDS` exclusion and the `FAMILY_FIELDS` rows).
+- **Summary (34.2)** — exact top-level key sets for the legacy run and
+  the full-flag run (scripted fake task, 4-experiment budgets, flat
+  scores); the `search_quality`, `curriculum`, `screening`, and
+  `ensemble` internal key sets; `best_spec` carries the full spec dict
+  (15 fields); each `pareto_frontier` point carries exactly
+  `{score, train_seconds, spec_hash}`.
+- **Regression** — full suite green (A1–A23); version stepped to `0.20.0`
+  in both sources (33.1) with the A23 round assertion advanced (v0.20 ⇒
+  `0.20.0`).
+
+### 34.4 Milestone
+
+**M23** — v0.20 coherency II: spec-space coherency (34.1), summary
+contract (34.2) (A24).
+
+---
+
+## 35. Coherency III (v0.21)
+
+34 (v0.20) made the spec space and the summary contract
+cross-checkable. v0.21 finishes the loop with the last two artifacts
+that were policed by convention only — the **experiment-log kind
+strings** (the §9/§21.2 row type every renderer and report formatter
+literal-compares) and the **acceptance index** itself (the M# → § → A#
+→ test-file map, until now in prose and memory). Same house rules: no
+new features, **no behavior change** (A1–A24 stay green untouched; the
+logged bytes are byte-identical), and the version steps per 33.1
+(`0.20.0` → `0.21.0`, both sources together; the A23 round assertion
+advances with it: v0.21 ⇒ `0.21.0`).
+
+### 35.1 Log kind registry (C4)
+
+The `kind` field of an `experiments.jsonl` row (SPEC.md 9) is the row
+type every reading surface matches against — `plotting.py` (score
+curve / band / ladder, `html_report`), `cli.py` (report table + pareto
+points), `dashboard.py` (pareto points, `_loss_curves` labels, family
+stats) and the env's own `_write_artifacts` win-rate loop. The five
+values (`baseline`, `experiment`, `screen`, `curriculum`,
+`invalid_spec`) were bare string literals at every site: a new kind
+added to the emitter would be silently missed by the report's table
+formatter — the exact gotcha the v0.18 screen row hit (A22).
+
+Contract (A25; a violation is a suite failure, not a runtime
+surprise):
+
+1. **The registry is one set** — `memory.py` (the log module, 9)
+defines `KIND_BASELINE`, `KIND_EXPERIMENT`, `KIND_SCREEN`,
+   `KIND_CURRICULUM`, `KIND_INVALID_SPEC` and
+   `LOG_KINDS = frozenset({…})`. The values are byte-identical to the
+   historical literals, so existing logs, pins, and the A22
+   screen-row tests are untouched.
+2. **Emitters route through the registry** — the `reset`/`step` log
+calls and `_advance_curriculum` / `_reject_screened` /
+   `_reject_invalid` in `improver/meta_env.py` (6.1) never write a raw
+   `"kind"` literal; the suite scans the emitter source and fails if
+   one is left behind.
+3. **Consumers route through the registry** — the kind comparisons in
+   `plotting.py`, `cli.py`, `dashboard.py` and `meta_env.py`
+   (`_write_artifacts`) use the constants; the scan test fails if a
+   consumer still compares against a bare literal.
+4. **The registry is closed** — the `KIND_*` constant set equals
+   `LOG_KINDS` (exactly five kinds); adding a kind requires a constant,
+a row here, and a consumer — any of them missing fails the tests
+   instead of the report.
+
+No control-flow change: the five emission sites and every comparison
+are value-identical before and after (G2; the A1–A24 pins — including
+the A22 `screen` rows and the curriculum-ladder tests — stay green).
+
+### 35.2 Acceptance index (C5)
+
+A1–A24 span §12–§34, and the M# → § → A# → test-file map lived in
+prose and memory. The index table (inserted at the top of this
+document, immediately after the header block) is now the single
+source of truth: each row is `M# | version | SPEC § | A# | test
+file(s)`. Contract (A25):
+
+1. **SPEC acceptance numbers are cited by tests** — every `A#`
+   defined in SPEC.md (a `- **A#.**` bullet) is cited by ≥ 1
+   `tests/test_*.py` file (`\bA\d+\b` matching).
+2. **Every test file cites an acceptance number** — every
+   `tests/test_*.py` cites ≥ 1 `A#` in its source.
+3. **Rows resolve** — each index-table row lists test file(s) that
+   exist under `tests/` and cite that row's A# (the M0–M3 scaffold
+   rows predate acceptance numbers and carry none).
+
+Closes the loop: an acceptance number added without a test (or a test
+file without an acceptance number) now fails the suite — spec/code
+drift previously policed by convention alone (A1–A24).
+
+### 35.3 Acceptance (A25)
+- **Kind registry (35.1)** — the five `KIND_*` values are
+  byte-identical to the historical literals (`baseline`,
+  `experiment`, `screen`, `curriculum`, `invalid_spec`) and
+  `LOG_KINDS` is exactly their set; the emitter source (`meta_env.py`)
+  contains no raw `"kind"` literal and every `KIND_*` name it uses
+  resolves to a registry constant; the consumer sources (`plotting.py`,
+  `cli.py`, `dashboard.py`) carry no bare kind-literal comparisons;
+  and a live run's logged rows all carry kinds in `LOG_KINDS`.
+- **Index (35.2)** — every SPEC-defined `A#` (A1–A25) is cited by ≥ 1
+  `tests/test_*.py`; every `tests/test_*.py` cites ≥ 1 `A#`; every
+  index-table row's listed test file exists and cites that row's A#.
+- **Regression** — full suite green (A1–A24); version stepped to
+  `0.21.0` in both sources (33.1) with the A23 round assertion
+  advanced (v0.21 ⇒ `0.21.0`).
+
+### 35.4 Milestone
+
+**M24** — v0.21 coherency III: log kind registry (35.1), acceptance
+index (35.2) (A25).

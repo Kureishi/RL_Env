@@ -1,4 +1,5 @@
-"""Pareto frontier tests (SPEC.md 15, score-vs-train-time memory)."""
+"""Pareto frontier tests (SPEC.md 15, score-vs-train-time memory);
+acceptance A6 (SPEC.md 12: the v0.2 extension coverage)."""
 import numpy as np
 
 from autorefine.pareto import ParetoFrontier

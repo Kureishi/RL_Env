@@ -1,4 +1,5 @@
-"""Meta-RL improver tests (SPEC.md 15: an improver trained on the loop)."""
+"""Meta-RL improver tests (SPEC.md 15: an improver trained on the loop);
+acceptance A6 (SPEC.md 12: the v0.2 extension coverage)."""
 import numpy as np
 import pytest
 

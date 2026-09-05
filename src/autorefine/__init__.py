@@ -12,7 +12,12 @@ from .config import (
     SpecError,
     Budget,
 )
-from .improver.meta_env import AutoRefineEnv, search_quality_v04
+from .improver.meta_env import (
+    AutoRefineEnv,
+    KNOBS,
+    candidate_screening,
+    search_quality_v04,
+)
 from .improver.policy import SearchPolicy
 from .improver.bandit import BanditPolicy
 from .improver.rl_policy import MetaRLPolicy, train_policy, train_multi_policy
@@ -41,7 +46,10 @@ from .tasks import (
     SineRegressionV1,
 )
 
-__version__ = "0.10.0"
+# SPEC.md 33.1 (C1): single version source — must equal pyproject.toml's
+# [project].version (enforced by the A23 test); one step per feature round
+# (v0.21 ⇒ 0.21.0, M24, SPEC.md 35)
+__version__ = "0.21.0"
 
 __all__ = [
     "AutoRefineEnv",
@@ -49,6 +57,8 @@ __all__ = [
     "SearchPolicy",
     "BanditPolicy",
     "search_quality_v04",
+    "candidate_screening",
+    "KNOBS",
     "MetaRLPolicy",
     "train_policy",
     "train_multi_policy",
