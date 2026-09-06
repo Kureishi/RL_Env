@@ -14,6 +14,13 @@ from pathlib import Path
 
 from .config import Budget, ModelSpec
 from .diagnostics import holdout_diagnostics
+from .gate import (
+    actuals_from_run,
+    default_objectives,
+    evaluate,
+    parse_objective,
+)
+from .runconfig import RunConfig, format_recipe
 from .improver.meta_env import AutoRefineEnv, search_quality_v04
 from .improver.bandit import BanditPolicy
 from .improver.curriculum import ParityCurriculum
@@ -94,6 +101,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
         curriculum=curriculum,
         stall_patience=args.stall_patience,  # v0.17 (SPEC.md 31.1; None = off)
         screen_frac=args.screen_frac,  # v0.18 (SPEC.md 32.2; 1.0 = off)
+        # v0.23 (SPEC.md 37.1.3): driver metadata for the canonical recipe
+        policy=args.policy,
+        target=None,  # `run` is ungated (SPEC.md 37.2.3)
+        rl_episodes=args.rl_episodes if args.policy == "rl" else None,
         **quality,
     )
     _drive(args, env)
@@ -163,19 +174,53 @@ def _resolve_fit_task(data: Path, want: str) -> str:
 
 
 def _cmd_fit(args: argparse.Namespace) -> int:
-    """`fit` (SPEC.md 22.1, v0.10 24.5): data in, gated validated model out.
+    """`fit` (SPEC.md 22.1, v0.10 24.5, v0.23 37.1.4/37.2): data in, gated
+    validated model out.
 
     = the `run` loop over the matching data task (task_config carries the
-    path: csv file / image dir / audio dir), plus the §21.5 target gate:
-    PASS → exit 0, MISS → exit 2.
+    path: csv file / image dir / audio dir), plus the acceptance gate. No
+    `--gate` → the §22.1 score bar (PASS → rc 0, MISS → rc 2, byte-identical
+    to pre-v0.23); `--gate "name op threshold"` (repeatable) → the objective
+    set (37.2). `--from-run RUN_DIR` re-runs a finished run exactly (37.1.4)
+    — mutually exclusive with `--data`.
     """
+    from .tasks import TASKS  # noqa: F401 (registry; the helpers use it)
+    if args.data is not None and args.from_run is not None:
+        print("--data and --from-run are mutually exclusive (SPEC.md 37.1.4)",
+              file=sys.stderr)
+        return 1
+    if args.from_run is not None:
+        env, bar = _fit_from_run(args)
+        if env is None:
+            return 1
+        metric = getattr(env.task, "metric", None) or "score"
+    else:
+        if args.data is None:
+            print("one of --data or --from-run is required (SPEC.md 37.1.4)",
+                  file=sys.stderr)
+            return 1
+        env, bar, metric = _fit_data(args)
+    if env is None:
+        return 1
+    _drive(args, env)
+    rc = _fit_gate(args, env, bar, metric)
+    # C2/C3 (SPEC.md 28.2/28.3): after the gate line, per-class accuracy +
+    # weakest-class hint (and the media error gallery)
+    _print_fit_diagnostics(env)
+    return rc
+
+
+def _fit_data(args: argparse.Namespace) -> tuple:
+    """`fit --data` mode (SPEC.md 22.1/24.5): probe the data, build the env,
+    and return `(env, bar, metric)` (or `(None, None, None)` on a bad
+    path/task)."""
     from .tasks import TASKS
     data = Path(args.data)
     try:
         task_name = _resolve_fit_task(data, getattr(args, "task", "auto") or "auto")
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
-        return 1
+        return None, None, None
     config: dict = {"path": str(data)}
     if args.label is not None:
         config["label"] = args.label
@@ -187,7 +232,10 @@ def _cmd_fit(args: argparse.Namespace) -> int:
         probe = TASKS[task_name](seed=args.seed, **config)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
-        return 1
+        return None, None, None
+    # SPEC.md 36.1.5 (v0.22, G1): the gate line names the task's declared
+    # `metric` — read, not inferred
+    metric = getattr(probe, "metric", None) or "score"
     quality = {} if args.search_quality == "legacy" else search_quality_v04()
     args.task = task_name  # _drive's print lines
     env = AutoRefineEnv(
@@ -197,26 +245,112 @@ def _cmd_fit(args: argparse.Namespace) -> int:
         task_config=config,
         stall_patience=args.stall_patience,  # v0.17 (SPEC.md 31.1; None = off)
         screen_frac=args.screen_frac,  # v0.18 (SPEC.md 32.2; 1.0 = off)
+        # v0.23 (SPEC.md 37.1.3): driver metadata for the canonical recipe
+        policy=args.policy, target=args.target,
+        rl_episodes=args.rl_episodes if args.policy == "rl" else None,
         **quality,
     )
-    _drive(args, env)
+    return env, args.target, metric
+
+
+def _fit_from_run(args: argparse.Namespace) -> tuple:
+    """`fit --from-run RUN_DIR` (SPEC.md 37.1.4): re-run the finished run
+    exactly from its `run_config` (the recipe is the single source of
+    truth) — the data path/label/split, seed, budget, policy (+rl_episodes),
+    target, the search-quality knobs **verbatim** (not by preset), an
+    **explicit** `dataset_size` (no re-probe), and ensemble/stall/screening.
+    `--target` is ignored (the recipe's target is authoritative). Returns
+    `(env, bar)` or `(None, None)` on error."""
+    run_dir = Path(args.from_run)
+    rc_path = run_dir / "run_config.json"
+    if rc_path.is_file():
+        raw = json.loads(rc_path.read_text(encoding="utf-8"))
+    else:  # fallback: the additive summary.json key (34.2)
+        sp = run_dir / "summary.json"
+        if not sp.is_file():
+            print(f"no run_config.json or summary.json in {run_dir} "
+                  "(SPEC.md 37.1.4)", file=sys.stderr)
+            return None, None
+        raw = json.loads(sp.read_text(encoding="utf-8")).get("run_config")
+    if not isinstance(raw, dict):
+        print(f"{run_dir} has no run_config (a pre-v0.23 run) — re-run with "
+              "--data instead (SPEC.md 37.1.4)", file=sys.stderr)
+        return None, None
+    try:
+        config = RunConfig.from_dict(raw)
+    except ValueError as exc:
+        print(f"invalid run_config: {exc}", file=sys.stderr)
+        return None, None
+    if not config.task_config.get("path"):
+        print("that run used a built-in task — use `autorefine run` instead "
+              "(SPEC.md 37.1.4)", file=sys.stderr)
+        return None, None
+    # the recipe's target is authoritative; `--target` is ignored here
+    bar = config.target if config.target is not None else 95.0
+    # sync the CLI namespace the shared driver reads, so the re-run is
+    # bit-identical (same policy seed, budget, knobs, explicit size — 37.1.5)
+    args.seed = config.seed
+    args.policy = config.policy or "bandit"
+    args.rl_episodes = (config.rl_episodes
+                        if config.rl_episodes is not None else args.rl_episodes)
+    args.task = config.task
+    args.ensemble_final = config.ensemble_top_k > 0
+    env = AutoRefineEnv(
+        task=config.task, seed=config.seed,
+        budget=Budget(config.max_experiments, config.max_wall_seconds,
+                      config.max_train_seconds),
+        runs_dir=args.runs_dir,
+        dataset_episodes=config.dataset_size,  # explicit, no re-probe (37.1.4)
+        task_config=dict(config.task_config),
+        ci_blocks=config.ci_blocks, z_accept=config.z_accept,
+        efficiency_weight=config.efficiency_weight,
+        gen_gap_penalty=config.gen_gap_penalty, block_size=config.block_size,
+        ensemble_top_k=config.ensemble_top_k,
+        stall_patience=config.stall_patience,  # v0.17 (SPEC.md 31.1)
+        screen_frac=config.screen_frac,  # v0.18 (SPEC.md 32.2)
+        policy=config.policy, target=bar, rl_episodes=config.rl_episodes,
+    )
+    return env, bar
+
+
+def _fit_gate(args: argparse.Namespace, env: AutoRefineEnv, bar: float,
+              metric: str) -> int:
+    """The fit acceptance gate (SPEC.md 22.1 / 37.2). No `--gate` → the
+    §22.1 score bar, byte-identical to pre-v0.23 (gate line + PASS/MISS text
+    + rc 0/2); `--gate` (1+) → the objective set with per-objective rows
+    (37.2.3). Returns the exit code."""
     final = env.best_score
-    print(f"\ngate    : final {final:.2f} vs target {args.target:.1f} "
-          f"(SPEC.md 22.1; the loop maximizes the validated score, the bar is yours)")
-    if final >= args.target:
-        print(f"PASS: final score {final:.2f} >= {args.target:.1f} on held-out data "
-              "(the loop never trained on these points; gen_gap is the overfit guard)")
-        rc = 0
-    else:
-        print(f"MISS: {final:.2f} < {args.target:.1f} — the search space or budget is "
+    if not args.gate:
+        # no --gate: the §22.1 gate, exactly
+        print(f"\ngate    : final {final:.2f} on {metric} vs target {bar:.1f} "
+              f"(SPEC.md 22.1; the loop maximizes the validated score, the bar is yours)")
+        if final >= bar:
+            print(f"PASS: final score {final:.2f} on {metric} >= {bar:.1f} "
+                  "on held-out data (the loop never trained on these points; "
+                  "gen_gap is the overfit guard)")
+            return 0
+        print(f"MISS: {final:.2f} < {bar:.1f} — the search space or budget is "
               "exhausted for this task")
         print("next: raise --experiments / --max-train-seconds, or extend the spec "
               "space / model families (README 'Extending')")
-        rc = 2  # the user's acceptance step, machine-readable for pipelines
-    # C2/C3 (SPEC.md 28.2/28.3): after the gate line, per-class accuracy +
-    # weakest-class hint (and the media error gallery)
-    _print_fit_diagnostics(env)
-    return rc
+        return 2
+    # --gate (SPEC.md 37.2): the objective set (score / train / model)
+    objectives = tuple(parse_objective(g) for g in args.gate)
+    actuals = actuals_from_run(env, env.memory.load_experiments())
+    res = evaluate(objectives, actuals)
+    n = len(res["objectives"])
+    print(f"\ngate    : {n} objective(s) (SPEC.md 37.2)")
+    for row in res["objectives"]:
+        actual_s = (f"{row['actual']:.3g}" if row["actual"] is not None
+                    else "n/a")
+        print(f"  {row['name']:6s} {row['op']} {row['threshold']:.6g}   "
+              f"actual {actual_s}   {'PASS' if row['pass'] else 'MISS'}")
+    if res["pass"]:
+        print(f"PASS: all {n} objective(s) met (SPEC.md 37.2)")
+        return 0
+    failed = ", ".join(r["name"] for r in res["objectives"] if not r["pass"])
+    print(f"MISS: objective(s) not met: {failed} (SPEC.md 37.2)")
+    return 2
 
 
 def _cmd_variance(args: argparse.Namespace) -> int:
@@ -236,6 +370,12 @@ def _cmd_variance(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1
+    # v0.23 (SPEC.md 37.2): the per-seed verdicts carry the objective set —
+    # no `--gate` → exactly the §22.1 score gate (byte-identical); `--gate`
+    # (1+) → the score/train/model objective set. A variance report stays a
+    # measurement (exit 0, SPEC.md 29.1).
+    objectives = (tuple(parse_objective(g) for g in args.gate)
+                  if args.gate else None)
     runner = DashboardRunner(
         csv_path=str(data), label=args.label, split_frac=args.split_frac,
         target=args.target, policy=args.policy, seed=args.seed,
@@ -243,6 +383,7 @@ def _cmd_variance(args: argparse.Namespace) -> int:
         max_train_seconds=args.max_train_seconds, runs_dir=args.runs_dir,
         search_quality=args.search_quality, modality=args.task,
         stall_patience=args.stall_patience,  # v0.17 (SPEC.md 31.1; per-seed)
+        objectives=objectives,  # v0.23 (SPEC.md 37.2)
     )
     seeds = list(range(args.seed, args.seed + args.seeds))
     sweep = runner.seed_sweep(seeds, workers=args.workers)  # v0.17 (SPEC.md 31.2)
@@ -410,6 +551,15 @@ def _cmd_report(args: argparse.Namespace) -> int:
     for k in ("task", "seed", "finished_reason", "baseline_score",
               "final_best_score", "improvement_factor", "experiments_run", "wall_seconds"):
         print(f"{k:20s}: {summary.get(k)}")
+    # SPEC.md 37.1.4: when the run carries the canonical recipe, render the
+    # copy-pasteable command (fit for data tasks, run for built-in tasks)
+    rc_cfg = summary.get("run_config")
+    if rc_cfg:
+        try:
+            print("\nreproduce (copy-paste):")
+            print(f"  {format_recipe(RunConfig.from_dict(rc_cfg))}")
+        except ValueError:
+            pass  # a pre-v0.23 / mutated run_config: skip the recipe line
     print("\nbest spec:")
     print(json.dumps(summary.get("best_spec"), indent=2))
     print(f"\n{'kind':10s} {'accepted':9s} {'score':>8s} {'gen_gap':>9s} {'mutation'}")
@@ -687,9 +837,18 @@ def build_parser() -> argparse.ArgumentParser:
         "fit", help="v0.8 (SPEC.md 22.1) / v0.10 (24.5): fit a model on your data "
                     "(CSV file, or a directory of labelled images/audio) and "
                     "gate on a target")
-    p_fit.add_argument("--data", required=True,
+    p_fit.add_argument("--data", default=None,
                        help="CSV file, or a directory of labelled images/audio "
-                            "(v0.10, SPEC.md 24.5)")
+                            "(v0.10, SPEC.md 24.5); or pass --from-run to re-run "
+                            "a finished run (mutually exclusive, SPEC.md 37.1.4)")
+    p_fit.add_argument("--from-run", dest="from_run", default=None,
+                       help="v0.23 (SPEC.md 37.1.4): re-run a finished run exactly "
+                            "from its run_config (mutually exclusive with --data)")
+    p_fit.add_argument("--gate", action="append", default=[],
+                       metavar="NAME OP THRESHOLD",
+                       help="v0.23 (SPEC.md 37.2): an acceptance objective, e.g. "
+                            "'score>=95', 'train<=30', 'model<=100000' "
+                            "(repeatable); none → the §22.1 score gate")
     p_fit.add_argument("--task", default="auto", choices=("auto", "csv", "image", "audio"),
                        help="v0.10 (SPEC.md 24.5): force the data task; default auto "
                             "(file → csv, directory → detected)")
@@ -774,6 +933,11 @@ def build_parser() -> argparse.ArgumentParser:
                             "results bit-identical either way)")
     p_var.add_argument("--json", action="store_true",
                        help="print the sweep as pure JSON (SPEC.md 21.2)")
+    p_var.add_argument("--gate", action="append", default=[],
+                       metavar="NAME OP THRESHOLD",
+                       help="v0.23 (SPEC.md 37.2): per-seed acceptance objective, "
+                            "e.g. 'score>=95', 'train<=30', 'model<=100000' "
+                            "(repeatable); none → the §22.1 score gate")
     p_var.set_defaults(func=_cmd_variance)
 
     p_pol = sub.add_parser(

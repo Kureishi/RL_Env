@@ -20,6 +20,8 @@ import zlib
 
 import numpy as np
 
+from .base import Task
+
 N_BITS = 4
 P_FLIP = 0.08  # v0.3 seeded observation noise per bit
 
@@ -47,7 +49,7 @@ def parity_ceiling(n_bits: int = N_BITS, p_flip: float = P_FLIP) -> float:
     return 100.0 * (1.0 + (1.0 - 2.0 * float(p_flip)) ** int(n_bits)) / 2.0
 
 
-class ParityTask:
+class ParityTask(Task):
     """Parameterized noisy-parity task (SPEC.md 20.1): n_bits in 1..8,
     p_flip in [0.0, 0.5). Identity derives from (n_bits, p_flip);
     Parity4V1 below pins the v0.3 identity."""
@@ -56,6 +58,9 @@ class ParityTask:
     n_outputs = 2
     max_steps = 1  # not an episode task; present for protocol completeness
     default_dataset_size = 4096  # SPEC.md 20.3 (points)
+    # SPEC.md 36.1 (v0.22, G1): declared metric + capabilities
+    metric = "accuracy"  # score() = 100 * accuracy
+    capabilities = frozenset()
 
     def __init__(self, seed: int, n_bits: int = N_BITS, p_flip: float = P_FLIP) -> None:
         if not 1 <= int(n_bits) <= 8:

@@ -16,6 +16,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .base import Task
 from .media import (_IMAGE_EXTS, class_label_str, collect_items,
                     resolve_labels, split_indices)
 
@@ -34,7 +35,7 @@ def _pil_resample():
         return Image.BILINEAR
 
 
-class ImageTask:
+class ImageTask(Task):
     name = "image"
     max_steps = 1  # not an episode task; protocol completeness (SPEC.md 15)
     # per-data-dir attributes; __init__ overrides (defaults keep the class
@@ -46,6 +47,11 @@ class ImageTask:
     # SPEC.md 25.3: the image modality is grid-structured (C=1, grid x grid)
     grid_capable = True
     feature_grid = None  # instance value: (1, grid, grid)
+    # SPEC.md 36.1 (v0.22, G1): declared metric + capabilities. Class-level
+    # default matches the `head = "softmax"` introspection default; __init__
+    # sets the instance metric alongside `head` (r2 for mse-labelled data).
+    metric = "accuracy"
+    capabilities = frozenset({"grid", "media"})
 
     def __init__(self, seed: int, path: str | Path | None = None,
                  label: str | None = None, split_frac: float = 0.2,
@@ -72,6 +78,7 @@ class ImageTask:
         # class names (SPEC.md 24.2)
         (self.head, self.n_outputs, self.class_values, self._y) = \
             resolve_labels([lb for _, lb in items])
+        self.metric = ("accuracy" if self.head == "softmax" else "r2")
         self.state_dim = int(self.grid) ** 2
         self.feature_names = [f"{self.grid}x{self.grid} grayscale"]
         self.feature_grid = (1, self.grid, self.grid)  # SPEC.md 25.3

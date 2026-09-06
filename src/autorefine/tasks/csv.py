@@ -37,11 +37,13 @@ from pathlib import Path
 
 import numpy as np
 
+from .base import Task
+
 _LABEL_HINTS = ("label", "target", "y", "class")
 _MAX_CLASSES = 50  # integer labels with more distinct values → regression
 
 
-class CsvTask:
+class CsvTask(Task):
     name = "csv"
     max_steps = 1  # not an episode task; protocol completeness (SPEC.md 15)
     # per-data-file attributes; __init__ overrides (defaults keep the class
@@ -50,6 +52,11 @@ class CsvTask:
     n_outputs = 1
     state_dim = 1
     default_dataset_size = None  # instance value: len(train rows)
+    # SPEC.md 36.1 (v0.22, G1): declared metric + capabilities. Class-level
+    # default matches the `head = "mse"` introspection default; __init__
+    # sets the instance metric alongside `head` (accuracy vs r2 per data).
+    metric = "r2"
+    capabilities = frozenset()
 
     def __init__(self, seed: int, path: str | Path | None = None,
                  label: str | None = None, split_frac: float = 0.2) -> None:
@@ -86,11 +93,13 @@ class CsvTask:
             self._y = np.array(
                 [int(np.flatnonzero(classes == v)[0]) for v in y], dtype=np.int64
             )
+            self.metric = "accuracy"  # SPEC.md 36.1.3 (score = 100*accuracy)
         else:
             self.head = "mse"
             self.n_outputs = 1
             self.class_values = None
             self._y = y
+            self.metric = "r2"  # SPEC.md 36.1.3 (score = 100*R^2)
         self.state_dim = len(features)
         self.feature_names = features
 

@@ -42,6 +42,8 @@ numbers and carry none.)
 | M22 | v0.19   | 33     | A23 | tests/test_coherency_v019.py |
 | M23 | v0.20   | 34     | A24 | tests/test_coherency_v020.py |
 | M24 | v0.21   | 35     | A25 | tests/test_coherency_v021.py |
+| M25 | v0.22   | 36     | A26 | tests/test_generalization_v022.py |
+| M26 | v0.23   | 37     | A27 | tests/test_generalization_v023.py |
 
 ---
 
@@ -2577,9 +2579,9 @@ sections with no single pin of the whole contract. Contract (A24): the
 **exact top-level key set** is pinned for the two canonical
 configurations, and each internal dict pins its exact key set:
 
-- **legacy run** (no optional flags) — 17 keys;
+- **legacy run** (no optional flags) — 18 keys (17 + `run_config`, 37.1);
 - **full-flag run** (`task_config` + `curriculum` + `screen_frac < 1.0`
-  + `ensemble_top_k > 0`) — those 17 + the 4 conditional keys.
+  + `ensemble_top_k > 0`) — those 18 + the 4 conditional keys.
 
 | key | producer | condition | spec |
 |---|---|---|---|
@@ -2591,6 +2593,7 @@ configurations, and each internal dict pins its exact key set:
 | `best_spec` (the full 15-field spec dict) | env | always | 5.1 |
 | `mutation_win_rate` | env | always | 5.3 |
 | `pareto_frontier`, `best_score_at_1s`, `efficiency_at_1s` | pareto | always | 15 |
+| `run_config` (the frozen RunConfig, 37.1) | env | always (v0.23+) | 37.1 |
 | `task_config` (the user's kwargs) | env | `task_config` non-empty | 22.1 |
 | `curriculum` `{levels, final_difficulty, final_ceiling, levels_left}` | env | `curriculum` given | 20.1 |
 | `screening` `{frac, baseline_screen_score}` | env | `screen_frac < 1.0` | 32.2, 33.3 |
@@ -2717,3 +2720,344 @@ drift previously policed by convention alone (A1–A24).
 
 **M24** — v0.21 coherency III: log kind registry (35.1), acceptance
 index (35.2) (A25).
+
+---
+
+## 36. Generalization (v0.22)
+
+35 (v0.21) closed the spec/code drift loop. v0.22 freezes the two
+protocols that until now were conventions: the **task protocol** (duck
+typed across seven task classes and re-derived by hand in every fake
+task test) and the **ModelSpec field space** (one field added to the
+bandit/samplers by the "4-line extension pattern", with the RL
+catalog, search enumerator, and the app surface expected to notice).
+Both become nominal, registered interfaces. Same house rules: **no
+behavior change** — the 77-action catalog, the proposal order, and
+A1–A25 stay byte-identical — and the version steps per 33.1
+(`0.21.0` → `0.22.0`, both sources; the round assertion advances:
+v0.22 ⇒ `0.22.0`).
+
+### 36.1 Task ABC (G1)
+
+Tasks were duck typed: `name`, `head`, `n_outputs`, `make_dataset`,
+`score`, optionally `default_dataset_size`, and *how the score is
+measured* was implicit — readable only from each `score()` docstring
+(accuracy vs R² vs episode survival vs success+efficiency). `tasks`
+now defines `Task` as a **nominal ABC** (not the former structural
+Protocol), and every registry task lists it as its base:
+
+1. **Abstract methods** — `make_dataset(**kwargs)` and
+   `score(model, split, n)`; both exist on every real task, so no task
+   gains implementation work. A task that forgets either is a
+   construction error, not a first-step crash.
+2. **Identity contract (class attributes, enforced by the A26 tests —
+   Python ABCs cannot enforce class attributes)** — `name`,
+   `state_dim`, `n_outputs`, `head`, `max_steps`,
+   `default_dataset_size`. Tasks whose identity is data-derived
+   (`CsvTask`, `ImageTask`, `AudioTask`) keep class-level
+   introspection defaults (as with their existing `head` defaults) and
+   set the instance values in `__init__`; `ParityTask` keeps its
+   `name`/`state_dim` properties (identity derived from `n_bits`), so
+   the A26 identity checks are instance-based.
+3. **`metric` — an explicit attribute** (G1): the name of the score
+   the task reports, declared instead of inferred from `n_outputs` /
+   label dtype. Values per task: `cartpole-v1` → `mean_steps` (mean
+   episode survival steps), `sine-v1` → `r2` (100·R²), `gridnav-v1`
+   → `success` (100·success rate + the 25-pt efficiency bonus),
+   `parity-v1` → `accuracy` (100·accuracy), `csv` → `accuracy` or
+   `r2` per data (class default `r2`, matching its `head="mse"`
+   introspection default; `__init__` sets it alongside `head`),
+   `image`/`audio` → `accuracy` or `r2` per labels (class default
+   `accuracy`, matching `head="softmax"`). New metrics (F1, log-loss)
+   are a task property, not a head string.
+4. **`capabilities` — an explicit attribute** (G1): a `frozenset` of
+   capability strings, defaulting to empty. Declared capabilities:
+   `interactive` (episode primitives: `cartpole-v1`, `gridnav-v1`),
+   `grid` (grid-layout inputs, SPEC.md 25.3: `image`, `audio`),
+   `media` (file/directory items + error gallery: `image`, `audio`).
+   Downstream code (the §23 plugin loader first) can test
+   `"grid" in task.capabilities` against a frozen interface instead of
+   `getattr(task, "grid_capable", False)`.
+5. **Reading sites now read `metric`** — the app data-preview caption
+   (SPEC.md 23.2, previously `probe.head == "softmax"` guess) renders
+   from `probe.metric` (`accuracy (K classes: …)` / `r2 (regression)`),
+   and the `fit` gate line (SPEC.md 22.1) names the task's metric next
+to the target ("final 96.42 on accuracy vs target …").
+
+Duck-typed fakes keep working: no core code performs `isinstance(…, Task)`
+(the A26 tests assert that property against the sources), so the fake
+tasks in the existing test files remain valid without edits.
+
+### 36.2 ModelSpec field registry (G2)
+
+The ModelSpec space had one law (`config.py`) and three surfaces
+(`FIELD_CATALOG` in `catalog.py`, `FIELD_SAMPLERS` in `actions.py`, and
+the per-field consumers: the bandit proposal space, the search
+enumerator's `SEARCH_FIELDS`, the 77-action RL/Gym catalog, the policy
+state embedding, and the app's spec chips). Adding a field meant editing
+the law *and* remembering every surface — the same drift class C4
+(35.1) closed for log kinds. `improver/specspace.py` now holds the
+**field registry**, one row per field, in catalog order:
+
+```
+SpecField(name, space, validator, families, spec_ref, kind)
+```
+
+- `name` — the spec field name (`ModelSpec` attribute);
+- `space` — the allowed values (the catalog tuple; for range fields,
+  the offered subset, always inside the `config.py` law range — the
+  A24 invariant, now derivable from one table);
+- `validator` — one home for value validation (accepts every value in
+  the row's `space`, rejects the others);
+- `families` — the model families the field affects (the A24
+  `FAMILY_FIELDS` rows, now declared per field); `model_family` is the
+  only field affecting all five families;
+- `spec_ref` — the SPEC.md section where the field is defined (5.1,
+  15, 17, 19.1, 19.2, 25.2, 25.3);
+- `kind` — `sequence` (architecture), `ordered` (the nine numeric
+  neighborhood-move fields, the A24 `ORDERED_FIELDS` list), or
+  `categorical` (local move == uniform resample).
+
+**Deriving surfaces** (byte-identical to v0.21 in values *and order*):
+
+1. `catalog.py` — `FIELD_CATALOG` is the registry's `name → space`
+   map; `CATALOG_FIELDS` its name order; the 77-action `ACTIONS` and
+   `FAMILY_FIELDS` are derived from the registry (family-specific
+   families = rows declaring that family; the neural `mlp`/`convnet`
+   families expose the full row set, matching the v0.11 semantics where
+   `knn_k` is validated-but-ignored outside knn). The Gym action space
+   and the RL policy's state embedding read `FIELD_CATALOG` and change
+   nothing (SPEC.md 15, 25.7 pins stay green).
+2. `actions.py` — `FIELD_NAMES` takes its *membership* from the
+   registry, but its *order* is the v0.21 legacy order (`model_family`
+   after `activation`, NOT the catalog's 2nd position): the order is
+   behavioral — `SearchPolicy` draws `rng.choice(SEARCH_FIELDS)` by
+   index, so it IS the A1–A4 proposal stream and must stay
+   byte-identical. `CATALOG_FIELDS`/`ACTIONS` stay in catalog (registry)
+   order — the two surfaces legitimately have different orders. The
+   `ORDERED_FIELDS` neighborhood list is `kind == "ordered"` rows;
+   `SEARCH_FIELDS` keeps its `knn_k` exclusion (25.7); `FIELD_SAMPLERS`
+   stays the per-field sampling table but is now checked to be
+   *exhaustive over the registry* (A26) — a field added to the registry
+   with a missing sampler, or a sampler for an unregistered field, fails
+   the suite.
+3. **The app spec chips** — the dashboard's spec surface renders its
+   field list from the registry (the Result section's spec-space
+   caption names the registry's fields and the sidebar preview caption
+   renders from `task.metric` per 36.1.5), so a new field's name and
+   order are one table, not a per-surface edit.
+
+**The invariant (A26)** — the registry, `FIELD_CATALOG`,
+`FIELD_NAMES`, `FIELD_SAMPLERS`, `SEARCH_FIELDS`, `ORDERED_FIELDS`,
+`FAMILY_FIELDS`, and the 77-action `ACTIONS` tuple are one object with
+several views: same names, same order, same values, complete coverage
+in both directions. This is the model-space analogue of the C2 knob
+registry (33.2) and the C4 kind registry (35.1).
+
+No proposal stream moves: samplers, catalog values, and field orders
+are value- and order-identical, so the A1–A4 acceptance runs, the
+A8 legacy bit-exact pin, the A24 coherency battery, and the Gym
+action-space tests stay green untouched.
+
+### 36.3 Acceptance (A26)
+- **Task ABC (36.1)** — every `TASKS` value is a `Task` subclass and
+  instantiable (with data fixtures for the `csv`/`image`/`audio`
+  tasks); every task instance exposes the identity attributes with
+  sane values and a non-empty `name`/positive `state_dim`/`n_outputs`;
+  `metric` is in the declared set and matches the task's head
+  semantics (instance-level for the data tasks, where a softmax CSV is
+  `accuracy` and an mse CSV is `r2`); `capabilities` is a `frozenset`
+  with exactly the declared members per task (`interactive` for
+  cartpole/gridnav; `grid`+`media` for image/audio; empty otherwise);
+  `Task` has exactly the two abstract methods `make_dataset`/`score`;
+  no core source performs `isinstance(…, Task)` (the duck-typed-fake
+  guarantee); and the reading sites are metric-driven — the app
+  preview caption for a softmax CSV contains the `accuracy` metric
+  text and for a regression CSV the `r2` text, and the `fit` gate line
+  names the task's metric.
+- **Field registry (36.2)** — the registry is exactly the 15 catalog
+  fields in catalog order (the A24 field set); every row has a
+  non-empty `spec_ref` matching `SPEC.md <n>`, a validator that accepts
+  every value in its `space` and rejects an out-of-space value, a
+  non-empty `families` subset of the five model families, and a `kind`
+  in the declared set; `FIELD_CATALOG`/`CATALOG_FIELDS` equal the
+  registry's values/order (A24's catalog-vs-config invariants stay
+  green); `FAMILY_FIELDS` is derivable from the rows (tree/boost/knn
+  rows match the historical tuples; mlp/convnet expose the full row
+  set); `set(FIELD_NAMES) == set(SPEC_FIELDS) == set(CATALOG_FIELDS)`
+  with `FIELD_NAMES` keeping the v0.21 legacy order (the A1–A4 proposal
+  stream, 36.2 item 2); the `ORDERED_FIELDS` list is exactly the
+  `kind == "ordered"` rows in
+  registry order; `FIELD_SAMPLERS` is exhaustive over the registry in
+  both directions; `SEARCH_FIELDS` is the registry minus `knn_k` (25.7);
+  and the `ACTIONS` catalog keeps exactly 77 actions in the historical
+  order (A8).
+- **Regression** — full suite green (A1–A25, including the A8
+  legacy bit-exact proposal stream, the A24 coherency battery, and
+  the Gym action-space pin); version stepped to `0.22.0` in both
+  sources (33.1) with the round assertions advanced (v0.22 ⇒ `0.22.0`).
+
+### 36.4 Milestone
+
+**M25** — v0.22 generalization: Task ABC (36.1), ModelSpec field
+registry (36.2) (A26).
+
+---
+
+## 37. Generalization: the canonical recipe & objective gates (v0.23)
+
+36 (v0.22) froze the task and spec-space protocols. v0.23 closes the
+last two "the recipe is in your head" gaps: the **run recipe** is
+assembled from scattered `self.*` fields at finish time, and
+**acceptance** is a single score bar. Both become first-class objects.
+Same house rules: **no behavior change under the defaults** — with no
+`--gate`, the gate is exactly the §22.1 score bar and the gate line,
+PASS/MISS text, and exit codes are byte-identical; A1–A26 stay green
+(additive surfaces: the `run_config.json` artifact, the additive
+`summary.json` key, the `--gate`/`--from-run` flags). The version steps
+per 33.1 (`0.22.0` → `0.23.0`, both sources; the round assertion
+advances: v0.23 ⇒ `0.23.0`).
+
+### 37.1 G3 — One canonical `RunConfig` artifact
+
+**The problem (37.1.1).** `summary.json` accumulates its config from
+scattered `self.*` fields in `_write_artifacts` (`search_quality`,
+`task_config`, `screening`, `ensemble` …). A user who wants to re-run,
+share, or audit a run must reconstruct the recipe from memory; a `fit`
+re-run can silently drift (different preset, re-probed dataset size)
+and nothing can prove equivalence.
+
+**`RunConfig` (37.1.2).** One **frozen (immutable)** dataclass in a new
+core module `autorefine/runconfig.py` — the complete recipe of a run:
+
+| group | fields |
+|---|---|
+| identity | `schema` (`autorefine.run_config/1`), `autorefine_version`, `task`, `seed` |
+| driver metadata (nullable — the env does not own these) | `policy` (bandit/search/rl), `target` (the gate bar; None = ungated run), `rl_episodes` |
+| budget | `max_experiments`, `max_wall_seconds`, `max_train_seconds` (5.2) |
+| data | `dataset_size` (the effective train-split size, 20.3), `task_config` (the user's kwargs: path/label/split_frac, 22.1) |
+| search quality | `ci_blocks`, `z_accept`, `efficiency_weight`, `gen_gap_penalty`, `block_size` (18) |
+| options | `ensemble_top_k` (19.3), `curriculum` (bool, 20.1), `stall_patience` (31.1), `screen_frac` (32.2) |
+
+`to_dict()` is JSON-safe; `from_dict()` validates (schema + field
+types) and reconstructs the object — the round trip is exact, and a
+mutated/unknown dict is rejected.
+
+**Serialized at reset (37.1.3).** `AutoRefineEnv.reset()` builds
+`self.run_config` from the env's own fields plus the driver metadata
+(new optional constructor kwargs `policy`/`target`/`rl_episodes`,
+default `None` = env-level, not a driver choice) and writes
+`<run_dir>/run_config.json` **at reset** — the recipe exists from the
+first step (even for an interrupted run) and is fixed before any
+experiment, not assembled at finish. `_write_artifacts` serializes the
+same object as the **additive** `summary.json` key `run_config`
+(34.2: the legacy key set advances 17 → 18; the conditional keys are
+untouched).
+
+**The recipe surfaces (37.1.4)** — all read the same object:
+- **`report`** — when `run_config` is present, the human report prints
+  the copy-pasteable `autorefine fit …` (data tasks) or
+  `autorefine run …` (built-in tasks) command line reconstructed from
+  the config: `--data`/`--task` from `task_config.path`/`task`, the
+  budget triple, `--seed`, `--policy` (+ `--rl-episodes` when rl),
+  `--target` when set, `--search-quality legacy` only for the legacy
+  preset (v04 = the CLI default, omitted; non-preset knob values are
+  noted), and `--ensemble-final`/`--curriculum`/`--stall-patience`/
+  `--screen-frac` when non-default. `report --json` already carries
+  `run_config` in the summary.
+- **`fit --from-run RUN_DIR`** — re-runs the run exactly: the data
+  path/label/split, seed, budget, policy (+ `rl_episodes`), target,
+  the search-quality knobs **verbatim** (not by preset), and an
+  **explicit** `dataset_size` (no re-probe), plus
+  ensemble/stall/screening. `--data` and `--from-run` are mutually
+  exclusive (exactly one required).
+- **the app** — the Result section renders the same recipe as a
+  code block (`res["recipe"]`, a list of argv tokens; 23.1's
+  thin-app rule unchanged).
+
+**Determinism (37.1.5).** The recipe is a pure function of
+`RunConfig`; the same config always renders the same command line.
+`fit --from-run` over unchanged data yields a bit-identical run to the
+original (same seed, same knobs, same explicit dataset size).
+
+### 37.2 G4 — Acceptance as a small objective set
+
+**The problem (37.2.1).** The gate is `final >= target` — one number.
+The Pareto frontier already tracks score vs train time (15), and
+`best_model.npz` already fixes the model size: the data for a richer
+"good enough" is collected, but only the score is gate-usable.
+
+**Objectives (37.2.2).** A tiny first-class list —
+`Objective(name, op, threshold)` with `name ∈ {score, train, model}`
+and `op ∈ {>=, <=}` — in a new core module `autorefine/gate.py`:
+
+| name | meaning | actual source |
+|---|---|---|
+| `score` | the final best holdout score (0–100) | `env.best_score` |
+| `train` | the best candidate's training seconds | the memory entry with `spec_hash == best_spec.fingerprint()` |
+| `model` | model size = the total values stored in `best_model.npz` (uniform across families, metadata scalars included) | the saved artifact |
+
+`parse_objective("score>=95")` is the CLI form (a bad name/op/threshold
+is a construction-time `ValueError`); `default_objectives(target)` =
+`(score >= target,)` — **the default objective set is exactly today's
+single score gate**; `evaluate(objectives, actuals)` returns the
+per-objective breakdown (name/op/threshold/actual/pass) + the overall
+pass (ALL objectives must pass).
+
+**Wiring (37.2.3).**
+- **`fit --gate "name op threshold"`** (repeatable): one or more
+  `--gate` flags define the objective set; otherwise the set is
+  `score >= --target` — exactly the §22.1 gate, with the gate line,
+  PASS/MISS text, and exit codes 0/2 byte-identical to pre-v0.23 for
+  the no-gate case. With gates, the per-objective rows print
+  (name/op/threshold/actual/PASS|MISS) and the verdict names the
+  failing objective(s).
+- **`variance --gate …`** — the per-seed verdicts carry the same
+  objective set (a variance report remains a measurement: exit 0,
+  SPEC.md 29.1).
+- **`DashboardRunner(objectives=…)`** — `finish()` evaluates the set
+  (actuals from the env/memory/artifact) and the result dict carries
+  `gate` `{pass, objectives[…]}`; the app's Result section renders the
+  per-objective rows plus the 37.1.4 recipe.
+- **`run`** (built-in tasks) stays ungated — as before.
+
+**The gate never touches the loop (37.2.4).** Objectives are
+evaluated after `done`, exactly like today's §22.1 bar: the search
+still maximizes the validated score; the objectives only decide
+PASS/MISS.
+
+### 37.3 Acceptance (A27)
+- **RunConfig (37.1)** — `RunConfig` is frozen; `to_dict` is JSON-safe
+  and `from_dict` round-trips exactly (a mutated dict is rejected);
+  `run_config.json` exists **after reset** (before any step) and
+  equals the summary's additive `run_config` key after finish; the A24
+  summary key set advances 17 → 18 (legacy) and 17+4 (full-flag)
+  with nothing else moved; `fit_recipe` renders the copy-pasteable
+  `fit`/`run` command (the data-task recipe carries `--data` from
+  `task_config.path`, default-valued flags omitted, `--search-quality
+  legacy` only for the legacy preset); `fit --from-run` re-runs a
+  finished run with the exact recipe (PASS/MISS semantics + rc 0/2
+  preserved; `--data` and `--from-run` mutually exclusive); the app's
+  runner carries `res["recipe"]` (argv tokens) from the env's
+  `run_config`.
+- **Objectives (37.2)** — `parse_objective` accepts the three names ×
+  two ops and rejects a bad name/op/threshold with `ValueError`;
+  `default_objectives` is exactly `score >= target`; `evaluate` passes
+  iff ALL objectives pass and reports per-objective actuals + pass;
+  `fit --gate` on a score+train+model set gates on the set (rc 0 all
+  pass, rc 2 any fail) with the per-objective rows printed; **no
+  `--gate` keeps the §22.1 gate byte-identical** (gate line +
+  PASS/MISS text + rc); the `model` actual is the total values in
+  `best_model.npz`; the `train` actual is the best candidate's train
+  seconds; `DashboardRunner(objectives=…)` flows into `res["gate"]`
+  and the per-seed sweep verdicts.
+- **Regression** — full suite green (A1–A26, including the A24 key set
+  advanced as above, the A12 `fit` CLI pins, and the A13 dashboard
+  verdict pins — the no-gate path is unchanged); version stepped to
+  `0.23.0` in both sources (33.1) with the round assertions advanced
+  (v0.23 ⇒ `0.23.0`).
+
+### 37.4 Milestone
+
+**M26** — v0.23 generalization: the canonical RunConfig artifact
+(37.1), objective-set acceptance (37.2) (A27).

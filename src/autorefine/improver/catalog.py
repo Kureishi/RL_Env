@@ -13,52 +13,42 @@ import math
 import numpy as np
 
 from ..config import CONV_FILTERS, HIDDEN_LAYER_SIZES, KNN_K_VALUES, ModelSpec, SpecError
+from .specspace import SPEC_FIELDS
 
-# values per field; note (1,)/(2,)/(3,) architectures are valid tree depths
-# while (16, 8) etc. are valid mlp widths — apply_action enforces consistency.
-# SPEC.md 25.3: the 16 (c1, c2) convnet filter pairs are appended to the
-# architecture values (c1, c2 each in CONV_FILTERS); the mlp/tree values are
-# unchanged and keep their relative order.
-_CONVNET_ARCHS = tuple((c1, c2) for c1 in CONV_FILTERS for c2 in CONV_FILTERS)
-FIELD_CATALOG: dict[str, tuple] = {
-    "architecture": ((16, 8), (32, 16), (64, 32), (16, 32, 16), (1,), (2,), (3,)) + _CONVNET_ARCHS,
-    "model_family": ("mlp", "tree", "boost", "knn", "convnet"),  # SPEC.md 25.2/25.3
-    "optimizer": ("sgd", "momentum", "adam"),
-    "learning_rate": (1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2, 1e-1),
-    "batch_size": (16, 32, 64, 128),
-    "weight_decay": (0.0, 1e-4, 1e-3),
-    "train_steps": (200, 400, 1000, 2000, 5000),
-    "input_noise": (0.0, 0.02, 0.05, 0.1),
-    "activation": ("tanh", "relu"),
-    "label_smoothing": (0.0, 0.05, 0.1),  # SPEC.md 17
-    # --- v0.5 model & spec space (SPEC.md 19.1); appended so the 40 old
-    # action indices stay stable (SPEC.md 19.4) ---
-    "lr_schedule": ("constant", "cosine", "warmup_cosine"),
-    "early_stopping_patience": (0, 10, 25, 50),
-    "init_scale": (0.5, 1.0, 2.0),
-    "gradient_clipping": (0.0, 1.0, 5.0),
-    # SPEC.md 25.2: knn family's k (appended; consumed only by the knn family)
-    "knn_k": KNN_K_VALUES,
-}
+# SPEC.md 36.2 (v0.22, G2): the catalog is the registry's name->space view —
+# values and order derive from specspace.SPEC_FIELDS (byte-identical to the
+# v0.21 literals; A26 pins the derivation). Note (1,)/(2,)/(3,) architecture
+# values are valid tree depths while (16, 8) etc. are valid mlp widths —
+# apply_action enforces consistency; the 16 (c1, c2) convnet filter pairs
+# (SPEC.md 25.3) are part of the registry's architecture space.
+FIELD_CATALOG: dict[str, tuple] = {f.name: f.space for f in SPEC_FIELDS.values()}
 
-CATALOG_FIELDS = tuple(FIELD_CATALOG)
+CATALOG_FIELDS = tuple(SPEC_FIELDS)
 ACTIONS: tuple[tuple[str, object], ...] = tuple(
     (field, value) for field in CATALOG_FIELDS for value in FIELD_CATALOG[field]
 )
 
+
 # SPEC.md 18.2: the spec fields that affect each model family's behavior.
-# `tree`/`boost` ignore optimizer/lr/batch/weight-decay/activation/
-# label-smoothing and the v0.5 mlp fields (mutating them wastes an experiment:
-# fingerprint differs, behavior is identical), so proposals for a tree/boost
-# best spec stay within their 4 fields (SPEC.md 19.2: boost mirrors tree).
-FAMILY_FIELDS: dict[str, tuple[str, ...]] = {
-    "mlp": CATALOG_FIELDS,
+# Membership derives from the registry rows (36.2): a field affects a family
+# iff the family is in the row's `families`. The neural families (`mlp`,
+# `convnet`) expose the full row set (the v0.11 semantics where `knn_k` is
+# validated-but-ignored outside knn; convnet trains like mlp, 25.3); the
+# family-specific families keep their historical tuple order (A24), with the
+# membership itself read from the registry — `tree`/`boost` stay within
+# their 4 fields (mutating a field they ignore wastes an experiment:
+# fingerprint differs, behavior is identical; SPEC.md 19.2), `knn` only its
+# k (SPEC.md 25.2).
+_FAMILY_ORDER = {
     "tree": ("architecture", "train_steps", "input_noise", "model_family"),
     "boost": ("architecture", "train_steps", "input_noise", "model_family"),
-    # SPEC.md 25.2: knn only exposes its k (architecture is ignored)
     "knn": ("knn_k", "model_family"),
-    # SPEC.md 25.3: convnet trains like mlp (shared neural loop)
-    "convnet": CATALOG_FIELDS,
+}
+FAMILY_FIELDS: dict[str, tuple[str, ...]] = {
+    fam: (CATALOG_FIELDS if fam in ("mlp", "convnet")
+          else tuple(f for f in _FAMILY_ORDER[fam]
+                     if fam in SPEC_FIELDS[f].families))
+    for fam in ("mlp", "tree", "boost", "knn", "convnet")
 }
 
 

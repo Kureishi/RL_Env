@@ -15,13 +15,16 @@ import numpy as np
 from .base import Task
 
 
-class CartPoleV1:
+class CartPoleV1(Task):
     name = "cartpole-v1"
     state_dim = 4
     n_outputs = 2        # two action logits (left/right)
     head = "softmax"
     max_steps = 500
     default_dataset_size = 60  # SPEC.md 20.3 (episodes; v1 legacy value)
+    # SPEC.md 36.1 (v0.22, G1): declared metric + capabilities
+    metric = "mean_steps"  # score() = mean episode survival steps
+    capabilities = frozenset({"interactive"})
 
     # --- physics constants (fixed in v1; exposed for v2 difficulty knobs) ---
     g = 9.8

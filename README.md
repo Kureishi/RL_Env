@@ -563,6 +563,53 @@ Fixed-dim `Box` observation, `Discrete` action space (the mutation catalog).
   in the SPEC is cited by ≥ 1 test, every `tests/test_*.py` cites an
   A#, and each index row's test file exists and cites that row's A#
   (SPEC.md 35.1–35.2, A25, M24.)
+- **Generalization (v0.22):** the last two convention-policed contracts
+  become nominal, registered interfaces — no behavior change (the
+  77-action catalog, the proposal order, and A1–A25 stay
+  byte-identical), version per 33.1 (v0.22 ⇒ `0.22.0`, both sources
+  together). **Task ABC (36.1):** `tasks.Task` is a nominal ABC (not the
+  former structural Protocol) with exactly two abstract methods
+  (`make_dataset`, `score`) and two explicit attributes — `metric`
+  (what the task reports: `accuracy`/`r2`/`mean_steps`/`success`,
+  declared instead of inferred from `n_outputs`/label dtype; instance-
+  set alongside `head` for the data tasks) and `capabilities`
+  (`interactive` cartpole/gridnav, `grid`+`media` image/audio) — every
+  registered task lists it as its base, and the app preview caption and
+  the `fit` gate line now read the declared `metric`; the §23 plugin
+  loader, `fit --task auto`, and new metrics (F1, log-loss) get a
+  frozen interface to target, with A26 pinning the contract (an AST
+  scan asserts no core code performs `isinstance(…, Task)`, so the
+  duck-typed test fakes keep working). **ModelSpec field registry
+  (36.2):** `improver/specspace.py` holds one
+  `SpecField(name, space, validator, families, spec_ref, kind)` row per
+  ModelSpec field in catalog order — the single table from which
+  `FIELD_CATALOG`/`CATALOG_FIELDS`, the 77-action `ACTIONS` catalog,
+  `FAMILY_FIELDS`, `FIELD_NAMES`, `ORDERED_FIELDS`, the `FIELD_SAMPLERS`
+  exhaustiveness check, and the app's spec chips all derive — a new
+  field is one registry row, and a surface (bandit, search enumerator,
+  RL/Gym catalog, dashboard) that misses it fails the A26 suite: the
+  model-space analogue of the C2 knob registry and the C4 kind registry
+  (SPEC.md 36.1–36.2, A26, M25.)
+- **Generalization (v0.23):** every run gets a canonical recipe and the
+  acceptance gate becomes a small objective set — no behavior change
+  under the defaults (with no `--gate` the gate line, PASS/MISS text,
+  and rc 0/2 are byte-identical to pre-v0.23, and A1–A26 stay green),
+  version per 33.1 (v0.23 ⇒ `0.23.0`, both sources together).
+  **RunConfig (37.1):** a frozen dataclass serialized to
+  `run_config.json` at `reset()` and mirrored as an additive
+  `summary.json` key — a copy-pasteable full recipe for any run; `fit
+  --from-run RUN_DIR` re-runs a finished data run exactly from that
+  config (built-in-task runs are pointed at `autorefine run`),
+  `report` prints a `reproduce (copy-paste):` line, and the rendered
+  recipe parses against the real CLI (`fit_recipe` emits
+  `--data`/`--seed`/knobs verbatim). **Objective gates (37.2):**
+  `fit --gate NAME OP THRESHOLD` (appendable) and `variance --gate`
+  accept an objective set over `score` (vs target), `train` (best
+  candidate's train seconds), and `model` (total `best_model.npz`
+  values) — all must pass for PASS; the default set is exactly today's
+  §22.1 score gate, and the dashboard's result panel shows both the
+  reproduce recipe and per-objective gate rows (SPEC.md 37.1–37.2,
+  A27, M26.)
 - **Input modalities (v0.10):** `autorefine fit --data DIR` now accepts a
   labelled directory — one subfolder per class (or an `index.csv`) of
   **images** (PNG/JPG/JPEG/BMP/GIF; grayscale 32×32 features; optional
@@ -601,7 +648,8 @@ Each run writes to `runs/<task>-seed<seed>-<timestamp>/`:
 | `experiments.jsonl` | every experiment: spec, mutation fields, scores, gen gap, acceptance |
 | `best_spec.json`    | final best `ModelSpec` |
 | `best_model.npz`    | NumPy weights (loadable with `allow_pickle=False`) |
-| `summary.json`      | baseline vs final score (raw + `*_effective`, v0.4), improvement factor, active search-quality preset, per-mutation win rates, Pareto frontier, (v0.6) `curriculum` ladder with `--curriculum` |
+| `summary.json`      | baseline vs final score (raw + `*_effective`, v0.4), improvement factor, active search-quality preset, per-mutation win rates, Pareto frontier, (v0.6) `curriculum` ladder with `--curriculum`, (v0.23) the additive `run_config` key |
+| `run_config.json`   | the canonical frozen `RunConfig` for the run — the single recipe `fit --from-run`, the `report` reproduce line, and the app's copy-paste recipe all read (v0.23) |
 
 ## Project layout
 

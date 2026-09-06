@@ -16,9 +16,11 @@ import numpy as np
 
 from .config import Budget
 from .diagnostics import holdout_diagnostics
+from .gate import actuals_from_run, default_objectives, evaluate
 from .improver.bandit import BanditPolicy
 from .improver.meta_env import AutoRefineEnv, search_quality_v04
 from .improver.policy import SearchPolicy
+from .runconfig import fit_recipe
 from .memory import KIND_BASELINE, KIND_CURRICULUM, KIND_EXPERIMENT  # 35.1 (C4)
 from .plotting import (
     html_report,
@@ -58,7 +60,8 @@ class DashboardRunner:
                  experiments: int = 30, max_seconds: float = 900.0,
                  max_train_seconds: float = 30.0, runs_dir: str = "runs",
                  search_quality: str = "v04", modality: str | None = None,
-                 stall_patience: int | None = None) -> None:
+                 stall_patience: int | None = None,
+                 objectives: tuple | None = None) -> None:
         if policy not in ("bandit", "search"):
             raise ValueError(f"unsupported policy {policy!r}: {_RL_HINT}")
         if search_quality not in ("v04", "legacy"):
@@ -81,6 +84,11 @@ class DashboardRunner:
         self.runs_dir = str(runs_dir)
         self.search_quality = search_quality
         self.stall_patience = stall_patience  # v0.17 (SPEC.md 31.1; None = off)
+        # v0.23 (SPEC.md 37.2): the acceptance objective set — the default is
+        # exactly today's single score gate (score >= target); a custom set
+        # (score/train/model) is the §37.2 objective set
+        self.objectives = (tuple(objectives) if objectives is not None
+                           else default_objectives(float(target)))
         self.env: AutoRefineEnv | None = None
         self.policy: SearchPolicy | BanditPolicy | None = None
         self._state: dict | None = None
@@ -148,6 +156,8 @@ class DashboardRunner:
             **({} if self.search_quality == "legacy" else search_quality_v04()),
             # v0.17 (SPEC.md 31.1): plateau early stop (None = off)
             stall_patience=self.stall_patience,
+            # v0.23 (SPEC.md 37.1.3): driver metadata for the canonical recipe
+            policy=self.policy_name, target=self.target, rl_episodes=None,
         )
         self.policy = (SearchPolicy(seed=self.seed) if self.policy_name == "search"
                        else BanditPolicy(seed=self.seed))
@@ -240,6 +250,7 @@ class DashboardRunner:
             max_train_seconds=self.max_train_seconds, runs_dir=self.runs_dir,
             search_quality=self.search_quality, modality=self.modality,
             stall_patience=self.stall_patience,  # v0.17 (SPEC.md 31.1)
+            objectives=self.objectives,  # v0.23 (SPEC.md 37.2)
         )
 
     def _clone(self, seed: int) -> "DashboardRunner":
@@ -327,6 +338,15 @@ deterministic run, so per-seed results are bit-identical to the serial
         return {
             "verdict": "PASS" if pass_ else "MISS",
             "target": self.target,
+            # v0.23 (SPEC.md 37.2): the objective-set gate — the default set
+            # is exactly the §22.1 score gate above (PASS/MISS unchanged); a
+            # custom set (score/train/model) is the §37.2 objective set.
+            # Evaluated after done, never touches the loop (37.2.4).
+            "gate": evaluate(self.objectives, actuals_from_run(self.env, entries)),
+            # v0.23 (SPEC.md 37.1.4): the copy-pasteable recipe (argv tokens)
+            # from the env's canonical RunConfig (None if the env never reset)
+            "recipe": (fit_recipe(self.env.run_config)
+                       if self.env.run_config is not None else None),
             "final_best_score": final,
             "baseline_score": float(self.env.baseline_score),
             "improvement_factor": summary.get("improvement_factor"),
@@ -431,14 +451,18 @@ def _drive_sweep_runner(runner: "DashboardRunner", on_update=None) -> dict:
     res = runner.finish()
     final = float(res["final_best_score"])
     target = float(res["target"])
+    # v0.23 (SPEC.md 37.2): the per-seed verdict carries the objective set —
+    # the default set is exactly the §22.1 score gate (final >= target), so
+    # the pre-v0.23 per-seed results (and the A19/A20 pins) are unchanged
+    gate_pass = bool(res["gate"]["pass"])
     return {
         "seed": runner.seed,
         "baseline": float(res["baseline_score"]),
         "final": final,
         "curve": curve,
         "target": target,
-        "pass": bool(final >= target),  # the §22.1 gate, exactly
-        "verdict": res["verdict"],
+        "pass": gate_pass,
+        "verdict": "PASS" if gate_pass else "MISS",
         "experiments_run": res["experiments_run"],
         "run_dir": str(res["run_dir"]),
     }

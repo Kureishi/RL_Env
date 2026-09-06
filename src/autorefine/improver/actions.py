@@ -27,15 +27,31 @@ from .catalog import (
     index_of_value_nearest,
     relevant_families,
 )
+from .specspace import SPEC_FIELDS
 
-# SPEC.md 18.1: ordered numeric fields that get a local (neighborhood) move
-# (v0.5, SPEC.md 19.4: the three ordered new fields join; lr_schedule stays
-# categorical — local == uniform resample there)
-ORDERED_FIELDS = (
-    "learning_rate", "batch_size", "weight_decay",
-    "train_steps", "input_noise", "label_smoothing",
+# SPEC.md 36.2 (v0.22, G2): membership derives from the registry — but
+# the ORDER is the v0.21 legacy order (the FIELD_SAMPLERS insertion
+# order, where `model_family` sits after `activation`, NOT at the
+# catalog's 2nd position). This order is behavioral: SearchPolicy draws
+# `rng.choice(SEARCH_FIELDS)` by index, so it IS the A1–A4 proposal
+# stream and must stay byte-identical. A new field registers in
+# SPEC_FIELDS and takes one slot here (its stream position); the A26
+# exhaustiveness check fails on a field in only one of the two.
+LEGACY_FIELD_ORDER = (
+    "architecture", "optimizer", "learning_rate", "batch_size",
+    "weight_decay", "train_steps", "input_noise", "activation",
+    "model_family", "label_smoothing", "lr_schedule",
     "early_stopping_patience", "init_scale", "gradient_clipping",
+    "knn_k",
 )
+FIELD_NAMES = tuple(f for f in LEGACY_FIELD_ORDER if f in SPEC_FIELDS)
+
+# SPEC.md 18.1: the `kind == "ordered"` registry rows get a local
+# (neighborhood) move (v0.5, SPEC.md 19.4: the three ordered new fields
+# join; categorical fields — local == uniform resample — are excluded).
+# SPEC.md 36.2: derived from the registry (byte-identical to the v0.21 list).
+ORDERED_FIELDS = tuple(f.name for f in SPEC_FIELDS.values()
+                       if f.kind == "ordered")
 
 
 def _sample_architecture(rng: np.random.Generator) -> tuple[int, ...]:
@@ -75,8 +91,6 @@ FIELD_SAMPLERS = {
     "knn_k": lambda rng, task=None: int(rng.choice(KNN_K_VALUES)),
 }
 
-FIELD_NAMES = tuple(FIELD_SAMPLERS)
-
 # SPEC.md 25.7 (full suite green; A1-A4 unchanged): the v1 search policy's
 # random-field space stays the v0.10 14 fields, so its seeded proposal
 # stream (and the A1-A4 acceptance runs) is bit-stable as the spec space
@@ -86,6 +100,14 @@ FIELD_NAMES = tuple(FIELD_SAMPLERS)
 # surface. `knn_k` remains in FIELD_NAMES/FIELD_SAMPLERS, so
 # mutate_spec_dict(spec, "knn_k", ...) works for every policy.
 SEARCH_FIELDS = tuple(f for f in FIELD_NAMES if f != "knn_k")
+
+# SPEC.md 36.2 (v0.22, G2): the sampler table must be exhaustive over the
+# registry — A26 checks `set(FIELD_SAMPLERS) == set(SPEC_FIELDS)` in both
+# directions, so a new field added to the registry with a missing sampler
+# (or a sampler for an unregistered field) fails the suite.
+assert set(FIELD_SAMPLERS) == set(SPEC_FIELDS), (
+    "FIELD_SAMPLERS and the specspace registry must cover the same fields "
+    "(SPEC.md 36.2; A26)")
 
 
 def _values_equal(field: str, a, b) -> bool:

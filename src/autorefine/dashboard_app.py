@@ -97,11 +97,13 @@ def _preview_data(csv_path: str, stamp: int, size: int) -> dict:
         probe = cls(seed=0, path=csv_path)
     except ValueError as exc:
         return {"error": f"data not usable as a task: {exc}"}
-    head_txt = (f"softmax ({probe.n_outputs} classes: "
-                f"{probe.class_values})" if probe.head == "softmax"
-                else "mse (regression)")
+    # SPEC.md 36.1.5 (v0.22, G1): the caption reads the task's declared
+    # `metric` instead of guessing from the head
+    metric_txt = (f"accuracy ({probe.n_outputs} classes: "
+                  f"{probe.class_values})" if probe.metric == "accuracy"
+                  else f"{probe.metric} (regression)")
     caption = (
-        f"label **{probe.label_name}** · head **{head_txt}** · "
+        f"label **{probe.label_name}** · metric **{metric_txt}** · "
         f"features {', '.join(probe.feature_names)} · "
         f"items {len(probe._x_tr)}/{len(probe._x_ho)}/{len(probe._x_ge)} "
         f"(train/holdout/gen)"
@@ -306,6 +308,32 @@ def _render_result(res: dict) -> None:
     m3.metric("experiments", res["experiments_run"])
     wall = res["wall_seconds"]
     m4.metric("wall time", f"{wall:.1f}s" if wall is not None else "—")
+
+    # v0.23 (SPEC.md 37): the canonical recipe + the objective-set gate rows.
+    # Both via .get() — the restored view (SPEC.md 23.2) must re-render a
+    # result either with or without them (older payloads lack both keys).
+    if res.get("recipe"):  # 37.1.4: copy-pasteable `fit` re-run
+        st.caption("Reproduce (copy-paste) — SPEC.md 37.1.4")
+        st.code(" ".join(res["recipe"]))
+    if res.get("gate"):  # 37.2: the per-objective acceptance rows
+        gate = res["gate"]
+        st.caption(
+            f"gate: {len(gate['objectives'])} objective(s) (SPEC.md 37.2)")
+        st.dataframe([{
+            "objective": r["name"],
+            "op": r["op"],
+            "threshold": r["threshold"],
+            "actual": ("n/a" if r["actual"] is None else round(r["actual"], 6)),
+            "result": "PASS" if r["pass"] else "MISS",
+        } for r in gate["objectives"]], width="stretch")
+
+    # SPEC.md 36.2 (v0.22, G2): the app's spec surface reads the field
+    # registry — one table for the field list, not a per-surface literal
+    from autorefine.improver.specspace import SPEC_FIELD_NAMES
+    st.caption(
+        f"spec space: {len(SPEC_FIELD_NAMES)} fields — "
+        f"{', '.join(SPEC_FIELD_NAMES)} (SPEC.md 36.2)"
+    )
 
     st.subheader("Plots")
     st.markdown(res["svg_score"], unsafe_allow_html=True)

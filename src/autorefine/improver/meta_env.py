@@ -14,6 +14,7 @@ default, so v0.3 behavior is exactly recoverable.
 """
 from __future__ import annotations
 
+import json
 import math
 import time
 from dataclasses import dataclass
@@ -32,6 +33,7 @@ from ..memory import (
     RunMemory,
 )
 from ..pareto import ParetoFrontier
+from ..runconfig import RunConfig  # SPEC.md 37.1 (v0.23, G3)
 from ..tasks import TASKS
 from ..trainer import train
 from .curriculum import ParityCurriculum  # SPEC.md 20.1 (type reference)
@@ -226,6 +228,12 @@ class AutoRefineEnv:
         stall_patience: int | None = None,
         # --- v0.18 two-stage screening (SPEC.md 32.2; 1.0 = off, pre-v0.18)
         screen_frac: float = 1.0,
+        # --- v0.23 driver metadata (SPEC.md 37.1.3; None = env-level) ----
+        # the env does not own these — the driver (cli fit / dashboard /
+        # variance) supplies them so the reset-time recipe is complete
+        policy: str | None = None,
+        target: float | None = None,
+        rl_episodes: int | None = None,
     ) -> None:
         if task not in TASKS:  # registry: SPEC.md 15 "more tasks"
             raise ValueError(f"unknown task {task!r} (available: {sorted(TASKS)})")
@@ -289,6 +297,12 @@ class AutoRefineEnv:
         self.screen_active = self.screen_frac < 1.0
         self._screen_champion: float | None = None  # set at reset (32.2)
         self._screen_baseline_score: float | None = None  # 33.3: reset champion
+        # SPEC.md 37.1.3 (v0.23, G3): driver metadata for the canonical
+        # recipe (None = env-level, not a driver choice)
+        self.policy = policy
+        self.target = target
+        self.rl_episodes = rl_episodes
+        self.run_config: RunConfig | None = None  # built at reset
         self._started = False
 
     # --- lifecycle ----------------------------------------------------------
@@ -319,6 +333,16 @@ class AutoRefineEnv:
             run_dir = self.runs_dir / f"{base}-{k}"
         self.memory = RunMemory(run_dir)
         self.run_dir = self.memory.run_dir
+
+        # SPEC.md 37.1.3 (v0.23, G3): the canonical recipe — built at
+        # reset (fixed before any experiment) and written so it exists
+        # from the first step, even for an interrupted run
+        self.run_config = RunConfig.from_env(
+            self, policy=self.policy, target=self.target,
+            rl_episodes=self.rl_episodes)
+        (self.run_dir / "run_config.json").write_text(
+            json.dumps(self.run_config.to_dict(), indent=2, sort_keys=True),
+            encoding="utf-8")
 
         # one shared train-split dataset (deterministic from the task seed;
         # SPEC.md 20.3: size from the explicit override or the task default)
@@ -761,6 +785,9 @@ class AutoRefineEnv:
         summary = {
             "task": self.task_name,
             "seed": self.seed,
+            # SPEC.md 37.1.3 (v0.23, G3): the canonical recipe — the same
+            # frozen object written at reset (additive key; 34.2 17 → 18)
+            "run_config": self.run_config.to_dict() if self.run_config else None,
             "finished_reason": reason,
             "baseline_score": self.baseline_score,
             "final_best_score": self.best_score,

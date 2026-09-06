@@ -13,6 +13,8 @@ import zlib
 
 import numpy as np
 
+from .base import Task
+
 # fixed target function: four sinusoids, up to 3 cycles over the unit domain
 # (the model sees the unit-scaled input u = x / SPAN, so activations stay in a
 # non-saturated regime — SPEC.md 15 task design). Moderate difficulty: a small
@@ -36,13 +38,16 @@ def target_function(u: np.ndarray) -> np.ndarray:
     return y
 
 
-class SineRegressionV1:
+class SineRegressionV1(Task):
     name = "sine-v1"
     state_dim = 1
     n_outputs = 1
     head = "mse"
     max_steps = 1  # not an episode task; present for protocol completeness
     default_dataset_size = 2048  # SPEC.md 20.3 (points)
+    # SPEC.md 36.1 (v0.22, G1): declared metric + capabilities
+    metric = "r2"  # score() = 100 * R^2 (clamped at 0)
+    capabilities = frozenset()
 
     def __init__(self, seed: int) -> None:
         self.seed = int(seed)

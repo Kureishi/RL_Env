@@ -17,6 +17,7 @@ from .catalog import (
     relevant_fields,
 )
 from .rl_policy import MetaRLPolicy, train_policy
+from .specspace import SPEC_FIELDS, SPEC_FIELD_NAMES, SpecField
 
 __all__ = [
     "AutoRefineEnv",
@@ -37,4 +38,7 @@ __all__ = [
     "search_quality_v04",
     "candidate_screening",
     "KNOBS",
+    "SPEC_FIELDS",
+    "SPEC_FIELD_NAMES",
+    "SpecField",
 ]

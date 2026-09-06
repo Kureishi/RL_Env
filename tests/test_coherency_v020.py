@@ -251,8 +251,8 @@ def _drive_to_done(env: AutoRefineEnv) -> None:
         state, _r, _d, _i = env.step(policy.propose(state))
 
 
-# SPEC.md 34.2: the summary key contract — the always-present 17 keys and
-# the 4 conditional ones.
+# SPEC.md 34.2: the summary key contract — the always-present 18 keys (v0.23
+# added `run_config`, SPEC.md 37.1.2) and the 4 conditional ones.
 LEGACY_KEYS = {
     "task", "seed", "finished_reason",
     "baseline_score", "final_best_score", "improvement_factor",
@@ -260,14 +260,16 @@ LEGACY_KEYS = {
     "search_quality", "experiments_run", "wall_seconds",
     "best_spec", "mutation_win_rate",
     "pareto_frontier", "best_score_at_1s", "efficiency_at_1s",
+    "run_config",  # v0.23 (SPEC.md 37.1.2): the canonical recipe artifact
 }
 FULL_EXTRA_KEYS = {"task_config", "curriculum", "screening", "ensemble"}
 
 
 def test_summary_contract_legacy_run(tmp_path, monkeypatch):
     """A24 (SPEC.md 34.2): the legacy run (no optional flags) writes
-    exactly the 17 always-present keys — no conditionals leak in, nothing
-    is missing; the internal dicts pin their exact key sets."""
+    exactly the 18 always-present keys (v0.23, SPEC.md 37.1.2) — no
+    conditionals leak in, nothing is missing; the internal dicts pin their
+    exact key sets."""
     _install_flat_train(monkeypatch, FLAT_SCORE)
     TASKS[FAKE_TASK] = _FakeTask
     try:
@@ -291,7 +293,7 @@ def test_summary_contract_legacy_run(tmp_path, monkeypatch):
 
 def test_summary_contract_full_flag_run(tmp_path, monkeypatch):
     """A24 (SPEC.md 34.2): the full-flag run (task_config + curriculum +
-    screening + ensemble) writes exactly those 17 keys plus the 4
+    screening + ensemble) writes exactly those 18 keys (v0.23) plus the 4
     conditional ones, each with its exact internal key set."""
     _install_flat_train(monkeypatch, FLAT_SCORE)
     TASKS[FAKE_TASK] = _FakeTask

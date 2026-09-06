@@ -14,6 +14,8 @@ import zlib
 
 import numpy as np
 
+from .base import Task
+
 WIDTH = 6
 HEIGHT = 6
 N_CELLS = WIDTH * HEIGHT
@@ -21,13 +23,16 @@ GOAL = WIDTH * (HEIGHT - 1) + (WIDTH - 1)  # bottom-right corner cell
 ACTIONS = (0, 1, 2, 3)  # up, down, left, right
 
 
-class GridNavV1:
+class GridNavV1(Task):
     name = "gridnav-v1"
     state_dim = N_CELLS
     n_outputs = 4
     head = "softmax"
     max_steps = 20  # shortest torus path is <= 6 steps; 20x margin
     default_dataset_size = 60  # SPEC.md 20.3 (episodes; v1 legacy value)
+    # SPEC.md 36.1 (v0.22, G1): declared metric + capabilities
+    metric = "success"  # score() = 100*success_rate + 25*(1 - steps/max)
+    capabilities = frozenset({"interactive"})
 
     def __init__(self, seed: int) -> None:
         self.seed = int(seed)
