@@ -26,7 +26,14 @@ from .improver.bandit import BanditPolicy
 from .improver.curriculum import ParityCurriculum
 from .improver.policy import SearchPolicy
 from .improver.rl_policy import MetaRLPolicy, train_policy
+from .accounting import account_run  # 39.2 (T4): decision accounting
 from .memory import KIND_BASELINE, KIND_EXPERIMENT, RunMemory
+from .watch import (  # 39.1 (T3): watch mode / live progress
+    live_frame,
+    read_new_entries,
+    run_finished,
+    tail_line,
+)
 from .plotting import (
     ascii_pareto,
     ascii_score_curve,
@@ -309,6 +316,8 @@ def _fit_from_run(args: argparse.Namespace) -> tuple:
         stall_patience=config.stall_patience,  # v0.17 (SPEC.md 31.1)
         screen_frac=config.screen_frac,  # v0.18 (SPEC.md 32.2)
         policy=config.policy, target=bar, rl_episodes=config.rl_episodes,
+        # SPEC.md 38.2 (v0.24, T2): lineage — this run re-executes that one
+        parent_run=run_dir.name,
     )
     return env, bar
 
@@ -493,7 +502,64 @@ def _cmd_policy_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_report_history(args: argparse.Namespace) -> int:
+    """SPEC.md 38.3 (v0.24, T1): `report --history` — the run registry as a
+    table (or pure JSON with `--json`). No registry / empty → rc 1 + hint
+    (38.3.3)."""
+    from .registry import format_table, load_registry
+    runs_dir = Path(args.runs_dir)
+    entries = load_registry(runs_dir)
+    if not entries:
+        print(f"no runs registered in {runs_dir} — finish at least one run "
+              f"first (SPEC.md 38.3.3)", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(entries, indent=2))
+        return 0
+    print(format_table(entries))
+    print(f"\nregistry : {runs_dir / 'registry.json'} ({len(entries)} run(s))")
+    return 0
+
+
+def _print_accounting(acc: dict) -> None:
+    """SPEC.md 39.2 (T4): render the \"what happened\" block in the human
+    report (pure — a function of the `account_run` result, 39.2.3)."""
+    rej = acc["rejections"]
+    tti = acc["time_to_first_improvement"]
+    wt = acc["wall_time"]
+    total = rej["accepted"] + rej["rejected"]
+    print("\n=== what happened ===")
+    print(f"  candidates      : {total} total   accepted {rej['accepted']}   "
+          f"rejected {rej['rejected']}")
+    print(f"  rejected by gate: score {rej['score']}   overfit {rej['overfit']}   "
+          f"ci {rej['ci']}")
+    print(f"  duplicates      : {rej['duplicate']}   ({rej['note']})")
+    if tti["improved"]:
+        secs = tti["seconds"]
+        secs_s = (f"{secs:+.1f}s after baseline" if secs is not None
+                  else "(no timestamps in log)")
+        print(f"  first improvement: candidate #{tti['experiment_index']}   "
+              f"({secs_s})")
+    else:
+        print("  first improvement: none (never beat the baseline)")
+    print(f"  wall time (s)   : baseline {wt['baseline']:.3f}   "
+          f"candidates {wt['candidates']:.3f}   "
+          f"eval+overhead {wt['eval_overhead']:.3f}   (total {wt['total']:.3f})")
+
+
 def _cmd_report(args: argparse.Namespace) -> int:
+    # SPEC.md 38.3.1: --history and --run are mutually exclusive; one is
+    # required (the pre-v0.24 `report --run` path below is unchanged)
+    if args.history:
+        if args.run is not None:
+            print("--run and --history are mutually exclusive (SPEC.md 38.3.1)",
+                  file=sys.stderr)
+            return 1
+        return _cmd_report_history(args)
+    if args.run is None:
+        print("one of --run or --history is required (SPEC.md 38.3.1)",
+              file=sys.stderr)
+        return 1
     mem = RunMemory(Path(args.run))
     try:
         summary = mem.load_summary()
@@ -551,6 +617,9 @@ def _cmd_report(args: argparse.Namespace) -> int:
     for k in ("task", "seed", "finished_reason", "baseline_score",
               "final_best_score", "improvement_factor", "experiments_run", "wall_seconds"):
         print(f"{k:20s}: {summary.get(k)}")
+    # SPEC.md 39.2 (T4): the "what happened" block — additive human output only
+    # (--json / --plot / the summary file / the registry are byte-identical)
+    _print_accounting(account_run(summary, entries))
     # SPEC.md 37.1.4: when the run carries the canonical recipe, render the
     # copy-pasteable command (fit for data tasks, run for built-in tasks)
     rc_cfg = summary.get("run_config")
@@ -587,6 +656,58 @@ def _cmd_report(args: argparse.Namespace) -> int:
     if args.html:  # SPEC.md 22.2: point at the generated file
         print(f"html    : {run_dir / 'report.html'}")
     return 0
+
+
+def _cmd_watch(args: argparse.Namespace) -> int:
+    """SPEC.md 39.1 (T3): tail a run's `experiments.jsonl` and re-render the
+    ASCII charts (human mode) or emit compact JSON lines (`--tail`, for CI).
+
+    rc 0 when the run finishes; rc 130 on Ctrl-C; rc 1 when `--max-polls`
+    is exhausted before the run finishes (a bounded wait, 39.1.4). The pure
+    helpers live in `autorefine.watch`; this is only the thin poll loop.
+    """
+    import time
+    run_dir = Path(args.run)
+    exp_path = run_dir / "experiments.jsonl"
+    entries: list[dict] = []
+    offset = 0
+    max_polls = (args.max_polls
+                 if (args.max_polls is not None and args.max_polls > 0) else None)
+    polls = 0
+    try:
+        while True:
+            polls += 1
+            if not run_dir.is_dir():
+                # the run dir hasn't appeared yet (run starts elsewhere)
+                if max_polls is not None and polls >= max_polls:
+                    print(f"run dir not found (bounded wait): {run_dir}",
+                          file=sys.stderr)
+                    return 1
+                time.sleep(args.interval)
+                continue
+            new_entries, offset = read_new_entries(exp_path, offset)
+            entries.extend(new_entries)
+            if args.tail:  # 39.1.3 machine mode: one compact line per new row
+                base = len(entries) - len(new_entries)
+                for j, e in enumerate(new_entries):
+                    print(tail_line(e, base + j), flush=True)
+            finished = run_finished(run_dir)
+            if not args.tail and (new_entries or finished):  # 39.1.3 human mode
+                if args.clear:  # 39.1.1 live refresh (off by default)
+                    print("\x1b[2J\x1b[H", end="")
+                print(live_frame(entries), flush=True)
+            if finished:
+                if not args.tail:
+                    print("\n(run finished)", flush=True)
+                return 0
+            if max_polls is not None and polls >= max_polls:
+                print("watch: still running after "
+                      f"{max_polls} polls (use --max-polls 0 to wait "
+                      "indefinitely)", file=sys.stderr)
+                return 1
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        return 130
 
 
 def _dashboard_command(runs_dir: str, port: int) -> list[str]:
@@ -821,7 +942,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.set_defaults(func=_cmd_run)
 
     p_rep = sub.add_parser("report", help="print a run's summary and experiment log")
-    p_rep.add_argument("--run", required=True, help="path to a run directory")
+    p_rep.add_argument("--run", default=None,
+                       help="path to a run directory")
+    # SPEC.md 38.3 (v0.24, T1): the run registry across finished runs
+    p_rep.add_argument("--history", action="store_true",
+                       help="v0.24 (SPEC.md 38.3): print the run registry "
+                            "(one row per finished run) instead of a single "
+                            "run's report; mutually exclusive with --run")
+    p_rep.add_argument("--runs-dir", default="runs",
+                       help="with --history: which runs dir's registry to read "
+                            "(default runs)")
     p_rep.add_argument("--json", action="store_true",
                        help="v0.7 (SPEC.md 21.2): print summary.json to stdout "
                             "(machine-readable; with --plot the SVGs are still written)")
@@ -832,6 +962,24 @@ def build_parser() -> argparse.ArgumentParser:
                        help="v0.8 (SPEC.md 22.2): write a self-contained "
                             "report.html (embedded SVGs + tables) into the run dir")
     p_rep.set_defaults(func=_cmd_report)
+
+    p_watch = sub.add_parser(
+        "watch", help="v0.25 (SPEC.md 39.1): tail a run's experiments.jsonl "
+                      "live (re-render ASCII charts, or --tail JSON lines for CI)")
+    p_watch.add_argument("--run", required=True,
+                         help="path to a run directory (may not exist yet)")
+    p_watch.add_argument("--tail", action="store_true",
+                         help="machine mode: emit one compact JSON line per "
+                              "newly-logged row (for CI / external tools)")
+    p_watch.add_argument("--interval", type=float, default=0.5,
+                         help="poll period in seconds (default 0.5)")
+    p_watch.add_argument("--max-polls", type=int, default=0,
+                         help="safety cap on poll iterations (0 = unlimited; "
+                              "a small N bounds a stuck wait and returns rc 1)")
+    p_watch.add_argument("--clear", action="store_true",
+                         help="human mode: ANSI clear-and-home before each "
+                              "frame (live refresh); off by default")
+    p_watch.set_defaults(func=_cmd_watch)
 
     p_fit = sub.add_parser(
         "fit", help="v0.8 (SPEC.md 22.1) / v0.10 (24.5): fit a model on your data "

@@ -8,6 +8,7 @@ Run:  streamlit run src/autorefine/dashboard_app.py
 from __future__ import annotations
 
 import csv as _csv
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -29,6 +30,88 @@ from autorefine.plotting import (
     svg_task_returns,  # noqa: F401 (D2 view, SPEC.md 29.2)
 )
 from autorefine.tasks import CsvTask
+
+
+def diff_two_summaries(sa: dict, sb: dict) -> dict:
+    """SPEC.md 38.4 (v0.24, T1): the Past-runs compare widget, computed
+    without streamlit (testable without an app session): the final-score
+    delta, and the per-field `best_spec` diff (only differing fields;
+    a field present on one side only diffs against None)."""
+    score_a = sa.get("final_best_score")
+    score_b = sb.get("final_best_score")
+    spec_a = sa.get("best_spec") or {}
+    spec_b = sb.get("best_spec") or {}
+    diff = [
+        {"field": f, "a": spec_a.get(f), "b": spec_b.get(f)}
+        for f in sorted(set(spec_a) | set(spec_b))
+        if spec_a.get(f) != spec_b.get(f)
+    ]
+    delta = None
+    if isinstance(score_a, (int, float)) and isinstance(score_b, (int, float)) \
+            and not isinstance(score_a, bool) and not isinstance(score_b, bool):
+        delta = round(float(score_b) - float(score_a), 4)
+    return {
+        "score_a": score_a,
+        "score_b": score_b,
+        "score_delta": delta,
+        "spec_diff": diff,
+        "n_diff_fields": len(diff),
+    }
+
+
+def _render_past_runs(runs_dir: str) -> None:
+    """SPEC.md 38.4 (v0.24, T1): the Past-runs section — the registry as a
+    table (38.3 columns) plus a two-run compare (best_spec field diff +
+    score delta). Inert data rendering; an empty/missing registry shows
+    the empty-state caption (38.4.2)."""
+    from autorefine.registry import gate_label, load_registry
+    st.subheader("Past runs")
+    entries = load_registry(runs_dir)
+    if not entries:
+        st.caption(f"No finished runs yet in `{runs_dir}` — the registry is "
+                   f"appended when a run finishes (SPEC.md 38.1).")
+        return
+    rows = [
+        {"run_id": e.get("run_id"), "task": e.get("task"), "seed": e.get("seed"),
+         "policy": e.get("policy") or "—", "score": e.get("final_score"),
+         "target": e.get("target") if e.get("target") is not None else "—",
+         "gate": gate_label(e.get("met_target")),
+         "wall_s": e.get("wall_seconds"), "exps": e.get("experiments_run"),
+         "parent": e.get("parent_run") or "—"}
+        for e in entries
+    ]
+    st.dataframe(rows, width="stretch")
+    with st.expander("Compare two runs (best_spec diff)"):
+        if len(entries) < 2:
+            st.caption("Finish at least two runs to compare them here.")
+            return
+        ids = [str(e.get("run_id")) for e in entries]
+        c1, c2 = st.columns(2)
+        run_a = c1.selectbox("Run A", ids, key="past_run_a")
+        run_b = c2.selectbox("Run B", ids,
+                             index=1 if len(ids) > 1 else 0, key="past_run_b")
+
+        def _summary_of(run_id: str) -> dict | None:
+            p = Path(runs_dir) / run_id / "summary.json"
+            if not p.is_file():
+                return None
+            return json.loads(p.read_text(encoding="utf-8"))
+
+        sa, sb = _summary_of(run_a), _summary_of(run_b)
+        if sa is None or sb is None:
+            st.warning("One or both run dirs have no summary.json — nothing "
+                       "to diff.")
+            return
+        d = diff_two_summaries(sa, sb)
+        if d["score_delta"] is not None:
+            st.write(f"score A **{d['score_a']:.2f}** vs B **{d['score_b']:.2f}** "
+                     f"(Δ {d['score_delta']:+.2f})")
+        if d["spec_diff"]:
+            st.dataframe(d["spec_diff"], width="stretch")
+        else:
+            st.caption("`best_spec` is identical — the runs differ only in "
+                       "non-spec settings (compare the recipes: each run's "
+                       "`run_config.json`).")
 
 
 def _launcher_runs_dir() -> str:
@@ -610,6 +693,10 @@ def main() -> None:
     _render_optin_views(path, label, float(target), policy, int(seed),
                         int(experiments), float(max_train),
                         runs_dir.strip() or "runs", quality)
+
+    # SPEC.md 38.4 (v0.24, T1): the Past-runs view — registry table +
+    # two-run compare (inert rendering below the result views)
+    _render_past_runs(runs_dir.strip() or "runs")
 
 
 main()

@@ -44,6 +44,8 @@ numbers and carry none.)
 | M24 | v0.21   | 35     | A25 | tests/test_coherency_v021.py |
 | M25 | v0.22   | 36     | A26 | tests/test_generalization_v022.py |
 | M26 | v0.23   | 37     | A27 | tests/test_generalization_v023.py |
+| M27 | v0.24   | 38     | A28 | tests/test_tracking_v024.py |
+| M28 | v0.25   | 39     | A29 | tests/test_tracking_v025.py |
 
 ---
 
@@ -3061,3 +3063,281 @@ PASS/MISS.
 
 **M26** — v0.23 generalization: the canonical RunConfig artifact
 (37.1), objective-set acceptance (37.2) (A27).
+
+---
+
+## 38. Tracking: the run registry & lineage (v0.24)
+
+37 (v0.23) made one run's recipe canonical. v0.24 makes **runs over
+time** first-class data: today a run is an isolated timestamped
+directory and "which of my five attempts was best?" / "how did my
+recipe change as I iterated?" are unanswerable without archaeology.
+v0.24 adds a **run registry** (38.1, T1) and **lineage** (38.2, T2),
+plus the surfaces to read them: `report --history` (38.3) and the
+app's Past-runs view (38.4). Same house rules: **no behavior change
+under the defaults** — the existing `report --run` path, the A24
+summary key set (18 legacy / 18+4 conditional), the A12/A13 pins,
+and A1–A27 all stay green; the new surfaces are an additive file
+(`registry.json`), an additive conditional `summary.json` key
+(`parent_run`, present only for re-runs), two new `report` flags,
+and one new app section. The version steps per 33.1
+(v0.24 ⇒ `0.24.0`, both sources together).
+
+### 38.1 The run registry (T1)
+
+**File & ownership (38.1.1).** `<runs-dir>/registry.json` — a JSON
+array of entry objects, one per **finished** run, appended by
+`AutoRefineEnv._write_artifacts` at finish (after `summary.json` is
+saved). Every entry point that finishes a run appends exactly one
+entry: `run`, `fit` (both modes), `variance` (per seed), the
+dashboard, and programmatic `step`-to-done drivers.
+
+**Entry contract (38.1.2).** Every entry carries exactly these 13
+keys:
+
+| key              | type       | meaning |
+|------------------|------------|---------|
+| `run_id`         | str        | the run directory's name (`<task>-seed<s>-<stamp>[-k]`) |
+| `task`           | str        | `task_name` (may be a curriculum level's task) |
+| `seed`           | int        | the env seed |
+| `policy`         | str\|null  | driver policy (`bandit`/`search`/`rl`), null at env level |
+| `final_score`    | float      | `best_score` at finish |
+| `target`         | float\|null| driver target (null at env level) |
+| `met_target`     | bool\|null | `target` is null → null; else `final_score >= target` (the §22.1 gate) |
+| `finished_reason`| str        | the `done_reason` (`budget_exhausted`, `stalled`, …) |
+| `experiments_run`| int        | `bm.used_experiments` |
+| `wall_seconds`   | float      | the *same value* as `summary.wall_seconds` (computed once in `_write_artifacts` and shared — the wall clock keeps advancing between two computations, so computing it twice could round differently) |
+| `config_fp`      | str        | 12-hex-char fingerprint of the `run_config` dict (38.1.3) |
+| `parent_run`     | str\|null  | 38.2 lineage (null for a fresh run) |
+| `timestamp`      | str        | ISO-8601 UTC, second precision, at finish |
+
+**Fingerprint (38.1.3).** `registry.config_fingerprint(d)` is the
+first 12 hex chars of the SHA-256 of `json.dumps(d, sort_keys=True)`
+over the run's `run_config` dict (37.1). Same config → same fp;
+different config (any field) → different fp. The fingerprint is a
+coarse identity for humans/tables ("same recipe?"), not a content
+address.
+
+**Recovery (38.1.4).** A missing registry is `[]` (first run creates
+it). A **corrupt** one (invalid JSON or not a list) is moved aside
+to `registry.json.corrupt-<YYYYmmdd-HHMMSS>` and a fresh array
+started — finish must never crash because of registry state, and the
+old bytes are preserved for inspection.
+
+### 38.2 Lineage (T2)
+
+A run re-executed from a previous run's recipe records its parent
+(38.2.1):
+- `AutoRefineEnv` gains a `parent_run: str | None = None` kwarg
+  (default null = a fresh run; the kwarg is additive — A1–A27
+  construction sites unchanged).
+- When set, `summary.json` carries the additive conditional key
+  `parent_run` (the parent run's directory name) — **absent** when
+  unset, so the A24 key sets (18 legacy / 18+4 conditional) are
+  untouched. The registry entry's `parent_run` field is always
+  present (null for fresh runs).
+- `fit --from-run RUN_DIR` passes `parent_run=RUN_DIR`'s name, so
+  the iteration chain (`r1 → r2 → r3`, score and recipe at each
+  step) is recoverable from `registry.json` + the per-run
+  `summary.json`.
+- The `run` (built-in) and dashboard fresh-run paths pass nothing —
+  fresh runs.
+
+### 38.3 `report --history`
+
+`autorefine report --history [--runs-dir DIR] [--json]`
+(38.3.1) renders the registry as a table — one row per finished
+run, columns `run_id`, `task`, `seed`, `policy`, `score`, `target`,
+`gate` (`PASS`/`MISS`/`—` from `met_target`), `wall_s`, `exps`,
+`parent` — newest last (append order).
+
+- `--runs-dir` (default `runs`) selects which registry to read; the
+  registry lives next to the run dirs, not inside them.
+- `--json` prints the registry array as pure machine-readable JSON
+  (38.3.2); `--history --json` and `--run` are mutually exclusive.
+- Neither `--run` nor `--history` → rc 1, "one of --run or
+  --history is required"; both → rc 1 (mutually exclusive).
+- No registry file (or an empty one) → rc 1 with a stderr hint that
+  at least one run must finish first (38.3.3).
+- The existing `report --run` path is **byte-identical** (A23/A27
+  pins stay green).
+
+### 38.4 The app's Past-runs view
+
+The dashboard always renders a **Past runs** section below the
+result views (38.4.1): the registry as a dataframe (same columns as
+38.3), and a **compare** widget — two run pickers whose
+`best_spec` fields are diffed (field, value A, value B) alongside
+the final-score and gate deltas. The diff is computed by a
+streamlit-free helper `dashboard_app.diff_two_summaries(sa, sb)`
+(returning the score delta, the gate row, and the per-field spec
+diff), testable without an app session. With an empty or missing
+registry the section shows an empty-state caption (38.4.2) — the
+section itself is inert data rendering; it never triggers a run.
+
+### 38.5 Acceptance (A28)
+
+- **Registry (38.1)** — a finished run appends exactly one entry
+  with the 13-key contract; `final_score`/`task`/`seed`/
+  `wall_seconds` agree with `summary.json`; `config_fp` equals
+  `config_fingerprint(run_config.to_dict())` and is 12 hex chars;
+  two runs append in order; a corrupt registry is moved aside
+  (`.corrupt-*` preserved) and the new entry still lands (38.1.4).
+- **Fingerprint (38.1.3)** — deterministic; identical configs →
+  identical fp; a changed field → different fp.
+- **Lineage (38.2)** — `parent_run` kwarg lands in the conditional
+  `summary.json` key and the registry entry; unset → the key is
+  **absent** from the summary (A24 sets unchanged) and the entry
+  field is null; `fit --from-run` sets it to the source run's dir
+  name.
+- **CLI (38.3)** — `report --history` prints the table (run id,
+  task, gate) rc 0; `--json` is parseable and equals the file;
+  no registry → rc 1 + hint; neither flag → rc 1; both flags → rc 1.
+- **App (38.4)** — `diff_two_summaries` returns the score delta,
+  gate row, and per-field spec diff; the Past-runs section renders
+  (empty state and populated).
+- **Regression** — full suite green (A1–A27, including the A24
+  summary key sets, the A12 `fit` pins, the A13 dashboard verdict
+  pins, and the A25 index table advanced with the new row);
+  version stepped to `0.24.0` in both sources (33.1) with the round
+  assertions advanced (v0.24 ⇒ `0.24.0`).
+
+### 38.6 Milestone
+
+**M27** — v0.24 tracking: the run registry (38.1), lineage (38.2),
+`report --history` (38.3), the app's Past-runs view (38.4) (A28).
+
+---
+
+## 39. Tracking II: live progress & decision accounting (v0.25)
+
+38 (v0.24) made finished runs comparable data. v0.25 makes the **in-flight
+run** and the **decisions inside it** legible: today the loop is silent
+(a one-line progress per experiment) and every view opens only *finished*
+runs, so "is it stuck? what is it doing right now? why did it reject 27
+candidates?" need archaeology. v0.25 adds a **live watch mode** (39.1, T3)
+that tails `experiments.jsonl` and re-renders the ASCII charts — for a human
+or as JSON-lines for CI — and **decision accounting** in `report` (39.2, T4):
+a "what happened" block of the rejection breakdown (score-gate / CI / overfit
+/ dup), time-to-first-improvement, and where the wall time went.
+
+Same house rules: **no behavior change under the defaults** — no run's scores,
+acceptance, summary key sets, registry entries, or artifacts change; the
+A1–A28 pins stay green. New surfaces are additive only: one new subcommand
+(`watch`), two new leaf modules (`watch.py`, `accounting.py`), and one
+additive block in `report`'s human output. `report --json`, `report --plot`,
+the summary file, and the registry are byte-identical. The version steps per
+33.1 (v0.25 ⇒ `0.25.0`, both sources together).
+
+### 39.1 Watch mode / live progress (T3)
+
+**Command (39.1.1).** `autorefine watch --run RUN_DIR [--tail] [--interval S]
+[--max-polls N] [--clear]`:
+- `--run RUN_DIR` (required): the run directory to follow. It may not exist
+  yet — `watch` polls until it appears (the run starts in a sibling terminal
+  or a later CI step).
+- `--tail` (39.1.3): machine mode — emit one compact JSON line per
+  newly-logged experiment row (for CI / external tools) instead of re-rendering
+  charts.
+- `--interval S`: the poll period in seconds (default `0.5`).
+- `--max-polls N`: safety cap on poll iterations (default `0` = unlimited,
+  run until the run finishes); a small N bounds a stuck wait and returns
+  rc 1 (the escape hatch the tests use).
+- `--clear`: in human mode, emit an ANSI clear-and-home before each frame
+  (live refresh); off by default so captured output stays deterministic.
+
+**Pure helpers (39.1.2).** `autorefine.watch` (stdlib only; a leaf that depends
+only on `plotting` for the chart frames):
+- `read_new_entries(path, offset) -> (entries, new_offset)`: tail
+  `experiments.jsonl` from a byte offset; only complete (`\n`-terminated) lines
+  are parsed — a partial trailing line is left for the next poll — and a
+  missing file returns `([], 0)`.
+- `run_finished(run_dir) -> bool`: `summary.json` exists (written at
+  `_finish`, i.e., the run's terminal state).
+- `live_frame(entries, pareto_points) -> str`: the human frame — a live header
+  (task, experiments run so far, best score so far) plus the existing
+  `ascii_score_curve` + `ascii_pareto` (SPEC 21.2).
+- `tail_line(entry, index) -> str`: one compact machine line (a projection:
+  index, kind, accepted, holdout score, gen_gap, train_seconds).
+
+**Modes (39.1.3).** Human mode (default): each poll that logs new rows
+re-renders `live_frame` (optionally `--clear`ed). `--tail` mode: each
+newly-logged row prints exactly one `tail_line`. Both stop on
+`run_finished(run_dir)` (39.1.4).
+
+**Exit codes (39.1.4).** rc 0 when the run finishes (a final frame / flush is
+emitted first); rc 130 on Ctrl-C; rc 1 when `--max-polls` is exhausted before
+the run finishes (a bounded wait, so a mis-pointed path fails fast instead of
+hanging).
+
+### 39.2 Decision accounting in report (T4)
+
+**The block (39.2.1).** `autorefine report --run RUN_DIR` gains a "what
+happened" block — always in the human report; `--json`, `--plot`, the summary
+file, and the registry are unchanged:
+- **Rejections** — of the scored candidates (`kind ∈ {baseline, experiment}`),
+  how many were accepted vs rejected, and the rejected ones bucketed by the
+  gate that fired (39.2.2). Free-duplicate rejections (R3) are unspent and
+  never logged, so the block states that explicitly (count = 0 by construction).
+- **Time-to-first-improvement** — the index of the first accepted experiment
+  and the wall seconds from the baseline's `ts` to that row's `ts` (or
+  "never improved").
+- **Wall-time breakdown** — `baseline` (the baseline row's `train_seconds`),
+  `candidates` (the sum over `kind == experiment` rows), and
+  `eval + overhead` = `summary["wall_seconds"] − (baseline + candidates)`
+  (evaluation, CI bootstrap, policy, and bookkeeping — the honest residual).
+
+**Classification (39.2.2).** Pure reconstruction from the log (39.2.4 — no core
+change): scan the rows in order, carrying the running best (`holdout_score` /
+`effective_score` / `std`; a `kind == curriculum` step-up row re-pins it to
+`new_baseline_score` / `std`). Each rejected `kind == experiment` row is
+bucketed by the first failing gate, in this documented priority:
+1. **score** — `holdout_score <= best_score` (didn't beat the running best on
+   raw holdout score — the primary gate);
+2. **overfit** — else if `gen_gap > 0.05 · holdout_score` (the §18.5 gen-gap
+   penalty was active — overfit);
+3. **ci** — else (beat the raw best with no overfit, but the §18.6 `z·SE`
+   margin / §18.4 efficiency gate rejected it).
+
+`0.05` is the §18.5 `GEN_GAP_TOL` (imported from `improver.meta_env`, the
+single source of truth). In legacy mode (`z_accept = 0`, penalties 0) every
+rejection is a **score** rejection and the other two buckets are 0 — exactly
+the v1 rule.
+
+**Contract (39.2.3).** `autorefine.accounting` (stdlib only; a leaf that
+depends on `memory` for the kind registry and `improver.meta_env` for
+`GEN_GAP_TOL`): `account_run(summary, entries) -> dict` — pure,
+deterministic, no side effects; returns the three sub-objects above. Only
+`cli._cmd_report` renders it; nothing else in the core reads it.
+
+**No core change (39.2.4).** The accounting is derived entirely from
+`experiments.jsonl` + `summary.json` — no new logged field, no change to
+acceptance, scoring, or the summary key sets. A run's artifacts are
+byte-identical; only `report`'s human output gains the block.
+
+### 39.3 Acceptance (A29)
+
+- **Watch (39.1)** — `read_new_entries` tails by byte offset (partial trailing
+  line deferred, missing file `([], 0)`, idempotent re-read); `run_finished`
+  keys off `summary.json`; `live_frame` / `tail_line` render deterministically
+  (valid, stable strings); `watch --run DIR` on a pre-finished run dir renders
+  the frame and exits 0 (bounded by `--max-polls`); `--tail` emits one line
+  per row; a missing run dir + exhausted `--max-polls` → rc 1.
+- **Accounting (39.2)** — `account_run` buckets a known log correctly
+  (score/overfit/ci by the documented priority; legacy ⇒ all-score), reports
+  time-to-first-improvement (index + `ts` delta; "never improved" when none),
+  and the wall-time breakdown (baseline + candidates + residual =
+  `summary["wall_seconds"]`); free-dup is reported as 0-by-construction;
+  `report --run DIR` shows the block and still passes
+  `test_report_default_output_unchanged` (A11), while `--json` stays pure and
+  equals `summary.json` (A11).
+- **Regression** — the A1–A28 pins stay green (no run behavior, summary key
+  set, registry, or artifact change); the A25 index table advances with the new
+  row (24 → 25 acceptance rows) and `defined == set(range(1, 30))`; version
+  stepped to `0.25.0` in both sources (33.1) with the round assertions advanced
+  (v0.25 ⇒ `0.25.0`).
+
+### 39.4 Milestone
+
+**M28** — v0.25 tracking II: watch mode / live progress (39.1), decision
+accounting in report (39.2) (A29).

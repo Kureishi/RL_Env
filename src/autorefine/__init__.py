@@ -48,8 +48,8 @@ from .tasks import (
 
 # SPEC.md 33.1 (C1): single version source — must equal pyproject.toml's
 # [project].version (enforced by the A23 test); one step per feature round
-# (v0.23 ⇒ 0.23.0, M26, SPEC.md 37)
-__version__ = "0.23.0"
+# (v0.25 ⇒ 0.25.0, M28, SPEC.md 39)
+__version__ = "0.25.0"
 
 __all__ = [
     "AutoRefineEnv",

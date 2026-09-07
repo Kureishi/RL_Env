@@ -234,6 +234,8 @@ class AutoRefineEnv:
         policy: str | None = None,
         target: float | None = None,
         rl_episodes: int | None = None,
+        # --- v0.24 lineage (SPEC.md 38.2; None = a fresh run) -----------------
+        parent_run: str | None = None,
     ) -> None:
         if task not in TASKS:  # registry: SPEC.md 15 "more tasks"
             raise ValueError(f"unknown task {task!r} (available: {sorted(TASKS)})")
@@ -303,6 +305,9 @@ class AutoRefineEnv:
         self.target = target
         self.rl_episodes = rl_episodes
         self.run_config: RunConfig | None = None  # built at reset
+        # SPEC.md 38.2 (v0.24, T2): the parent run's dir name for a re-run
+        # (`fit --from-run`); None = a fresh run
+        self.parent_run = parent_run
         self._started = False
 
     # --- lifecycle ----------------------------------------------------------
@@ -808,7 +813,11 @@ class AutoRefineEnv:
                 "block_size": self.block_size,
             },
             "experiments_run": self.bm.used_experiments,
-            "wall_seconds": round(self.bm.budget.max_wall_seconds - self.bm.wall_seconds_left, 3),
+            # computed once and shared with the 38.1 registry entry (the
+            # wall clock keeps advancing; two computations could round
+            # differently)
+            "wall_seconds": (_wall := round(self.bm.budget.max_wall_seconds
+                                            - self.bm.wall_seconds_left, 3)),
             "best_spec": self.best_spec.to_dict(),
             "mutation_win_rate": win_rate,
         }
@@ -843,7 +852,17 @@ class AutoRefineEnv:
                 "member_scores": [float(s) for s, _m in self._top],
                 "ensemble_score": ens_score,
             }
+        # SPEC.md 38.2 (v0.24, T2): lineage — additive *conditional* key,
+        # absent for a fresh run (the A24 key sets stay untouched)
+        if self.parent_run is not None:
+            summary["parent_run"] = self.parent_run
         self.memory.save_summary(summary)
+        # SPEC.md 38.1 (v0.24, T1): the run registry — one appended entry
+        # per finished run (recovery-safe, 38.1.4); the same wall seconds
+        # as the summary above
+        from ..registry import append_entry, entry_from_env
+        append_entry(self.runs_dir,
+                     entry_from_env(self, reason, wall_seconds=_wall))
 
     # --- state ---------------------------------------------------------------
     def _state(self) -> dict:

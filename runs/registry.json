@@ -1,0 +1,62 @@
+[
+  {
+    "run_id": "csv-seed7-20260907-110942",
+    "task": "csv",
+    "seed": 7,
+    "policy": "bandit",
+    "final_score": 50.0,
+    "target": 95.0,
+    "met_target": false,
+    "finished_reason": "budget_exhausted",
+    "experiments_run": 2,
+    "wall_seconds": 0.109,
+    "config_fp": "657cb137cb6b",
+    "parent_run": null,
+    "timestamp": "2026-09-07T15:09:43Z"
+  },
+  {
+    "run_id": "csv-seed8-20260907-110943",
+    "task": "csv",
+    "seed": 8,
+    "policy": "bandit",
+    "final_score": 33.33333333333333,
+    "target": 95.0,
+    "met_target": false,
+    "finished_reason": "budget_exhausted",
+    "experiments_run": 2,
+    "wall_seconds": 0.063,
+    "config_fp": "3f53ca366f3b",
+    "parent_run": null,
+    "timestamp": "2026-09-07T15:09:43Z"
+  },
+  {
+    "run_id": "csv-seed7-20260907-113257",
+    "task": "csv",
+    "seed": 7,
+    "policy": "bandit",
+    "final_score": 50.0,
+    "target": 95.0,
+    "met_target": false,
+    "finished_reason": "budget_exhausted",
+    "experiments_run": 2,
+    "wall_seconds": 0.112,
+    "config_fp": "2df5dbb9b4ae",
+    "parent_run": null,
+    "timestamp": "2026-09-07T15:32:57Z"
+  },
+  {
+    "run_id": "csv-seed8-20260907-113257",
+    "task": "csv",
+    "seed": 8,
+    "policy": "bandit",
+    "final_score": 33.33333333333333,
+    "target": 95.0,
+    "met_target": false,
+    "finished_reason": "budget_exhausted",
+    "experiments_run": 2,
+    "wall_seconds": 0.065,
+    "config_fp": "f8e274a6da4c",
+    "parent_run": null,
+    "timestamp": "2026-09-07T15:32:57Z"
+  }
+]

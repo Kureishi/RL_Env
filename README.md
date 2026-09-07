@@ -610,6 +610,47 @@ Fixed-dim `Box` observation, `Discrete` action space (the mutation catalog).
   §22.1 score gate, and the dashboard's result panel shows both the
   reproduce recipe and per-objective gate rows (SPEC.md 37.1–37.2,
   A27, M26.)
+- **Tracking (v0.24):** runs over time become comparable data — no
+  behavior change under the defaults (the `report --run` path, the
+  A24 summary key sets, and A1–A27 stay green), version per 33.1
+  (v0.24 ⇒ `0.24.0`, both sources together).
+  **Run registry (38.1):** every finished run appends exactly one
+  13-key entry (`run_id`, `task`, `seed`, `policy`, `final_score`,
+  `target`, `met_target`, `finished_reason`, `experiments_run`,
+  `wall_seconds`, `config_fp` — a 12-hex SHA-256 fingerprint of the
+  run's recipe, `parent_run`, `timestamp`) to `runs/registry.json` —
+  "which of my five attempts was best?" is now one command; a corrupt
+  registry is moved aside (bytes preserved) and finish never crashes
+  on it. **Lineage (38.2):** `fit --from-run` records the source
+  run's dir name as `parent_run` (conditional `summary.json` key +
+  registry field), so an iteration chain (`r1 → r2 → r3`) is
+  recoverable. **`report --history` (38.3):** the registry as a
+  table (or `--json`), with the PASS/MISS gate per run; `--run` and
+  `--history` are mutually exclusive. **Past-runs view (38.4):** the
+  dashboard renders the registry below the result views plus a
+  two-run compare (per-field `best_spec` diff + score delta) — the
+  diff is a streamlit-free helper, testable without an app session
+  (SPEC.md 38.1–38.4, A28, M27.)
+- **Tracking II (v0.25):** the in-flight run and the decisions inside it
+  become legible — no behavior change under the defaults (`report --json`,
+  the summary key sets, the registry, and the A1–A28 pins stay green),
+  version per 33.1 (v0.25 ⇒ `0.25.0`, both sources together).
+  **Watch mode (39.1):** `autorefine watch --run RUN_DIR` tails
+  `experiments.jsonl` (byte-offset; a partial trailing line waits for the
+  next poll) and re-renders the live header + ASCII score curve + Pareto
+  until `summary.json` lands — the run dir may not exist yet, `watch`
+  waits; `--tail` emits one compact JSON line per row for CI, `--clear`
+  refreshes in place, and `--max-polls N` bounds a stuck wait (rc 0 on
+  finish, rc 1 on the bounded wait, rc 130 on Ctrl-C). **Decision
+  accounting (39.2):** `report --run` gains a "what happened" block —
+  accepted vs rejected candidates with the rejected ones bucketed by the
+  first failing gate (score → overfit → ci; the curriculum re-pins the
+  running best, and free-duplicate rejections are reported as 0 by
+  construction since they are unspent and unlogged),
+  time-to-first-improvement (first accepted candidate + seconds after the
+  baseline), and where the wall time went (baseline / candidates /
+  eval+overhead) — pure post-hoc reconstruction from the jsonl + summary,
+  no new logged field (SPEC.md 39.1–39.2, A29, M28.)
 - **Input modalities (v0.10):** `autorefine fit --data DIR` now accepts a
   labelled directory — one subfolder per class (or an `index.csv`) of
   **images** (PNG/JPG/JPEG/BMP/GIF; grayscale 32×32 features; optional
