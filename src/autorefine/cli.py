@@ -28,6 +28,14 @@ from .improver.policy import SearchPolicy
 from .improver.rl_policy import MetaRLPolicy, train_policy
 from .accounting import account_run  # 39.2 (T4): decision accounting
 from .memory import KIND_BASELINE, KIND_EXPERIMENT, RunMemory
+from .simulate import (  # 40 (v0.26) + 41 (v0.27): simulation
+    estimate_wall,
+    project_budget,
+    projection_points,
+    trace_lines,
+    what_if,
+)
+from .registry import load_registry  # 40.1 (v0.26): wall-time estimate
 from .watch import (  # 39.1 (T3): watch mode / live progress
     live_frame,
     read_new_entries,
@@ -89,6 +97,10 @@ def _drive(args: argparse.Namespace, env: AutoRefineEnv) -> None:
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
+    # SPEC.md 41.3 (v0.27, S5): the narrated demo — parity-v1, a tiny fixed
+    # budget; the other `run` flags are ignored (41.3.1)
+    if args.demo:
+        return _cmd_demo(args)
     # SPEC.md 18.6: the v0.4 search-quality preset is the CLI default;
     # `--search-quality legacy` opts out (v0.3 behavior, exactly)
     quality = {} if args.search_quality == "legacy" else search_quality_v04()
@@ -115,6 +127,40 @@ def _cmd_run(args: argparse.Namespace) -> int:
         **quality,
     )
     _drive(args, env)
+    return 0
+
+
+def _cmd_demo(args: argparse.Namespace) -> int:
+    """SPEC.md 41.3 (v0.27, S5): the demo loop — parity-v1 with the tiny
+    fixed budget (3 experiments / 60 s wall / 10 s per train), the v0.4
+    preset, the search policy, un-gated. Runs quietly, then prints the full
+    narration with the 41.2 trace renderer (one renderer, two entry
+    points). A demo run is a run: normal run dir, artifacts, registry
+    entry; deterministic for a given seed (G2). rc 0 (41.3.3)."""
+    env = AutoRefineEnv(
+        task="parity-v1", seed=args.seed,
+        budget=Budget(3, 60.0, 10.0),  # 41.3.1: the tiny fixed budget
+        runs_dir=args.runs_dir,
+        policy="search", target=None,  # un-gated (like `run`)
+        **search_quality_v04())
+    policy = SearchPolicy(seed=args.seed)
+    state = env.reset()
+    while not env.done:
+        state, _r, _d, _i = env.step(policy.propose(state))
+    summary = env.memory.load_summary() if env.memory else {}
+    entries = env.memory.load_experiments()
+    print("AutoRefine demo — one tiny, deterministic loop (SPEC.md 41.3)")
+    print(f"task parity-v1   seed {args.seed}   budget 3 experiments / "
+          f"60 s wall / 10 s per train   v0.4 preset   un-gated")
+    print(f"run dir : {env.run_dir}")
+    print()
+    for line in trace_lines(entries):
+        print(f"  {line}")
+    print(f"\nbest spec: {json.dumps(env.best_spec.to_dict())}")
+    print(json.dumps({k: summary.get(k) for k in (
+        "baseline_score", "final_best_score", "improvement_factor",
+        "experiments_run", "wall_seconds", "finished_reason")}, indent=2))
+    print(f"artifacts: {env.run_dir}")
     return 0
 
 
@@ -196,6 +242,8 @@ def _cmd_fit(args: argparse.Namespace) -> int:
         print("--data and --from-run are mutually exclusive (SPEC.md 37.1.4)",
               file=sys.stderr)
         return 1
+    if getattr(args, "dry_run", False):
+        return _fit_dry_run(args)  # 40.1 (v0.26): plan only, no training
     if args.from_run is not None:
         env, bar = _fit_from_run(args)
         if env is None:
@@ -215,6 +263,98 @@ def _cmd_fit(args: argparse.Namespace) -> int:
     # weakest-class hint (and the media error gallery)
     _print_fit_diagnostics(env)
     return rc
+
+
+def _fit_dry_run(args: argparse.Namespace) -> int:
+    """`fit --dry-run` (SPEC.md 40.1, v0.26 S1): resolve data -> task ->
+    head/metric -> split and print the plan, exiting **before** the env is
+    constructed — no run dir, no artifacts, no training.
+
+    rc 0 when the plan prints; rc 1 on a resolve/probe failure (the *same*
+    errors `fit` would hit — e.g. a wrong label column — surfaced before any
+    training) or when combined with `--from-run` (40.1.3).
+    """
+    from .tasks import TASKS
+    if args.from_run is not None:
+        print("--dry-run and --from-run are mutually exclusive (SPEC.md 40.1.3)",
+              file=sys.stderr)
+        return 1
+    if args.data is None:
+        print("--dry-run requires --data (SPEC.md 40.1.1)", file=sys.stderr)
+        return 1
+    data = Path(args.data)
+    try:
+        task_name = _resolve_fit_task(
+            data, getattr(args, "task", "auto") or "auto")
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    config: dict = {"path": str(data)}
+    if args.label is not None:
+        config["label"] = args.label
+    if args.split_frac != 0.2:
+        config["split_frac"] = args.split_frac
+    # the *same* probe constructor `fit` uses — a bad label column raises here
+    try:
+        probe = TASKS[task_name](seed=args.seed, **config)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    metric = getattr(probe, "metric", None) or "score"
+    budget = _budget(args)
+    dsz = getattr(probe, "default_dataset_size", None)
+    print("dry-run: plan only — no training, no run dir, no artifacts "
+          "(SPEC.md 40.1)")
+    print(f"  data       : {data}")
+    if args.label is not None:
+        print(f"  label      : {args.label}")
+    print(f"  split      : non-train share {args.split_frac:g} "
+          f"(evenly into holdout + gen)")
+    print(f"  recipe     : task {task_name} | seed {args.seed} | policy "
+          f"{args.policy} | target {args.target:g}")
+    print(f"  ensemble   : top-{2 if args.ensemble_final else 0}   "
+          f"stall patience {args.stall_patience}   "
+          f"screen frac {args.screen_frac:g}")
+    print(f"  task       : head {probe.head} | metric {metric} "
+          f"| n_outputs {probe.n_outputs} | state_dim {probe.state_dim}")
+    if dsz is not None:
+        print(f"  dataset    : {dsz} points (the train split)")
+    else:
+        print("  dataset    : task default size")
+    print(f"  budget     : experiments {budget.max_experiments} | "
+          f"max-seconds {budget.max_wall_seconds:g} | "
+          f"max-train-seconds {budget.max_train_seconds:g}")
+    print(f"  catalog    : {_catalog_description(task_name, args.policy)}")
+    est = estimate_wall(load_registry(args.runs_dir), task_name,
+                        budget.max_experiments)
+    if est["estimate"] is not None:
+        print(f"  estimate   : ~{est['estimate']:g}s (median over "
+              f"{est['runs']} past run(s) of this task in the registry, "
+              f"SPEC.md 40.1.2)")
+    else:
+        print("  estimate   : (no past runs of this task in the registry)")
+    return 0
+
+
+def _catalog_description(task_name: str, policy: str) -> str:
+    """SPEC.md 40.1.2 (v0.26): the policy's expected candidate space, one line.
+
+    bandit → the offered families (25.5) + the union of their catalog
+    actions; search → the legacy 14-field space; rl → the full mutation
+    catalog.
+    """
+    from .improver import catalog
+    if policy == "rl":
+        return f"rl: {len(catalog.ACTIONS)}-action mutation catalog"
+    if policy == "search":
+        from .improver.actions import SEARCH_FIELDS
+        return f"search: {len(SEARCH_FIELDS)}-field v1 spec space"
+    fams = catalog.relevant_families(task_name)
+    actions: set = set()
+    for fam in fams:
+        actions.update(catalog.relevant_actions(fam))
+    return (f"bandit: {len(fams)} families ({', '.join(fams)}), "
+            f"{len(actions)} catalog actions (union)")
 
 
 def _fit_data(args: argparse.Namespace) -> tuple:
@@ -547,7 +687,110 @@ def _print_accounting(acc: dict) -> None:
           f"eval+overhead {wt['eval_overhead']:.3f}   (total {wt['total']:.3f})")
 
 
+def _report_what_if(args: argparse.Namespace, summary: dict,
+                    entries: list) -> int:
+    """`report --what-if` (SPEC.md 40.2, v0.26 S2): re-gate the run's logged
+    history against a NEW objective set (40.2.4 block) and return the verdict
+    rc — 0 PASS, 2 MISS, 1 on a bad/unsupported objective. Pure derivation
+    from `experiments.jsonl`; nothing is retrained or written.
+    """
+    try:
+        objectives = tuple(parse_objective(o) for o in args.what_if)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    try:
+        wf = what_if(entries, objectives)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print("\nwhat-if   : re-gate the logged history against a NEW objective set "
+          "(no retraining, SPEC.md 40.2)")
+    for o in objectives:
+        print(f"  bar       : {o.name} {o.op} {o.threshold:g}")
+    actual_final = summary.get("final_best_score")
+    actual_s = (f"{float(actual_final):.2f}" if actual_final is not None
+                else "n/a")
+    print(f"  pool      : {wf['pool']} scored candidate(s); {wf['passing']} pass "
+          f"the bar")
+    print(f"  actual final : {actual_s} (this run's best, for contrast)")
+    if wf["final"] is not None:
+        f = wf["final"]
+        sh = f["spec_hash"]
+        sh_s = (str(sh)[:8] if isinstance(sh, str) else str(sh))
+        tr_s = f"{f['train']:g}s" if f["train"] is not None else "n/a"
+        print(f"  counterfactual final: candidate #{f['cand']}, spec {sh_s}, "
+              f"score {f['score']:.2f}, train {tr_s}")
+    if wf["pass"]:
+        print(f"  verdict   : PASS — {wf['passing']} logged candidate(s) meet "
+              f"the bar (SPEC.md 40.2.5)")
+        return 0
+    print("  verdict   : MISS — no logged candidate meets the bar "
+          "(SPEC.md 40.2.5)")
+    return 2
+
+
+def _report_project(args: argparse.Namespace, summary: dict,
+                    run_dir: Path) -> None:
+    """`report --project` (SPEC.md 41.1, v0.27 S3): project the budget to
+    the target from the same-task history (41.1.2 points) — informational,
+    rc 0 (the 41.1.1 guards handle the error paths above)."""
+    reg = load_registry(run_dir.parent)  # 41.1.2.1: the runs-dir registry
+    pts = projection_points(reg, summary, run_dir.name)
+    e_cur = summary.get("experiments_run")
+    if isinstance(e_cur, (int, float)) and not isinstance(e_cur, bool):
+        e_cur = float(e_cur)
+    else:
+        e_cur = 0.0
+    r = project_budget(pts, args.target, e_cur)
+    print(f"\nprojection: will we reach target {args.target:g}? "
+          "(saturating fit over same-task history, SPEC.md 41.1)")
+    print(f"  points    : {r['points']} same-task run(s) "
+          "(registry + this run, deduped by run id)")
+    if not r["ok"]:
+        print("  verdict   : INSUFFICIENT HISTORY — need >= 2 same-task runs "
+              "with positive scores (SPEC.md 41.1.4)")
+        return
+    print(f"  curve     : score(e) = Vmax*e/(Km+e)   Vmax={r['vmax']:.2f}   "
+          f"Km={r['km']:.2f}")
+    if r["verdict"] == "ceiling":
+        print(f"  verdict   : CEILING — the curve's asymptote ({r['vmax']:.2f}) "
+              f"does not exceed the target ({args.target:g}); more "
+              "experiments will not reach it (SPEC.md 41.1.4)")
+    else:
+        print(f"  verdict   : MORE — ~{r['more']} more experiment(s): the "
+              f"curve reaches {args.target:g} at ~{r['e_target']:.1f} "
+              f"experiments total (this run: {e_cur:g}) (SPEC.md 41.1.4)")
+
+
 def _cmd_report(args: argparse.Namespace) -> int:
+    # SPEC.md 40.2.1 (v0.26, S2): --what-if is a human counterfactual view,
+    # mutually exclusive with the machine (--json) and history paths.
+    if getattr(args, "what_if", None):
+        if args.history:
+            print("--what-if and --history are mutually exclusive "
+                  "(SPEC.md 40.2.1)", file=sys.stderr)
+            return 1
+        if args.json:
+            print("--what-if and --json are mutually exclusive "
+                  "(SPEC.md 40.2.1)", file=sys.stderr)
+            return 1
+    # SPEC.md 41.1.1/41.2.1 (v0.27): --project / --trace are human views,
+    # mutually exclusive with the machine (--json), the history path, and
+    # the what-if path (A11 untouched).
+    if getattr(args, "project", False) or getattr(args, "trace", False):
+        if args.history:
+            print("--project/--trace and --history are mutually exclusive "
+                  "(SPEC.md 41.1.1/41.2.1)", file=sys.stderr)
+            return 1
+        if args.json:
+            print("--project/--trace and --json are mutually exclusive "
+                  "(SPEC.md 41.1.1/41.2.1)", file=sys.stderr)
+            return 1
+        if getattr(args, "what_if", None):
+            print("--project/--trace and --what-if are mutually exclusive "
+                  "(SPEC.md 41.1.1/41.2.1)", file=sys.stderr)
+            return 1
     # SPEC.md 38.3.1: --history and --run are mutually exclusive; one is
     # required (the pre-v0.24 `report --run` path below is unchanged)
     if args.history:
@@ -620,6 +863,20 @@ def _cmd_report(args: argparse.Namespace) -> int:
     # SPEC.md 39.2 (T4): the "what happened" block — additive human output only
     # (--json / --plot / the summary file / the registry are byte-identical)
     _print_accounting(account_run(summary, entries))
+    # SPEC.md 41.1 (v0.27, S3): budget projection — an informational human
+    # view (rc 0); pure derivation, nothing is written.
+    if getattr(args, "project", False):
+        _report_project(args, summary, run_dir)
+    # SPEC.md 41.2 (v0.27, S4): the line-per-experiment decision trace.
+    if getattr(args, "trace", False):
+        print("\n=== trace (one line per logged experiment) ===")
+        for line in trace_lines(entries):
+            print(f"  {line}")
+    # SPEC.md 40.2 (v0.26, S2): counterfactual re-gating — a human view that
+    # returns its own verdict rc (0 PASS / 2 MISS / 1 bad objective) before
+    # the rest of the report; the machine path above already returned.
+    if getattr(args, "what_if", None):
+        return _report_what_if(args, summary, entries)
     # SPEC.md 37.1.4: when the run carries the canonical recipe, render the
     # copy-pasteable command (fit for data tasks, run for built-in tasks)
     rc_cfg = summary.get("run_config")
@@ -939,6 +1196,11 @@ def build_parser() -> argparse.ArgumentParser:
                             "first F·n rows and full-train only strict beats of "
                             "the (screened) baseline; 0 < F < 1 to enable, "
                             "default 1.0 = off (pre-v0.18 behavior)")
+    p_run.add_argument("--demo", action="store_true",
+                       help="v0.27 (SPEC.md 41.3): the narrated demo — one tiny, "
+                            "deterministic parity-v1 loop (3 experiments, 60 s "
+                            "wall) printed with the full decision trace; "
+                            "--task/--experiments/etc. are ignored")
     p_run.set_defaults(func=_cmd_run)
 
     p_rep = sub.add_parser("report", help="print a run's summary and experiment log")
@@ -955,6 +1217,28 @@ def build_parser() -> argparse.ArgumentParser:
     p_rep.add_argument("--json", action="store_true",
                        help="v0.7 (SPEC.md 21.2): print summary.json to stdout "
                             "(machine-readable; with --plot the SVGs are still written)")
+    p_rep.add_argument("--what-if", dest="what_if", action="append", default=[],
+                       metavar="NAME OP THRESHOLD",
+                       help="v0.26 (SPEC.md 40.2): re-gate the logged history "
+                            "against a NEW objective set, e.g. 'score>=97', "
+                            "'train<=30' (repeatable); 'model' is not supported; "
+                            "mutually exclusive with --json/--history; rc 0 PASS / "
+                            "rc 2 MISS")
+    p_rep.add_argument("--project", action="store_true",
+                       help="v0.27 (SPEC.md 41.1): project the budget — 'will we "
+                            "reach the target?' — by fitting a saturating curve "
+                            "to the same-task history (registry + this run); "
+                            "informational, rc 0; mutually exclusive with "
+                            "--json/--history/--what-if/--trace")
+    p_rep.add_argument("--target", type=float, default=95.0,
+                       help="with --project: the score target to project to "
+                            "(default 95.0, like fit's gate)")
+    p_rep.add_argument("--trace", action="store_true",
+                       help="v0.27 (SPEC.md 41.2): terminal replay — one "
+                            "decision line per experiments.jsonl entry "
+                            "(candidate, mutation, score, accepted/rejected + "
+                            "reason); mutually exclusive with --json/--history/"
+                            "--what-if/--project")
     p_rep.add_argument("--plot", action="store_true",
                        help="v0.7 (SPEC.md 21.2): ASCII charts on stdout + "
                             "score_curve.svg / pareto_frontier.svg in the run dir")
@@ -992,6 +1276,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_fit.add_argument("--from-run", dest="from_run", default=None,
                        help="v0.23 (SPEC.md 37.1.4): re-run a finished run exactly "
                             "from its run_config (mutually exclusive with --data)")
+    p_fit.add_argument("--dry-run", dest="dry_run", action="store_true",
+                       help="v0.26 (SPEC.md 40.1): resolve data -> task -> head -> "
+                            "split and print the plan + wall-time estimate, then exit "
+                            "without training or artifacts (mutually exclusive with "
+                            "--from-run)")
     p_fit.add_argument("--gate", action="append", default=[],
                        metavar="NAME OP THRESHOLD",
                        help="v0.23 (SPEC.md 37.2): an acceptance objective, e.g. "

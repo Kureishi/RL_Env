@@ -46,6 +46,8 @@ numbers and carry none.)
 | M26 | v0.23   | 37     | A27 | tests/test_generalization_v023.py |
 | M27 | v0.24   | 38     | A28 | tests/test_tracking_v024.py |
 | M28 | v0.25   | 39     | A29 | tests/test_tracking_v025.py |
+| M29 | v0.26   | 40     | A30 | tests/test_simulation_v026.py |
+| M30 | v0.27   | 41     | A31 | tests/test_simulation_v027.py |
 
 ---
 
@@ -3341,3 +3343,279 @@ byte-identical; only `report`'s human output gains the block.
 
 **M28** — v0.25 tracking II: watch mode / live progress (39.1), decision
 accounting in report (39.2) (A29).
+
+---
+
+## 40. Simulation: dry-run planning & counterfactual re-gating (v0.26)
+
+39 (v0.25) made runs legible in flight and in hindsight. v0.26 adds
+**simulation** — answering "what would this run do / what would it have
+done" **without training**. Two additive surfaces, both pure:
+
+- **S1 (40.1):** `fit --dry-run` resolves data → task → head/metric →
+  split and prints the full plan (recipe, dataset size, budget, expected
+  candidate catalog, and a wall-time estimate from the registry when this
+  task has history) — killing the "wasted 30-minute run because the label
+  column was wrong" failure mode before a single epoch runs.
+- **S2 (40.2):** `report --run DIR --what-if OBJECTIVE…` re-gates the
+  logged history against a *new* objective set and answers "what would my
+  final model have been under a tighter bar?" — pure derivation from
+  `experiments.jsonl` + `summary.json`, no retraining.
+
+House rules: **no behavior change under the defaults** — a `fit` without
+`--dry-run` and a `report` without `--what-if` are byte-identical to
+pre-v0.26, and A1–A29 stay green. New surfaces are additive only: one new
+flag each on `fit` and `report` and one new stdlib leaf module
+(`simulate.py`); nothing in the loop, the summary, the registry, or the
+artifacts changes. The version steps per 33.1 (v0.26 ⇒ `0.26.0`, both
+sources together).
+
+### 40.1 `fit --dry-run` (S1)
+
+**Command (40.1.1).** `fit --dry-run` (with `--data`; mutually exclusive
+with `--from-run`): resolve the task exactly the way `fit` does
+(`_resolve_fit_task` + the probe constructor — the *same* code that would
+crash on a bad label column), then print the plan and exit **before** the
+env is constructed — no run dir, no artifacts, no training.
+
+**The plan (40.1.2).** One deterministic human block:
+- **recipe** — task, seed, policy, target, and the ensemble/stall/screening
+  knobs as they will be passed; the resolved data path, label column, and
+  split fraction;
+- **task** — `head`, `metric`, `n_outputs` (the class count), `state_dim`;
+- **dataset** — the train-split size (`default_dataset_size`, points for
+  fitting tasks / items for media tasks) and the non-train share (`--split`,
+  split evenly into holdout + gen);
+- **budget** — `--experiments`, `--max-seconds`, `--max-train-seconds`;
+- **catalog** — the policy's expected candidate space: bandit → the offered
+  families (25.5) and the union of their catalog actions; search → the
+  legacy 14-field space; rl → the full mutation catalog;
+- **estimate** — if `<runs-dir>/registry.json` holds ≥ 1 finished run of
+  the same task with `experiments_run > 0` and `wall_seconds > 0`, the
+  median of `wall_seconds / experiments_run` across them × `--experiments`,
+  labeled as an estimate over N past runs; otherwise an explicit
+  "(no past runs of this task in the registry)" line.
+
+**Exit codes (40.1.3).** rc 0 when the plan prints; rc 1 on a
+resolve/probe failure (the *same* errors `fit` would hit — e.g. a wrong
+label column — surfaced before any training); rc 1 for `--dry-run`
+combined with `--from-run`.
+
+### 40.2 `report --what-if OBJECTIVE…` (S2)
+
+**Command (40.2.1).** `report --run DIR --what-if NAME OP THRESHOLD
+[NAME OP THRESHOLD …]` — one or more objectives in the 37.2 form
+(`parse_objective`). Human view only: `--what-if` with `--json` or
+`--history` is an error (the machine and history paths are untouched).
+
+**Semantics (40.2.2).** The candidate pool is every scored row
+(`kind ∈ {baseline, experiment}` with a finite `holdout_score`); each
+candidate is evaluated against the objective set with the 37.2 `evaluate`
+rule on the logged actuals `score = holdout_score`, `train =
+train_seconds` (a missing actual fails its objective). The
+**counterfactual final** is the passing candidate with the highest
+`holdout_score` (ties: lower `train_seconds`, then log order). The verdict
+is PASS when ≥ 1 candidate passes, MISS when none (the bar is unmeetable
+by this history).
+
+**Objectives (40.2.3).** `score` and `train` are supported (both pure log
+data). `model` is rejected with a clear error — a candidate's model size
+is only known from its trained artifact (the 37.2 `fit --gate` path
+evaluates it on the saved best model), so what-if refuses to guess rather
+than invent a second, possibly-disagreed size calculator.
+
+**Output (40.2.4).** An additive block in the human report (after the 39.2
+accounting block): the bar, the pool size, the passing count, the
+counterfactual final (candidate index, spec-hash prefix, score, train
+seconds), the actual final (the run's best) for contrast, and the verdict.
+`experiments.jsonl`, `summary.json`, the registry, and every other view
+are byte-identical.
+
+**Exit codes (40.2.5).** rc 0 on PASS, rc 2 on MISS (mirroring the 22.1
+gate semantics), rc 1 on a bad or unsupported objective.
+
+### 40.3 Acceptance (A30)
+
+- **Dry-run (40.1)** — `fit --dry-run --data CSV` prints the plan
+  (recipe, task/head/metric, dataset size, budget, catalog, and the
+  estimate line — registry-based when the registry has same-task history,
+  the fallback otherwise) with rc 0 and creates **no** run dir / artifacts;
+  a wrong label column is reported with rc 1 (the failure mode the flag
+  exists to kill); `--dry-run --from-run` → rc 1.
+- **What-if (40.2)** — `what_if` picks the best passing candidate (score
+  and score+train bars, ties, the baseline in the pool, MISS when none
+  pass), rejects `model` with a clear error, and is pure/deterministic;
+  `report --run DIR --what-if score>=T` shows the block and the verdict
+  (rc 0 PASS / rc 2 MISS), `model` → rc 1, and the A11 `--json` invariants
+  stay green (the machine path is untouched).
+- **Regression** — A1–A29 stay green (no run behavior, summary key set,
+  registry, or artifact change); the A25 index table advances (25 → 26
+  acceptance rows) and `defined == set(range(1, 31))`; version stepped to
+  `0.26.0` in both sources (33.1) with the round assertions advanced
+  (v0.26 ⇒ `0.26.0`).
+
+### 40.4 Milestone
+
+**M29** — v0.26 simulation: `fit --dry-run` planning (40.1),
+counterfactual re-gating in `report --what-if` (40.2) (A30).
+
+---
+
+## 41. Simulation III: projection, replay, and the narrated demo (v0.27)
+
+40 (v0.26) made planning and counterfactuals possible **without
+training**. v0.27 completes the simulation surface: it answers
+"will we get there, how did it go, and show me the loop". Three
+additive surfaces:
+
+- **S3 (41.1):** `report --run DIR --project [--target 95]` — budget
+  projection / "will I hit 95?": fit a saturating curve to
+  best-score-vs-experiments across past runs of the same task (the T1
+  registry, 38) and project to the target — or report the ceiling.
+- **S4 (41.2):** `report --run DIR --trace` — a terminal replay: one
+  decision line per `experiments.jsonl` entry (candidate → mutation →
+  score → accepted/rejected + reason), so the whole loop is auditable
+  without the GUI (the app's views are the rich version).
+- **S5 (41.3):** `run --demo` — demo mode: a tiny fixed budget on
+  parity-v1, finishes in seconds, and prints the full loop narrated
+  (baseline → candidates → gate → best spec) — a cheap "here's what
+  this tool does" for a new user.
+
+House rules: **no behavior change under the defaults** — a `report`
+without `--project`/`--trace` and a `run` without `--demo` are
+byte-identical to pre-v0.27, and A1–A30 stay green. New surfaces are
+additive only: one new flag each on `report` and `run`, and two pure
+helpers + one pure data helper in the existing `simulate.py` leaf;
+nothing in the loop, the summary, the registry, or the artifacts
+changes. The version steps per 33.1 (v0.27 ⇒ `0.27.0`, both sources
+together).
+
+### 41.1 `report --project` (S3)
+
+**Command (41.1.1).** `report --run DIR --project [--target 95]` — a
+human view: `--project` with `--json`, `--history`, or `--what-if` is
+an error (the machine and the other view paths are untouched); `--run`
+is required (the existing rule). `--target` defaults to 95.0 (the
+§22.1 gate default).
+
+**Data (41.1.2).** The curve points are the same-task history: the
+registry's (41.1.2.1) finished runs with `task == summary["task"]`,
+finite `experiments_run > 0` and `final_score > 0`, as
+`(experiments_run, final_score)` — **plus** the current run's own
+`(summary["experiments_run"], summary["final_best_score"])`, deduped by
+run id: when the current run already has a registry entry, the
+registry row is the point and the summary's is not added a second time.
+
+**Registry location (41.1.2.1).** `report --run` knows the run's dir;
+the registry lives in the runs dir (38.1.1), i.e.
+`<run-dir>.parent / registry.json` — no extra flag. A missing registry
+is `[]` (38.1.1).
+
+**Fit (41.1.3).** The Michaelis–Menten saturation curve
+`score(e) = Vmax·e/(Km+e)`, fit by the Lineweaver–Burk linearization
+(OLS of `1/score` on `1/experiments`; `Vmax = 1/b`, `Km = a/b`) —
+deterministic, stdlib + numpy (a core dependency), and it needs ≥ 2
+points. `Vmax` is the curve's natural "ceiling".
+
+**Verdict (41.1.4).**
+
+- `Vmax ≤ target` → **CEILING**: the curve's asymptote does not exceed
+  the target; more experiments will not reach it.
+- otherwise the curve reaches the target at
+  `e_T = target·Km/(Vmax − target)`; the answer is **~`max(0,
+  ⌈e_T − e_current⌉`) more experiments** (floor 0 when already past).
+- degenerate — < 2 usable points, a non-finite or non-positive
+  intercept, or a negative `Km` — → **insufficient history** (the view
+  degrades gracefully instead of failing).
+
+**Output and exit (41.1.5).** An additive block in the human report
+(after the 39.2 accounting block): the target, the number of points,
+the fitted `Vmax`/`Km`, and the verdict. Pure derivation — no
+retraining, no writes. rc 0 (an informational view; insufficient
+history is rc 0 too); rc 1 from the 41.1.1 guards or the existing
+no-run-dir error.
+
+### 41.2 `report --trace` (S4)
+
+**Command (41.2.1).** `report --run DIR --trace` — a human view: with
+`--json`, `--history`, or `--what-if` it is an error; `--run` is
+required.
+
+**Semantics (41.2.2).** One line per `experiments.jsonl` entry, in log
+order — a decision trace of the whole loop:
+
+- `baseline` → the seed champion and its score;
+- `experiment` → the mutation, holdout score, and gen-gap, then
+  **ACCEPTED (new best)** or **REJECTED (reason)**;
+- `curriculum` → the step-up and the new baseline (re-pins the running
+  best, 39.2.2);
+- `screen` → screen-rejected (below the champion, not a full
+  candidate);
+- `invalid_spec` → rejected (invalid spec).
+
+The rejection reason is the documented 39.2.2 priority — **score gate**
+(raw score ≤ the running best), **overfit** (gen-gap above the 18.5
+tolerance `GEN_GAP_TOL·score`), else the **CI gate** (the 18.6 Δeff
+within z·SE) — with the running best reconstructed exactly as in 39.2.2
+(baseline seeds it, an acceptance raises it, a curriculum step-up
+re-pins it).
+
+**Output (41.2.3).** An additive block in the human report (after the
+41.1 block when both are requested). The renderer
+(`simulate.trace_lines`) is a pure function of the log entries — and
+is the **same function** `run --demo` uses (41.3): one renderer, two
+entry points. rc 0.
+
+### 41.3 `run --demo` (S5)
+
+**Command (41.3.1).** `run --demo` — the demo is always **parity-v1**
+with a tiny fixed budget (3 experiments / 60 s wall / 10 s per train),
+the v0.4 search-quality preset (18.6), the `search` policy, un-gated,
+at the user's `--seed` (default 7). The other `run` flags (`--task`,
+budget, policy, …) are ignored by the demo; `--runs-dir` and `--seed`
+apply. A demo run is a run: it creates a normal run dir, artifacts,
+and registry entry, and is deterministic for a given seed (G2).
+
+**Output (41.3.2).** The loop runs quietly, then the full narration:
+the task/budget line, the run dir, the 41.2 trace (baseline →
+candidates → gate, one line per experiment), the best spec, and the
+summary (baseline/final score, improvement factor, experiments run,
+wall seconds, finished reason). Finishes in seconds.
+
+**Exit (41.3.3).** rc 0 on completion; the tiny budget keeps the demo
+cheap enough for CI and tests.
+
+### 41.4 Acceptance (A31)
+
+- **Projection (41.1)** — `project_budget` is pure and deterministic:
+  insufficient history (< 2 usable points) degrades gracefully; a
+  sub-target asymptote is the CEILING verdict; a super-target
+  asymptote is the ~N-more-experiments verdict with `N = max(0,
+  ⌈e_T − e_current⌉)` (floor 0 when already past); a degenerate fit
+  (a decreasing history) degrades gracefully; `projection_points`
+  filters to the same-task positive rows, includes the current run,
+  and dedups by run id. `report --run DIR --project` renders the
+  block (the CEILING and the MORE verdicts, rc 0); insufficient
+  history is rc 0; `--project` with `--json` / `--history` /
+  `--what-if` is rc 1 (the A11 machine path stays pure).
+- **Trace (41.2)** — `trace_lines` is pure and deterministic: the
+  baseline / accepted / rejected lines, the 39.2.2 rejection reasons
+  (score / overfit / CI), the curriculum re-pin, and the screen and
+  invalid-spec lines. `report --run DIR --trace` renders one line per
+  log entry (rc 0); `--trace` with `--json` / `--history` is rc 1; the
+  A11 `--json` invariant stays green (pure JSON, no trace block).
+- **Demo (41.3)** — `run --demo` completes a tiny parity-v1 loop in
+  seconds with rc 0, prints the narration (baseline → candidates →
+  gate → best spec), and creates the run dir / artifacts (registry
+  entry included).
+- **Regression** — A1–A30 stay green (no run behavior, summary key
+  set, registry, or artifact change); the A25 index table advances
+  (26 → 27 acceptance rows) and `defined == set(range(1, 32))`; the
+  version stepped to `0.27.0` in both sources (33.1) with the round
+  assertions advanced (v0.27 ⇒ `0.27.0`).
+
+### 41.5 Milestone
+
+**M30** — v0.27 simulation III: budget projection `report --project`
+(41.1), terminal replay `report --trace` (41.2), the narrated demo
+`run --demo` (41.3) (A31).

@@ -651,6 +651,54 @@ Fixed-dim `Box` observation, `Discrete` action space (the mutation catalog).
   baseline), and where the wall time went (baseline / candidates /
   eval+overhead) — pure post-hoc reconstruction from the jsonl + summary,
   no new logged field (SPEC.md 39.1–39.2, A29, M28.)
+- **Simulation (v0.26):** answer “what would this run do / what would it
+  have done” **without training** — no behavior change under the defaults
+  (`fit` without `--dry-run` and `report` without `--what-if` are
+  byte-identical to pre-v0.26, A1–A29 stay green), version per 33.1
+  (v0.26 ⇒ `0.26.0`, both sources together).
+  **Dry-run (40.1):** `autorefine fit --dry-run --data CSV` resolves
+  data → task → head/metric → split — the *same* probe that would crash on a
+  wrong label column, now surfaced before any epoch — and prints the plan:
+  recipe, task (head/metric/n_outputs/state_dim), dataset size, budget, the
+  policy’s expected candidate catalog, and a wall-time estimate from the
+  registry’s same-task history (median `wall/experiments × budget`, or an
+  explicit “no past runs” line) — creating **no** run dir / artifacts (rc 0
+  plan; rc 1 on a bad label column, or with `--from-run`).
+  **What-if (40.2):** `autorefine report --run DIR --what-if 'score>=97'
+  'train<=30'` re-gates the logged history against a *new* objective set and
+  reports the counterfactual final (best passing candidate) vs this run’s
+  actual best — pure derivation from `experiments.jsonl`, no retraining (rc 0
+  PASS / rc 2 MISS / rc 1 on a bad objective; `model` is unsupported — its
+  size is only known from the trained artifact). The `--json` / `--history`
+  machine and history paths are untouched (SPEC.md 40.1–40.2, A30, M29.)
+- **Simulation III (v0.27):** complete the simulation surface — "will we get
+  there, how did it go, and show me the loop" — still **without training**
+  (`report` without `--project`/`--trace` and `run` without `--demo` are
+  byte-identical to pre-v0.27, A1–A30 stay green), version per 33.1
+  (v0.27 ⇒ `0.27.0`, both sources together).
+  **Projection (41.1):** `autorefine report --run DIR --project
+  [--target 95]` fits the Michaelis–Menten saturation curve `score(e) =
+  Vmax·e/(Km+e)` (Lineweaver–Burk OLS, deterministic) to the same-task
+  history — the registry's finished runs plus this run, deduped by run id —
+  and answers "will I hit 95?": **CEILING** when the curve's asymptote does
+  not exceed the target, else **~N more experiment(s)** (N = max(0,
+  ⌈e_T − e_current⌉)); < 2 usable points degrade gracefully to
+  INSUFFICIENT HISTORY (always rc 0 — an informational view; mutually
+  exclusive with `--json`/`--history`/`--what-if`).
+  **Trace (41.2):** `autorefine report --run DIR --trace` is a terminal
+  replay — one decision line per `experiments.jsonl` entry (baseline →
+  candidate → mutation → score → ACCEPTED/REJECTED + reason), with the
+  documented rejection priority (score gate → overfit → CI gate) and the
+  running best reconstructed exactly as in the accounting block; the whole
+  loop is auditable without the GUI (rc 0; mutually exclusive with
+  `--json`/`--history`/`--what-if`).
+  **Demo (41.3):** `autorefine run --demo` runs one tiny, deterministic
+  parity-v1 loop (3 experiments / 60 s wall / 10 s per train, v0.4 preset,
+  `--seed`/`--runs-dir` apply, the other run flags are ignored) in seconds
+  and prints the full loop narrated with the same trace renderer — baseline
+  → candidates → gate → best spec — a cheap "here's what this tool does";
+  a demo run is a run (normal run dir, artifacts, registry entry; rc 0)
+  (SPEC.md 41.1–41.3, A31, M30.)
 - **Input modalities (v0.10):** `autorefine fit --data DIR` now accepts a
   labelled directory — one subfolder per class (or an `index.csv`) of
   **images** (PNG/JPG/JPEG/BMP/GIF; grayscale 32×32 features; optional
