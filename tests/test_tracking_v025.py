@@ -17,7 +17,7 @@
   and still passes the A11 human invariants, while `--json` stays pure
   and equals `summary.json` (A11).
 - Regression — A1–A28 stay green (no run behavior / summary key set /
-  registry / artifact change); version stepped to `0.27.0` in both
+  registry / artifact change); version stepped to `0.30.0` in both
   sources (33.1).
 
 House rules: no cross-test imports (the `_make_run` fixture is
@@ -311,7 +311,7 @@ def test_report_json_stays_pure(tmp_path, capsys):
 # --- regression ---------------------------------------------------------------
 
 def test_version_round_v025():
-    """A29 (SPEC.md 39.3, 33.1): the version stepped to `0.27.0` in both
-    sources (v0.27 ⇒ `0.27.0`, both together)."""
+    """A29 (SPEC.md 39.3, 33.1): the version stepped to `0.30.0` in both
+    sources (v0.30 ⇒ `0.30.0`, M33, SPEC.md 44 — advanced in place per 33.1)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.27.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.30.0"

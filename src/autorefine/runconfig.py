@@ -24,6 +24,7 @@ _FIELDS = (
     "ci_blocks", "z_accept", "efficiency_weight",
     "gen_gap_penalty", "block_size",
     "ensemble_top_k", "curriculum", "stall_patience", "screen_frac",
+    "kfold",
     "autorefine_version",
 )
 
@@ -51,6 +52,8 @@ _VALIDATORS: dict[str, Any] = {
     "curriculum": lambda v: isinstance(v, bool),
     "stall_patience": _OPT(_INT),
     "screen_frac": _NUM,
+    # SPEC.md 44.1.4 (v0.30): int >= 0 (0 = off; the legacy single split)
+    "kfold": lambda v: _INT(v) and v >= 0,
     "autorefine_version": lambda v: isinstance(v, str) and v,
 }
 
@@ -84,6 +87,8 @@ class RunConfig:
     curriculum: bool = False
     stall_patience: int | None = None
     screen_frac: float = 1.0
+    # SPEC.md 44.1 (v0.30): k-fold holdout scoring (0 = off, legacy)
+    kfold: int = 0
     # identity
     autorefine_version: str = "0.0.0"
 
@@ -151,6 +156,7 @@ class RunConfig:
             curriculum=bool(getattr(env, "curriculum", None) is not None),
             stall_patience=env.stall_patience,
             screen_frac=float(env.screen_frac),
+            kfold=int(env.kfold),  # SPEC.md 44.1 (v0.30)
             autorefine_version=autorefine.__version__,
         )
 
@@ -231,6 +237,8 @@ def fit_recipe(config: RunConfig) -> list[str]:
         cmd += ["--stall-patience", str(d["stall_patience"])]
     if d["screen_frac"] < 1.0:
         cmd += ["--screen-frac", str(d["screen_frac"])]
+    if d["kfold"] > 0:  # SPEC.md 44.1 (v0.30): non-default values only
+        cmd += ["--kfold", str(d["kfold"])]
     return cmd
 
 

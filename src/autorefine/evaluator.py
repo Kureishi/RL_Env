@@ -72,3 +72,27 @@ def score_with_ci(task, model, split: str = "holdout", n_blocks: int = 8,
     else:
         std = 0.0
     return {"mean": mean, "std": std, "blocks": blocks}
+
+
+def kfold_score(task, model, split: str = "holdout", k: int = 5,
+                n: int = 200) -> dict:
+    """K-fold holdout scoring (SPEC.md 44.1, v0.30).
+
+    Scores `k` distinct held-out subsets (the task's `score_fold` — a
+    fresh seed-derived point set on generative tasks, a deterministic
+    random subset of the non-train pool on CsvTask) and averages:
+    returns {"score": mean, "std": sample std over the fold scores
+    (ddof=1; 0.0 for K < 2), "folds": [...]} — the `score_with_ci`
+    shape with `score` in place of `mean`. Scoring-only: the model is
+    trained once, then scored K times (44.1.3)."""
+    k = int(k)
+    if k < 1:
+        raise ValueError("k must be >= 1 (SPEC.md 44.1)")
+    folds = [float(task.score_fold(model, split, i, n)) for i in range(k)]
+    score = float(sum(folds) / len(folds))
+    if len(folds) >= 2:
+        var = sum((f - score) ** 2 for f in folds) / (len(folds) - 1)  # sample std
+        std = float(math.sqrt(var))
+    else:
+        std = 0.0
+    return {"score": score, "std": std, "folds": folds}

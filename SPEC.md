@@ -48,6 +48,9 @@ numbers and carry none.)
 | M28 | v0.25   | 39     | A29 | tests/test_tracking_v025.py |
 | M29 | v0.26   | 40     | A30 | tests/test_simulation_v026.py |
 | M30 | v0.27   | 41     | A31 | tests/test_simulation_v027.py |
+| M31 | v0.28   | 42     | A32 | tests/test_usecase_v028.py |
+| M32 | v0.29   | 43     | A33 | tests/test_trust_v029.py |
+| M33 | v0.30   | 44     | A34 | tests/test_kfold_v030.py |
 
 ---
 
@@ -3619,3 +3622,435 @@ cheap enough for CI and tests.
 **M30** — v0.27 simulation III: budget projection `report --project`
 (41.1), terminal replay `report --trace` (41.2), the narrated demo
 `run --demo` (41.3) (A31).
+
+---
+
+## 42. v0.28 — Close the "use the model" loop (A32, M31)
+
+The loop so far stops at a *score*: fit, gate, report. v0.28 closes the
+last gap — **using the model** — with three additive, pure commands over
+an existing run dir: `predict` (42.1, score new rows), `compare`
+(42.2, the app's run-diff in the terminal), and `explain` (42.3, a
+one-screen narrative). All three read the run's artifacts
+(`summary.json`, `experiments.jsonl`, `best_model.npz`) and the
+already-existing pure helpers — no new data, no training, no writes
+(no new artifacts), no behavior change under the defaults (A1–A31 stay
+green, 42.4).
+
+### 42.1 `autorefine predict --run DIR` (42.1.1–42.1.5)
+
+**Command and input modes (42.1.1).** `predict --run DIR` plus exactly
+one input mode:
+
+- `--row JSON` — one row: a JSON object keyed by feature-name
+  (case-insensitive match against the task's `feature_names`; extra keys
+  are ignored, a missing feature column is an error) or a JSON array of
+  exactly `state_dim` numbers (positional). A task without
+  `feature_names` (e.g. `sine-v1`) accepts an object with exactly one
+  key.
+- `--csv FILE` — many rows. If the first line is non-numeric it is a
+  header: cells are matched by name (case-insensitive, extra columns
+  such as a label column are OK); otherwise the rows are positional and
+  must have exactly `state_dim` cells.
+- `--stdin` — many rows as JSON lines on stdin (each line an object or
+  an array, per the `--row` shapes); zero lines is an error.
+- `--item FILE` (repeatable) — one media file per flag value, decoded
+  by the task (42.1.3); media tasks only.
+
+Two or more modes, or none, is an error (rc 1, 42.1.5).
+
+**Supported tasks (42.1.2).** `predict` is defined on the *fitting*
+tasks — the fitting tasks declare `max_steps == 1` (§22.1/24.2): `csv`,
+`sine-v1`, `image`, `audio` (plus any external plugin task with the same
+shape). Episode tasks (`max_steps > 1`: cartpole, gridnav) are
+rejected with a clear message pointing at `eval` — a run's episode score
+is a distribution over fresh episodes, not a row-wise prediction.
+(Parity is a *fitting* task in this codebase — `max_steps == 1`,
+SPEC.md 15 — so `predict` supports it like the other fitting tasks.)
+
+**Preprocessing (42.1.3).** A new row is transformed with the *task's
+own training statistics*, exactly as the train rows were:
+
+- `csv`/`image`/`audio` standardize their features with train-only
+  mean/std (the §22.1 rule); the task now exposes those stats as
+  `feature_mean` / `feature_std` attributes (additive; the same values
+  it already computed and discarded). A new row is standardized with
+  `(row − feature_mean) / feature_std`.
+- `sine-v1` (and other tasks without the attributes) is the identity:
+  its inputs are already unit-scaled (§15).
+- A media file is decoded by the task's `item_features(path)` protocol
+  method (additive public wrappers: `ImageTask.item_features` delegates
+  to its `_decode` pipeline, `AudioTask.item_features` to its
+  `_features` pipeline — the exact v0.10/v0.11 feature the model was
+  trained on), then standardized as above.
+
+**Decoding and output (42.1.4).** One forward pass decodes each row:
+
+- softmax head → the argmax class, mapped back through
+  `task.class_values` to the user's label (0/1 values or string class
+  names), plus `probabilities` — the softmax of the forward output
+  (the task scores on `argmax`, so the probabilities are a pure
+  rendering of the same logits, not a second model);
+- mse head → the scalar output, `probabilities` is `null`.
+
+The human view prints one line per row: `row_index<TAB>prediction`
+(0-based). `--json` prints a pure JSON array:
+`[{"row": i, "prediction": …, "probabilities": […]|null}, …]`.
+
+**Exit codes (42.1.5).** rc 0 on success; rc 1 on any error — no
+`summary.json` in the run dir, unknown task/family, an episode task
+(42.1.2), zero input rows, an unparseable `--row`/stdin line, a missing
+feature column, a wrong cell count, or an undecodable media file.
+
+### 42.2 `autorefine compare --run A --run B` (42.2.1–42.2.3)
+
+**Command (42.2.1).** `compare --run DIR_A --run DIR_B` (exactly two).
+
+**Semantics (42.2.2).** The app's Past-runs compare widget (38.4) in
+the terminal: `diff_two_summaries` — the final-score delta
+(`score_b − score_a`, `null` when either is not a number) plus the
+per-field `best_spec` diff (only differing fields, sorted; a field
+present on one side only diffs against `null`) — is now a **core**
+function in `autorefine.dashboard` (moved from `dashboard_app.py`,
+which keeps the name importable: `dashboard_app.diff_two_summaries`
+*is* `dashboard.diff_two_summaries`). Pure dict-in/dict-out;
+the app renders it exactly as before (38.4 unchanged).
+
+**Output and exit (42.2.3).** Human view: the two scores, the delta,
+and the spec-diff table (or a `best_spec: identical` line when there is
+no diff). `--json` prints the pure `diff_two_summaries` dict. rc 0;
+rc 1 when either run dir has no `summary.json`.
+
+### 42.3 `autorefine explain --run DIR` (42.3.1–42.3.3)
+
+**Command (42.3.1).** `explain --run DIR [--target T] [--json]`
+(`--target` defaults to 95.0, like `fit`'s gate and `report --project`).
+
+**The five blocks (42.3.2).** A one-screen narrative assembled from
+existing pure helpers over the run's artifacts:
+
+- **result** — task, seed, policy (the `run_config.policy` of the
+  summary, 37.1), baseline → final score, improvement factor,
+experiments run, finished reason;
+- **tried** — per-field trial/wins/win-rate over the logged
+  experiments (`field_stats`, 26.1 — the entries of
+  `experiments.jsonl` carry the `mutation`/`accepted` pairs it reads);
+- **why** — the accepted chain: the baseline champion followed by each
+  accepted experiment (mutation, score), in log order;
+- **weak** — the final model's per-class holdout diagnostics
+  (`holdout_diagnostics`, 28.2) with the weakest-class hint
+  ("the model fails on class X"), or `n/a (not a classification task)`
+  when the task/model is not reconstructible or is episode/mse
+  (28.5);
+- **next** — the 41.1 budget projection of the run's target
+  (`projection_points` over the runs-dir registry + this run,
+  `project_budget` verdict: CEILING / ~N MORE / insufficient history),
+  one line.
+
+**Output and exit (42.3.3).** rc 0 (an informational view — the
+`weak` block degrades to `n/a` instead of failing); rc 1 when the run
+dir has no `summary.json`. `--json` prints
+`{"result": …, "tried": …, "why": …, "weak": …, "next": …}`.
+
+### 42.4 Acceptance (A32)
+
+- **predict (42.1)** — the pure leaf `autorefine.predict` is
+deterministic: `row_to_features` (name match case-insensitive, with a
+missing-column and a wrong-count error; positional; the one-key object
+rule for nameless tasks), `standardize` (train stats when present,
+identity otherwise), `predict_features` (softmax → label via
+`class_values` + softmax probabilities; mse → float, `null`
+probabilities), `csv_rows_to_features` (header vs positional
+detection; extra header columns OK; missing column and wrong cell
+count are errors), `media_item_features` (dispatches the task's
+`item_features`). `predict --run DIR` scores new rows on a finished
+fitting run with rc 0 (`--row` array and object, `--csv` one-column
+and header-with-extra-label-column, `--stdin`, `--json` the pure
+array); an episode task (cartpole) is rc 1 with the 42.1.2 message;
+none/multiple input modes are rc 1; a missing run dir is rc 1; a CSV
+row with only unknown columns is rc 1.
+- **compare (42.2)** — `diff_two_summaries` lives in core
+`autorefine.dashboard` (no streamlit import) and
+`dashboard_app.diff_two_summaries is dashboard.diff_two_summaries` (the
+38.4 A28 test stays green); `compare` prints the score delta +
+spec-diff table (identical specs → the identical line), `--json`
+prints the pure dict, and a missing summary is rc 1.
+- **explain (42.3)** — on a finished sine run (mse) `explain` is rc 0
+with the result/tried/why/next blocks and a `n/a` weak block; on a
+classification (csv) run the weak block shows the per-class lines +
+the weakest-class hint; `--json` has exactly the five block keys; the
+next block renders a CEILING or ~N MORE verdict (a sub-/super-target
+registry history); no run dir is rc 1.
+- **Regression** — A1–A31 stay green (no run behavior, summary key
+set, artifact, or app-view change; `fit`/`report`/`eval` unchanged);
+the A25 index table advances (27 → 28 acceptance rows; `defined ==
+set(range(1, 33))`); the version stepped to `0.28.0` in both sources
+(33.1) with the round assertions advanced (v0.28 ⇒ `0.28.0`).
+
+### 42.5 Milestone
+
+**M31** — v0.28 use-the-model loop: `predict` (42.1), `compare`
+(42.2), `explain` (42.3) (A32).
+
+---
+
+## 43. v0.29 — Trust before you train (A33, M32)
+
+Two preflight surfaces, both **pure, zero-training, additive** (43.4):
+nothing in 43.1/43.2 changes a run's behavior, artifacts, or the A1–A32
+pins. The round's rule: **catch the bad idea before the 30-minute run**
+— the data problems a run would surface as a mystery score an hour in,
+and the broken install a user would only discover at the end of a `fit`.
+
+### 43.1 `fit --dry-run` data-health preflight (43.1.1–43.1.3)
+
+**The health block (43.1.1).** `fit --dry-run` (40.1) already builds a
+fully-constructed probe task (`TASKS[task](seed, **config)`) before it
+prints the plan. A new pure leaf `autorefine.preflight` —
+`data_health(task, target=None) -> dict` — computes, from that same probe
+(no second data load, no training), the stats a 30-minute run would
+otherwise surface as a mystery final score:
+
+- **class balance** — per-class row counts + shares of the label (csv)
+  or of the item labels (media), in descending-count order (ties by
+  label); for a softmax head, a **headroom note** against the run's
+  `--target`: a constant majority-class predictor scores
+  `share × 100`, so the note states the points of headroom left below
+  the target — or that the majority class alone already meets it —
+  the "my 95% bar is trivial (or nearly so) on this split" failure, at
+  planning time;
+- **constant / near-constant columns** — a feature with `min == max`
+  (constant), or one whose single most frequent value covers ≥ 99% of
+  its non-empty values (near-constant); both are named, with the
+  offending value and share;
+- **missing values** — per-column empty-value counts across **all**
+  columns of the raw file (the task silently drops any column with an
+  empty value from its features, 22.1 — so the user sees what was
+  excluded, and that it was excluded, instead of wondering why a column
+  vanished);
+- **numeric ranges** — min / max / mean per feature column.
+
+Media tasks (no raw rows) degrade to the same dict shape: item count,
+head, the class balance from the task's own label array, and a
+`media task:` note — the block never fails the plan (43.1.3).
+
+**Output (43.1.2).** The block prints inside the existing dry-run plan
+(human view, between the `dataset` and `budget` lines) as `health :` /
+`balance  :` / `headroom :` / `features :` / `constant   :` /
+`near-const :` / `missing  :` lines — `format_health(health)` in the
+same leaf renders them, the CLI stays a thin printer. Dry-run has no
+`--json` (40.1), so the contract is the human lines (asserted as
+verbatim fragments in the tests).
+
+**Exit semantics (43.1.3).** Bad health is **warnings, not
+failures**: the block prints, the plan still prints, and rc stays 0 —
+the 40.1.3 contract ("rc 0 when the plan prints") is unchanged; only
+the existing resolve/probe failures (a wrong label column, a non-numeric
+label, ...) keep rc 1. The point is to make a trivial or unreachable
+target *visible* before the run, not to gate on it.
+
+### 43.2 `autorefine doctor` (43.2.1–43.2.3)
+
+**Command (43.2.1).** `autorefine doctor [--runs-dir DIR]` (default
+`runs`, like the other commands). One flag — doctor is a diagnostic, not
+a run.
+
+**Checks (43.2.2).** Five checks, six lines (the extras check prints one
+line per extra), each `ok` / `warn` / `FAIL`:
+
+1. the `autorefine` version (the 33.1 single source) + the Python
+   version;
+2. numpy importable + its version (the only core dependency);
+3. the two optional extras, probed with `importlib.util.find_spec` —
+   `PIL` (`autorefine[image]`) and `soundfile` (`autorefine[audio]`):
+   present → `ok` with the installed version (read from the dist
+   metadata — no module import, no `sys.modules` side effects); absent →
+   `warn` with the install hint, never `FAIL` — and `find_spec`, not
+   `import`, so the "`import autorefine` never pulls them in" invariant
+   (A23) holds;
+4. **smoke train** — the `run --demo` loop (41.3) at a smaller budget:
+   `parity-v1`, 1 experiment / 20 s wall / 5 s per train, seed 7, search
+   policy, un-gated, into a throwaway `tempfile` dir, timed. An error
+   is `FAIL`; a slow-but-finished train (≥ 1 s) is `warn` with the
+   measured wall; under 1 s is `ok`;
+5. `--runs-dir` writability — create the dir (parents included) and
+   write + delete a probe file; any failure is `FAIL` (a `fit` would die
+   here).
+
+**Result and exit (43.2.3).** A final `result: N ok, N warn, N FAIL`
+line. rc 0 when nothing is `FAIL` (warns — an absent optional extra, a
+slow smoke — do not fail the command); rc 1 when any check is `FAIL`.
+The smoke train's run dir is a `tempfile` dir — doctor leaves no
+artifacts in the user's `--runs-dir`.
+
+### 43.3 Acceptance (A33)
+
+- **preflight (43.1)** — `data_health` on a hand-written 20-row CSV
+  reports each stat: the 90/10 class balance (counts + shares,
+  majority first), the headroom note both ways (a target above the
+  majority score states the remaining points; a target at or below it
+  states the majority class already meets it), a constant column
+  (`min == max`), a near-constant column (≥ 99% one value, with the
+  share), per-column missing counts (an *ignored* column with empties
+  is named as ignored), and min/max/mean per feature; an mse CSV carries
+  no balance (and no headroom note); a media (audio) task degrades to
+  the media shape (item count + class balance from the subfolders)
+  without failing. `fit --dry-run` on the same CSV prints the health
+  lines inside the plan with rc 0 and creates no run dir; a bad label
+  column is still rc 1 (40.1.3 unchanged).
+- **doctor (43.2)** — `doctor` is rc 0 on a healthy install; its check
+  lines are present (version, numpy, both extras — the extras lines are
+  asserted, not the install state), the smoke-train line reports a
+  finite wall under 1 s, and the `result:` line counts ok/warn/FAIL;
+  `doctor --runs-dir` pointed at a path under a *file* is `FAIL` with
+  rc 1; and `import autorefine` still never pulls PIL/soundfile into
+  `sys.modules` (the A23 invariant — doctor uses `find_spec`).
+- **Regression** — A1–A32 stay green (no run behavior, summary key set,
+  artifact, or app-view change; `fit`/`report`/`eval` unchanged; the 40.1
+  dry-run plan keeps its rc contract); the A25 index table advances
+  (28 → 29 acceptance rows; `defined == set(range(1, 34))`); the version
+  stepped to `0.29.0` in both sources (33.1) with the round assertions
+  advanced (v0.29 ⇒ `0.29.0`).
+
+### 43.4 Milestone
+
+**M32** — v0.29 trust-before-you-train: data-health preflight in
+`fit --dry-run` (43.1) + `autorefine doctor` (43.2) (A33).
+
+---
+
+## 44. v0.30 — Stable scores, visible features (A34, M33)
+
+Two opt-in scoring surfaces, both **no behavior change under the
+defaults** (44.3): `kfold` (44.1) makes the score signal itself more
+stable by scoring the trained model on K distinct held-out subsets, and
+`--importance` (44.2) answers "which columns does my winning model
+actually use". The default stays today's single random split (A1–A33
+pins untouched).
+
+### 44.1 K-fold holdout scoring (44.1.1–44.1.4)
+
+**Motivation (44.1.1).** A single random split is the noisiest part of
+the score signal (exactly why the §18.3 CI gate exists): the score is
+computed on whichever 10% of rows the split happened to assign to the
+holdout. Two candidates can differ by noise alone, and the gate's
+accept/reject inherits that noise. Scoring the same trained model on K
+distinct held-out subsets and averaging reduces the "which rows were
+holdout" variance — for small tabular datasets materially.
+
+**Contract (44.1.2).**
+
+- A new optional task-protocol method
+  `score_fold(model, split, fold_index, n) -> float`:
+  - the `Task` ABC default (`tasks/base.py`):
+    `self.score(model, f"{split}-kf{fold_index}", n)` — generative tasks
+    (sine/parity/cartpole/gridnav) get a distinct fresh seed-derived
+    point set per fold (the same opaque-split-name mechanism as the
+    §18.3 block bootstrap, so zero task changes there);
+  - the `CsvTask` override (`tasks/csv.py`): the `fold_index`-th
+    deterministic random subset of the **non-train pool** (`holdout ∪
+    gen` rows, already train-standardized) of size ≈ the holdout split,
+    seeded by `SeedSequence([task.seed, zlib.crc32(b"csv-kfold"),
+    fold_index])` (G2). The pool excludes the train split the model was
+    trained on, so there is no leakage.
+- A new evaluator function `kfold_score(task, model, split, k, n)`
+  (`evaluator.py`): `folds = [task.score_fold(model, split, i, n) for i
+  in range(k)]`; returns `{"score": mean, "std": sample std (ddof=1;
+  0.0 for K < 2), "folds": [...]}` — the `score_with_ci` shape with
+  `score` in place of `mean`.
+- A new env knob `kfold` — KNOBS registry row (33.2), default `0` =
+  off, validator int ≥ 0 (not bool, no NaN/strings), `--kfold` exposed
+  on exactly `run` and `fit` (A23's parser scan keeps it there).
+- `_evaluate`: when `kfold > 0` (checked **before** the §18.3
+  `ci_blocks` branch) holdout and gen are both scored via
+  `kfold_score`; the (score, std, gen_gap) triple is (mean, fold-std,
+  mean_h − mean_g) — the §18.6 gate consumes it unchanged, so a
+  `z_accept` gate now sees the fold σ instead of 0.0.
+
+**Semantics (44.1.3).** Scoring-only: the model is trained once and
+then scored on K distinct subsets — a genuine variance reduction over
+"which rows were holdout", without the K× retraining cost a
+retrain-per-fold scheme would pay. K = 1 degrades to one subset (not
+exactly the legacy single split, but the same single-score path);
+K = 0 is the off switch and the exact legacy behavior.
+
+**Pin safety (44.1.4).** `kfold = 0` (the default) → `_evaluate` is
+byte-for-byte the legacy path (single split, std 0.0; the A24 summary
+key set and the A1–A33 pins stay green). The summary carries a
+**conditional** `kfold` key — `{"k": …}` — only when > 0 (the existing
+`screening` / `ensemble` / `parent_run` conditional-key pattern), and
+it is **not** added to the `search_quality` dict (whose 5-key set is
+pinned). `RunConfig` gains a defaulted `kfold: int = 0` field (37.1.2
+shape: additive, round-trips, `fit_recipe` renders `--kfold K` only
+when > 0), and `fit --from-run` re-runs the recipe's kfold exactly
+(37.1.4).
+
+### 44.2 Feature importance (44.2.1–44.2.3)
+
+**The leaf (44.2.1).** A new pure leaf `autorefine.importance` (numpy +
+stdlib only; import-cycle-free, 3.1) — the `diagnostics` (28.2) family
+member:
+
+- `score_xy(model, x, y, head) -> float` — the head metric on given
+  rows: softmax → 100·accuracy, mse → 100·max(0, R²) — exactly the
+  `CsvTask.score` contract (22.1), so the baseline and the shuffles
+  are scored by the same metric the task itself reports;
+- `permutation_importance(task, model, n=200, n_repeats=5, seed=7) ->
+  dict | None` — rows from `task.holdout_rows(n, model)` (the 28.2
+  protocol); `baseline = score_xy` over those rows; for each feature
+  column j: average over `n_repeats` deterministic shuffles (column j
+  replaced by its own permutation; the rest untouched;
+  `SeedSequence([seed, zlib.crc32(b"perm-<j>"), repeat])`, G2);
+  `importance_j = baseline − shuffled score` (a score drop — higher =
+  the model uses the column more). Names from `task.feature_names`
+  (the csv task's file column names) else `f<j>`. Returns
+  `{"head", "n", "baseline", "features":[{"name","importance"}]}`
+  sorted by importance descending. One extra pass over the holdout —
+  zero new data, zero training.
+
+**The CLI (44.2.2).** `report --importance [--importance-repeats R]`
+(default 5): reconstructs the run through the 42.1
+`_run_task_and_model` pattern (summary/task/model — no re-implemented
+loading) and prints a human block: the baseline score, then one line
+per feature with its score-drop, plus a note that higher = more used.
+Mutually exclusive with `--json`, `--history`, `--what-if`,
+`--project`, `--trace` (the 41.1.1/41.2.1 rule — human vs machine
+views), rc 1 on a conflict.
+
+**Degrade (44.2.3).** Returns `None` — and the CLI prints a clear
+"n/a" line, still rc 0 — when it does not apply: episode tasks
+(`max_steps > 1`), a task without `holdout_rows`, a head other than
+softmax/mse, or non-flat features (`x.ndim != 2`; convnet/grid
+models).
+
+### 44.3 Acceptance (A34)
+
+- **kfold (44.1)** — `kfold = 0` (the default) is bit-identical to the
+  legacy single-split path (score/std/gen_gap, the A24 summary key set,
+  the `search_quality` 5-key set); with `kfold = K > 0` the holdout
+  score is the mean of K folds and `std` the fold sample std; CSV folds
+  are distinct, deterministic subsets of the non-train pool (no train
+  rows; same seed → same folds, different seed → different folds), and
+  generative tasks take the ABC default (a fresh seed-derived point set
+  per fold). `--kfold` is present on exactly `run` + `fit` (A23 parser
+  scan), registry default 0 = parser default; the summary carries the
+  conditional `kfold` key only when > 0; `RunConfig` round-trips with
+  `kfold` and `fit_recipe` renders `--kfold K` only when > 0; `fit
+  --from-run` re-runs the recipe's kfold.
+- **importance (44.2)** — on a softmax CSV where one feature actually
+  matters, that feature ranks first; the mse path returns a sorted
+  feature list; an episode task and a grid (non-flat) task degrade to
+  `None`; `report --importance` on a finished CSV run prints the block
+  with rc 0, on a non-applicable run prints the n/a line with rc 0; the
+  mutual exclusions with `--json`/`--history`/`--what-if`/`--project`/
+  `--trace` are rc 1.
+- **Regression** — A1–A33 stay green (default single split; summary key
+  set; artifacts; app views; `fit`/`eval` unchanged); the A25 index
+  advances (29 → 30 acceptance rows; `defined == set(range(1, 35))`);
+  the version stepped to `0.30.0` in both sources (33.1) with the round
+  assertions advanced (v0.30 ⇒ `0.30.0`).
+
+### 44.4 Milestone
+
+**M33** — v0.30 stable scores / visible features: k-fold holdout
+scoring (44.1) + permutation feature importance (44.2) (A34).

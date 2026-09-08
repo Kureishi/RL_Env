@@ -57,6 +57,11 @@ class CsvTask(Task):
     # sets the instance metric alongside `head` (accuracy vs r2 per data).
     metric = "r2"
     capabilities = frozenset()
+    # SPEC.md 42.1.3 (v0.28): the train-only standardization stats —
+    # instance values (the same mean/std __init__ already computes);
+    # None keeps class introspection usable before a file is given.
+    feature_mean = None
+    feature_std = None
 
     def __init__(self, seed: int, path: str | Path | None = None,
                  label: str | None = None, split_frac: float = 0.2) -> None:
@@ -122,6 +127,8 @@ class CsvTask(Task):
         std = x[tr].std(axis=0)
         std = np.where(std == 0.0, 1.0, std)
         x = (x - mean) / std
+        self.feature_mean = mean  # SPEC.md 42.1.3 (v0.28): expose the stats
+        self.feature_std = std  # so `predict` standardizes new rows like train
 
         self._x_tr, self._y_tr = x[tr], self._y[tr]
         self._x_ho, self._y_ho = x[ho], self._y[ho]
@@ -197,20 +204,46 @@ class CsvTask(Task):
         n = len(self._x_tr) if n_points is None else min(int(n_points), len(self._x_tr))
         return self._x_tr[:n], self._y_tr[:n]
 
-    def score(self, model, split: str, n: int) -> float:
-        x, y = self._rows_for(split)
+    def _score_xy(self, model, x: np.ndarray, y: np.ndarray) -> float:
+        """The head metric on given rows — softmax → 100·accuracy, mse →
+        100·max(0, R²) — the exact §22.1 score contract, factored so
+        `score` (a split) and `score_fold` (a subset) share one body.
+        SPEC.md 44.1.2 (v0.30)."""
         if len(x) == 0:
             return 0.0
-        n = min(int(n), len(x))
-        pred = np.asarray(model.forward(x[:n]), dtype=np.float64)
+        pred = np.asarray(model.forward(x), dtype=np.float64)
         if self.head == "softmax":
-            acc = (pred.argmax(axis=1) == y[:n]).mean()
+            acc = (pred.argmax(axis=1) == y).mean()
             return float(100.0 * acc)
         pred = pred.reshape(-1)
-        ss_res = float(((pred - y[:n]) ** 2).sum())
-        ss_tot = float(((y[:n] - y[:n].mean()) ** 2).sum())
+        ss_res = float(((pred - y) ** 2).sum())
+        ss_tot = float(((y - y.mean()) ** 2).sum())
         r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
         return max(0.0, 100.0 * r2)
+
+    def score(self, model, split: str, n: int) -> float:
+        x, y = self._rows_for(split)
+        n = min(int(n), len(x))
+        return self._score_xy(model, x[:n], y[:n])
+
+    def score_fold(self, model, split: str, fold_index: int, n: int) -> float:
+        """SPEC.md 44.1.2 (v0.30): the `fold_index`-th deterministic
+        random subset of the non-train pool (`holdout ∪ gen` rows, both
+        already train-standardized) of size ≈ the holdout split —
+        distinct per fold, seeded by (task seed, crc32(b"csv-kfold"),
+        fold_index) (G2). The pool excludes the train split the model
+        was trained on, so there is no leakage (44.1.4)."""
+        if len(self._x_ho) == 0:
+            return 0.0
+        x_pool = np.vstack([self._x_ho, self._x_ge])
+        y_pool = np.concatenate([self._y_ho, self._y_ge])
+        size = min(len(self._x_ho), len(x_pool))
+        seq = np.random.SeedSequence(
+            [self.seed, zlib.crc32(b"csv-kfold"), int(fold_index)])
+        idx = np.random.default_rng(seq).permutation(len(x_pool))[:size]
+        x, y = x_pool[idx], y_pool[idx]
+        n = min(int(n), len(x))
+        return self._score_xy(model, x[:n], y[:n])
 
     def holdout_rows(self, n: int, model=None) -> tuple[np.ndarray, np.ndarray]:
         """SPEC.md 28.2 (C2): the holdout split `(x, y)`, clamped to its

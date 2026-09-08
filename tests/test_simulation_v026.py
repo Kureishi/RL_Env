@@ -287,6 +287,7 @@ def test_report_json_unchanged_no_what_if_block(tmp_path, capsys):
 # --- SPEC.md 33.1 / 40.3 (A30): version ---------------------------------------
 
 def test_version_026_both_sources():
-    """A30 (40.3, 33.1): the version stepped to `0.26.0` in both sources."""
+    """A30 (40.3, 33.1): the version stepped to `0.30.0` in both sources
+    (v0.30 ⇒ `0.30.0`, M33, SPEC.md 44 — advanced in place per 33.1)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.27.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.30.0"

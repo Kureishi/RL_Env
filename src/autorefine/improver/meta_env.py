@@ -23,7 +23,7 @@ from typing import Any, Callable
 
 from ..budget import BudgetManager
 from ..config import DEFAULT_SPEC, Budget, ModelSpec, SpecError
-from ..evaluator import evaluate_full, score_with_ci
+from ..evaluator import evaluate_full, kfold_score, score_with_ci
 from ..memory import (
     KIND_BASELINE,
     KIND_CURRICULUM,
@@ -123,6 +123,15 @@ def _v_stall_patience(value: Any) -> Any:
     return value
 
 
+def _v_kfold(value: Any) -> int:
+    if value is None or isinstance(value, bool) \
+            or not isinstance(value, int) or value < 0:
+        raise ValueError(
+            f"kfold must be an int >= 0 (0 = off), got {value!r} "
+            f"(SPEC.md 44.1)")
+    return value
+
+
 def _v_screen_frac(value: Any) -> float:
     if value is None or isinstance(value, bool):
         raise ValueError(
@@ -166,6 +175,7 @@ KNOBS: dict[str, Knob] = {
                            ("run", "fit", "variance"), None, _v_stall_patience),
     "screen_frac": Knob("screen_frac", 1.0, "32.2",
                         ("run", "fit"), None, _v_screen_frac),
+    "kfold": Knob("kfold", 0, "44.1", ("run", "fit"), None, _v_kfold),
 }
 
 
@@ -228,6 +238,8 @@ class AutoRefineEnv:
         stall_patience: int | None = None,
         # --- v0.18 two-stage screening (SPEC.md 32.2; 1.0 = off, pre-v0.18)
         screen_frac: float = 1.0,
+        # --- v0.30 k-fold holdout scoring (SPEC.md 44.1; 0 = off, legacy)
+        kfold: int = 0,
         # --- v0.23 driver metadata (SPEC.md 37.1.3; None = env-level) ----
         # the env does not own these — the driver (cli fit / dashboard /
         # variance) supplies them so the reset-time recipe is complete
@@ -243,6 +255,7 @@ class AutoRefineEnv:
         # one home for the rules, the A21/A22 error messages unchanged
         _sp = KNOBS["stall_patience"].validate(stall_patience)
         _sf = KNOBS["screen_frac"].validate(screen_frac)
+        _kf = KNOBS["kfold"].validate(kfold)
         task_cls = TASKS[task]
         self.task_name = task
         self.seed = int(seed)
@@ -299,6 +312,9 @@ class AutoRefineEnv:
         self.screen_active = self.screen_frac < 1.0
         self._screen_champion: float | None = None  # set at reset (32.2)
         self._screen_baseline_score: float | None = None  # 33.3: reset champion
+        # SPEC.md 44.1 (v0.30): k-fold holdout scoring (0 = off, legacy
+        # single split exactly — the A1–A33 pins stay green)
+        self.kfold = _kf
         # SPEC.md 37.1.3 (v0.23, G3): driver metadata for the canonical
         # recipe (None = env-level, not a driver choice)
         self.policy = policy
@@ -749,9 +765,16 @@ class AutoRefineEnv:
     def _evaluate(self, model) -> tuple[float, float, float, float]:
         """Score `model` on holdout + gen. Returns (score, std, gen, gen_gap).
 
-        SPEC.md 18.3: with ci_blocks > 0 the scores are block means (each with
-        a sample std over the blocks); otherwise the legacy single 200-point
-        score with std 0. gen_gap keeps its existing definition (score points)."""
+        SPEC.md 44.1 (v0.30): with kfold > 0 (checked first) both splits are
+        scored over K distinct held-out subsets — the score is the fold mean
+        and the std the fold sample std (44.1.2/44.1.3). SPEC.md 18.3:
+        with ci_blocks > 0 the scores are block means (each with a sample
+        std over the blocks); otherwise the legacy single 200-point score
+        with std 0. gen_gap keeps its existing definition (score points)."""
+        if self.kfold > 0:
+            h = kfold_score(self.task, model, "holdout", k=self.kfold)
+            g = kfold_score(self.task, model, "gen", k=self.kfold)
+            return h["score"], h["std"], g["score"], h["score"] - g["score"]
         if self.ci_blocks > 0:
             h = score_with_ci(self.task, model, "holdout",
                               n_blocks=self.ci_blocks, block_size=self.block_size)
@@ -856,6 +879,11 @@ class AutoRefineEnv:
         # absent for a fresh run (the A24 key sets stay untouched)
         if self.parent_run is not None:
             summary["parent_run"] = self.parent_run
+        # SPEC.md 44.1.4 (v0.30): k-fold config — additive *conditional*
+        # key, absent when kfold = 0 (the A24 key set + the pinned 5-key
+        # search_quality dict stay untouched)
+        if self.kfold > 0:
+            summary["kfold"] = {"k": self.kfold}
         self.memory.save_summary(summary)
         # SPEC.md 38.1 (v0.24, T1): the run registry — one appended entry
         # per finished run (recovery-safe, 38.1.4); the same wall seconds

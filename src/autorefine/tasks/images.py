@@ -52,6 +52,10 @@ class ImageTask(Task):
     # sets the instance metric alongside `head` (r2 for mse-labelled data).
     metric = "accuracy"
     capabilities = frozenset({"grid", "media"})
+    # SPEC.md 42.1.3 (v0.28): the train-only standardization stats —
+    # instance values; None keeps class introspection usable.
+    feature_mean = None
+    feature_std = None
 
     def __init__(self, seed: int, path: str | Path | None = None,
                  label: str | None = None, split_frac: float = 0.2,
@@ -92,6 +96,8 @@ class ImageTask(Task):
         std = x[tr].std(axis=0)
         std = np.where(std == 0.0, 1.0, std)
         x = (x - mean) / std
+        self.feature_mean = mean  # SPEC.md 42.1.3 (v0.28): expose the stats
+        self.feature_std = std  # so `predict` standardizes new items like train
         self._x_tr, self._y_tr = x[tr], self._y[tr]
         self._x_ho, self._y_ho = x[ho], self._y[ho]
         self._x_ge, self._y_ge = x[ge], self._y[ge]
@@ -112,6 +118,13 @@ class ImageTask(Task):
         except Exception as exc:
             raise ValueError(f"could not read image {p}: {exc}") from exc
         return (a / 255.0).ravel()
+
+    def item_features(self, path: str | Path) -> np.ndarray:
+        """SPEC.md 42.1.3 (v0.28): decode one image file to the raw
+        (unstandardized) (grid·grid,) feature — the public wrapper over
+        `_decode` that `predict --item` (42.1.1) and `autorefine.predict`
+        call, so the CLI never reaches into task internals."""
+        return self._decode(Path(path), self.grid)
 
     # --- protocol (SPEC.md 15, 24.2 — mirrors CsvTask) ------------------------
     def _rows_for(self, split: str) -> tuple[np.ndarray, np.ndarray]:

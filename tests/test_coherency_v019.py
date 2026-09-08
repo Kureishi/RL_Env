@@ -158,9 +158,10 @@ def test_version_single_source():
     import autorefine
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
     assert py["project"]["version"] == autorefine.__version__
-    # round label == package version (v0.27 ⇒ 0.27.0, M30 — the round
-    # advanced per SPEC.md 33.1 with the v0.27 simulation batch, SPEC.md 41)
-    assert autorefine.__version__ == "0.27.0"
+    # round label == package version (v0.30 ⇒ 0.30.0, M33 — the round
+    # advanced per SPEC.md 33.1 with the v0.30 stable-scores batch,
+    # SPEC.md 44)
+    assert autorefine.__version__ == "0.30.0"
     # the app caption is `v{__version__}` — the same number, no third copy
     app_src = (REPO / "src" / "autorefine" / "dashboard_app.py"
                ).read_text(encoding="utf-8")
@@ -176,7 +177,8 @@ def test_knob_registry_defaults_match_env_signature():
     sig = inspect.signature(AutoRefineEnv.__init__)
     assert set(KNOBS) == {
         "ci_blocks", "z_accept", "efficiency_weight", "gen_gap_penalty",
-        "block_size", "ensemble_top_k", "stall_patience", "screen_frac"}
+        "block_size", "ensemble_top_k", "stall_patience", "screen_frac",
+        "kfold"}
     for name, knob in KNOBS.items():
         assert name in sig.parameters, name
         assert sig.parameters[name].default == knob.default, name

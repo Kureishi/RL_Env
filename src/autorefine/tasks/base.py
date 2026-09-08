@@ -67,6 +67,16 @@ class Task(ABC):
         """Official score on one split (holdout/gen); higher is better."""
         ...
 
+    def score_fold(self, model, split: str, fold_index: int, n: int) -> float:
+        """SPEC.md 44.1 (v0.30): one k-fold fold — the `fold_index`-th
+        distinct held-out subset of `split`. ABC default: a fresh
+        seed-derived point set, named like the §18.3 blocks (`holdout-
+        kf3`) so every generative task works unchanged; CsvTask
+        overrides with a deterministic subset of its non-train pool.
+        Duck-typed fakes without this method are fine — only
+        `kfold > 0` envs call it."""
+        return float(self.score(model, f"{split}-kf{fold_index}", n))
+
     # --- interactive-task primitives (optional for fitting tasks) ----------
     def initial_conditions(self, split: str, n: int) -> np.ndarray:
         """Seed-derived initial-condition block for one of train/val/holdout/gen."""

@@ -3,13 +3,19 @@
   python -m autorefine run    --task cartpole-v1 --seed 7 --experiments 30
   python -m autorefine report --run runs/<run_id>
   python -m autorefine eval   --run runs/<run_id>
+  python -m autorefine doctor [--runs-dir runs]
 """
 from __future__ import annotations
 
 import argparse
+import importlib
+import importlib.metadata
+import importlib.util
 import json
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 from .config import Budget, ModelSpec
@@ -21,6 +27,7 @@ from .gate import (
     parse_objective,
 )
 from .runconfig import RunConfig, format_recipe
+from .dashboard import diff_two_summaries, field_stats  # 42.2/42.3 (v0.28)
 from .improver.meta_env import AutoRefineEnv, search_quality_v04
 from .improver.bandit import BanditPolicy
 from .improver.curriculum import ParityCurriculum
@@ -52,6 +59,18 @@ from .plotting import (
     svg_pareto,
     svg_per_class_bars,
     svg_score_curve,
+)
+from .predict import (  # 42.1 (v0.28): the predict leaf
+    csv_rows_to_features,
+    media_item_features,
+    predict_features,
+    row_to_features,
+    standardize,
+)
+from .preflight import (  # 43.1 (v0.29): the data-health preflight leaf
+    _SMOKE_WALL_SECONDS,
+    data_health,
+    format_health,
 )
 from .plugins import (
     POLICIES_GROUP,
@@ -120,6 +139,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         curriculum=curriculum,
         stall_patience=args.stall_patience,  # v0.17 (SPEC.md 31.1; None = off)
         screen_frac=args.screen_frac,  # v0.18 (SPEC.md 32.2; 1.0 = off)
+        kfold=args.kfold,  # v0.30 (SPEC.md 44.1; 0 = off, legacy)
         # v0.23 (SPEC.md 37.1.3): driver metadata for the canonical recipe
         policy=args.policy,
         target=None,  # `run` is ungated (SPEC.md 37.2.3)
@@ -315,12 +335,19 @@ def _fit_dry_run(args: argparse.Namespace) -> int:
     print(f"  ensemble   : top-{2 if args.ensemble_final else 0}   "
           f"stall patience {args.stall_patience}   "
           f"screen frac {args.screen_frac:g}")
+    if args.kfold > 0:  # v0.30 (SPEC.md 44.1): shown only when enabled
+        print(f"  kfold      : K={args.kfold} distinct held-out subsets "
+              f"per score (SPEC.md 44.1)")
     print(f"  task       : head {probe.head} | metric {metric} "
           f"| n_outputs {probe.n_outputs} | state_dim {probe.state_dim}")
     if dsz is not None:
         print(f"  dataset    : {dsz} points (the train split)")
     else:
         print("  dataset    : task default size")
+    # SPEC.md 43.1 (v0.29): the data-health preflight — pure stats over the
+    # probe already built above; warnings in the plan, never failures (43.1.3)
+    for line in format_health(data_health(probe, args.target)):
+        print(line)
     print(f"  budget     : experiments {budget.max_experiments} | "
           f"max-seconds {budget.max_wall_seconds:g} | "
           f"max-train-seconds {budget.max_train_seconds:g}")
@@ -392,6 +419,7 @@ def _fit_data(args: argparse.Namespace) -> tuple:
         task_config=config,
         stall_patience=args.stall_patience,  # v0.17 (SPEC.md 31.1; None = off)
         screen_frac=args.screen_frac,  # v0.18 (SPEC.md 32.2; 1.0 = off)
+        kfold=args.kfold,  # v0.30 (SPEC.md 44.1; 0 = off, legacy)
         # v0.23 (SPEC.md 37.1.3): driver metadata for the canonical recipe
         policy=args.policy, target=args.target,
         rl_episodes=args.rl_episodes if args.policy == "rl" else None,
@@ -455,6 +483,7 @@ def _fit_from_run(args: argparse.Namespace) -> tuple:
         ensemble_top_k=config.ensemble_top_k,
         stall_patience=config.stall_patience,  # v0.17 (SPEC.md 31.1)
         screen_frac=config.screen_frac,  # v0.18 (SPEC.md 32.2)
+        kfold=config.kfold,  # v0.30 (SPEC.md 44.1): the recipe's kfold
         policy=config.policy, target=bar, rl_episodes=config.rl_episodes,
         # SPEC.md 38.2 (v0.24, T2): lineage — this run re-executes that one
         parent_run=run_dir.name,
@@ -775,6 +804,17 @@ def _cmd_report(args: argparse.Namespace) -> int:
             print("--what-if and --json are mutually exclusive "
                   "(SPEC.md 40.2.1)", file=sys.stderr)
             return 1
+    # SPEC.md 44.2.2 (v0.30): --importance is a human view, mutually
+    # exclusive with the machine (--json), the history path, the what-if
+    # path, and the project/trace paths.
+    if getattr(args, "importance", False):
+        if (args.history or args.json or getattr(args, "what_if", None)
+                or getattr(args, "project", False)
+                or getattr(args, "trace", False)):
+            print("--importance is mutually exclusive with "
+                  "--json/--history/--what-if/--project/--trace "
+                  "(SPEC.md 44.2.2)", file=sys.stderr)
+            return 1
     # SPEC.md 41.1.1/41.2.1 (v0.27): --project / --trace are human views,
     # mutually exclusive with the machine (--json), the history path, and
     # the what-if path (A11 untouched).
@@ -872,6 +912,12 @@ def _cmd_report(args: argparse.Namespace) -> int:
         print("\n=== trace (one line per logged experiment) ===")
         for line in trace_lines(entries):
             print(f"  {line}")
+    # SPEC.md 44.2 (v0.30, C): permutation feature importance — one extra
+    # pass over the holdout rows; fitting tasks only (None -> n/a line).
+    if getattr(args, "importance", False):
+        rc = _cmd_importance(args, run_dir)
+        if rc != 0:
+            return rc
     # SPEC.md 40.2 (v0.26, S2): counterfactual re-gating — a human view that
     # returns its own verdict rc (0 PASS / 2 MISS / 1 bad objective) before
     # the rest of the report; the machine path above already returned.
@@ -1127,6 +1173,33 @@ def _report_extras(summary: dict, run_dir: Path) -> dict:
     return out
 
 
+def _cmd_importance(args: argparse.Namespace, run_dir: Path) -> int:
+    """`report --importance` (SPEC.md 44.2, v0.30): the winning model's
+    per-column holdout score drop (permutation importance). Reconstructs
+    the run through the 42.1 `_run_task_and_model` pattern (no re-
+    implemented loading); the n/a case (44.2.3) prints a clear line and
+    still returns rc 0; a broken run dir is rc 1."""
+    from .importance import permutation_importance
+    try:
+        _summary, task, model = _run_task_and_model(run_dir)
+    except (ValueError, FileNotFoundError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    result = permutation_importance(task, model,
+                                    n_repeats=args.importance_repeats)
+    if result is None:
+        print("\nfeature importance: n/a for this run (episode task, "
+              "no holdout rows, or non-flat features — SPEC.md 44.2.3)")
+        return 0
+    print(f"\nfeature importance (permutation, holdout n={result['n']}, "
+          f"head {result['head']}, baseline {result['baseline']:.2f})")
+    print("  importance = score drop when the column is shuffled "
+          "(higher = the model uses it more)")
+    for f in result["features"]:
+        print(f"  {f['name']:<24s} {f['importance']:+9.3f}")
+    return 0
+
+
 def _cmd_eval(args: argparse.Namespace) -> int:
     mem = RunMemory(Path(args.run))
     try:
@@ -1151,6 +1224,355 @@ def _cmd_eval(args: argparse.Namespace) -> int:
     print(f"gen score : {ev['gen_score']:.2f}")
     print(f"gen gap   : {ev['gen_gap']:.2f}")
     return 0
+
+
+# --- v0.28 (SPEC.md 42): the "use the model" loop ----------------------------
+
+def _run_task_and_model(run_dir: Path) -> tuple[dict, object, object]:
+    """SPEC.md 42 (v0.28): reconstruct (summary, task, model) for a finished
+    run — the `_report_extras` pattern (28.2), shared by `predict` and
+    `explain`. Raises ValueError/FileNotFoundError on a broken run dir."""
+    run_dir = Path(run_dir)
+    summary_path = run_dir / "summary.json"
+    if not summary_path.is_file():
+        raise ValueError(f"no summary.json in run dir {str(run_dir)!r}")
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    task = _task_from_summary(summary)
+    if task is None:
+        raise ValueError(f"unknown task {summary.get('task')!r} in summary")
+    family = (summary.get("best_spec") or {}).get("model_family", "mlp")
+    loaders = _best_model_loaders()
+    if family not in loaders:
+        raise ValueError(f"unknown model_family {family!r} in summary")
+    model = loaders[family](str(run_dir / "best_model.npz"))
+    return summary, task, model
+
+
+def _pred_str(pred: object) -> str:
+    """SPEC.md 42.1.4 (v0.28): the human rendering of a prediction —
+    integer-valued floats without a trailing ".0" (the §28.3 label rule)."""
+    if isinstance(pred, float) and pred.is_integer():
+        return str(int(pred))
+    return str(pred)
+
+
+def _cmd_predict(args: argparse.Namespace) -> int:
+    """`predict` (SPEC.md 42.1, v0.28): score NEW rows with the run's best
+    model. Exactly one input mode (42.1.1); fitting tasks only (42.1.2);
+    preprocessing = the task's own train stats (42.1.3); one forward pass
+    per row (42.1.4)."""
+    run_dir = Path(args.run)
+    try:
+        _summary, task, model = _run_task_and_model(run_dir)
+    except (ValueError, FileNotFoundError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if int(getattr(task, "max_steps", 1)) > 1:  # 42.1.2: fitting tasks only
+        print(f"task {getattr(task, 'name', '?')!r} is an episode task "
+              "(max_steps > 1): predict supports fitting tasks (csv, sine-v1, "
+              "image, audio) — use `autorefine eval` for episode tasks "
+              "(SPEC.md 42.1.2)", file=sys.stderr)
+        return 1
+    modes = [m for m, on in (("row", args.row is not None),
+                            ("csv", args.csv is not None),
+                            ("stdin", args.stdin),
+                            ("item", bool(args.item))) if on]
+    if len(modes) != 1:
+        print("exactly one input mode is required: --row, --csv, --stdin, "
+              "or --item (SPEC.md 42.1.1)", file=sys.stderr)
+        return 1
+    try:
+        if modes[0] == "row":
+            parsed = json.loads(args.row)
+            raws = [row_to_features(parsed, task.state_dim,
+                                    getattr(task, "feature_names", None))]
+        elif modes[0] == "csv":
+            raws = csv_rows_to_features(args.csv, task)
+        elif modes[0] == "stdin":
+            raws = []
+            for line in sys.stdin:
+                line = line.strip()
+                if not line:
+                    continue
+                parsed = json.loads(line)
+                raws.append(row_to_features(parsed, task.state_dim,
+                                            getattr(task, "feature_names", None)))
+            if not raws:
+                raise ValueError("no rows on stdin (SPEC.md 42.1.1)")
+        else:  # "item" — media tasks only (42.1.3)
+            raws = [media_item_features(task, p) for p in args.item]
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        print(f"predict: {exc}", file=sys.stderr)
+        return 1
+    results = []
+    for i, raw in enumerate(raws):
+        try:
+            feat = standardize(task, raw)
+            r = predict_features(task, model, feat)
+        except (ValueError, TypeError) as exc:
+            print(f"predict: row {i}: {exc}", file=sys.stderr)
+            return 1
+        results.append({"row": i,
+                        "prediction": r["prediction"],
+                        "probabilities": r["probabilities"]})
+    if args.json:
+        print(json.dumps(results, sort_keys=True))
+    else:
+        for r in results:
+            print(f"{r['row']}\t{_pred_str(r['prediction'])}")
+    return 0
+
+
+def _cmd_compare(args: argparse.Namespace) -> int:
+    """`compare` (SPEC.md 42.2, v0.28): the app's Past-runs compare widget
+    (38.4) in the terminal — `diff_two_summaries` (core `dashboard`,
+    42.2.2) over two run dirs' summaries."""
+    if len(args.runs) != 2:
+        print("compare needs exactly two run dirs: --run A --run B "
+              "(SPEC.md 42.2.1)", file=sys.stderr)
+        return 1
+    summaries = []
+    for d in args.runs:
+        p = Path(d) / "summary.json"
+        if not p.is_file():
+            print(f"no summary.json in run dir {d!r}", file=sys.stderr)
+            return 1
+        summaries.append(json.loads(p.read_text(encoding="utf-8")))
+    diff = diff_two_summaries(summaries[0], summaries[1])
+    if args.json:
+        print(json.dumps(diff, indent=2, sort_keys=True))
+        return 0
+    print(f"run A : {args.runs[0]}")
+    print(f"  score : {summaries[0].get('final_best_score')}")
+    print(f"run B : {args.runs[1]}")
+    print(f"  score : {summaries[1].get('final_best_score')}")
+    print(f"delta   : {diff['score_delta']} (B - A)")
+    if diff["spec_diff"]:
+        print(f"best_spec diff ({diff['n_diff_fields']} field(s)):")
+        for row in diff["spec_diff"]:
+            print(f"  {row['field']:<24s} {row['a']} -> {row['b']}")
+    else:
+        print("best_spec: identical")
+    return 0
+
+
+def _explain_blocks(args: argparse.Namespace, run_dir: Path,
+                    summary: dict, entries: list) -> dict:
+    """SPEC.md 42.3.2 (v0.28): the five explain blocks — pure derivation
+    from the run's artifacts (no writes)."""
+    # result (42.3.2) — the run_config policy (37.1) is the header source
+    result = {
+        "task": summary.get("task"),
+        "seed": summary.get("seed"),
+        "policy": (summary.get("run_config") or {}).get("policy"),
+        "baseline_score": summary.get("baseline_score"),
+        "final_score": summary.get("final_best_score"),
+        "improvement_factor": summary.get("improvement_factor"),
+        "experiments_run": summary.get("experiments_run"),
+        "finished_reason": summary.get("finished_reason"),
+    }
+    # tried (42.3.2) — 26.1 field_stats over the logged entries
+    tried = field_stats(entries)
+    # why (42.3.2) — the baseline champion + the accepted chain, log order
+    why = []
+    baseline = next((e for e in entries if e.get("kind") == KIND_BASELINE), None)
+    if baseline is not None:
+        why.append({"step": "baseline", "mutation": None,
+                    "score": baseline.get("holdout_score")})
+    for e in entries:
+        if e.get("kind") == KIND_EXPERIMENT and e.get("accepted"):
+            why.append({"step": "accepted",
+                        "mutation": e.get("mutation"),
+                        "score": e.get("holdout_score")})
+    # weak (42.3.2) — 28.2 holdout diagnostics; n/a when they do not apply
+    weak = {"diagnostics": None, "note": "n/a (not a classification task)"}
+    try:
+        _s, task, model = _run_task_and_model(run_dir)
+        diag = holdout_diagnostics(task, model)  # None for episode/mse (28.5)
+        if diag:
+            worst = min(range(len(diag["class_labels"])),
+                        key=lambda i: diag["per_class"][i])
+            note = (f"the model fails on class {diag['class_labels'][worst]} "
+                    f"({diag['per_class'][worst]:.1f}%)"
+                    if diag["per_class"][worst] < 100.0
+                    else "all classes at 100%")
+            weak = {"diagnostics": diag, "note": note}
+    except (ValueError, FileNotFoundError):
+        pass  # keep the n/a note (42.3.3: informational, degrades)
+    # next (42.3.2) — the 41.1 projection, same rule as `report --project`
+    reg = load_registry(run_dir.parent)
+    pts = projection_points(reg, summary, run_dir.name)
+    e_cur = summary.get("experiments_run")
+    e_cur = float(e_cur) if isinstance(e_cur, (int, float)) \
+        and not isinstance(e_cur, bool) else 0.0
+    proj = project_budget(pts, args.target, e_cur)
+    nxt = {"target": args.target, "points": proj["points"],
+           "verdict": proj["verdict"], "vmax": proj["vmax"],
+           "km": proj["km"], "more": proj["more"]}
+    return {"result": result, "tried": tried, "why": why,
+            "weak": weak, "next": nxt}
+
+
+def _cmd_explain(args: argparse.Namespace) -> int:
+    """`explain` (SPEC.md 42.3, v0.28): the one-screen narrative —
+    result / tried / why / weak / next (42.3.2). rc 0 (informational);
+    rc 1 on a broken run dir (42.3.3)."""
+    run_dir = Path(args.run)
+    summary_path = run_dir / "summary.json"
+    if not summary_path.is_file():
+        print(f"no summary.json in run dir {str(run_dir)!r}", file=sys.stderr)
+        return 1
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    entries = []
+    exp_path = run_dir / "experiments.jsonl"
+    if exp_path.is_file():
+        entries = [json.loads(l) for l in
+                   exp_path.read_text(encoding="utf-8").splitlines()
+                   if l.strip()]
+    blocks = _explain_blocks(args, run_dir, summary, entries)
+    if args.json:
+        print(json.dumps(blocks, sort_keys=True))
+        return 0
+    r = blocks["result"]
+    print(f"=== explain {run_dir} (SPEC.md 42.3) ===")
+    print("result")
+    print(f"  task            : {r['task']}  (seed {r['seed']}, "
+          f"policy {r['policy'] or '?'})")
+    base = r["baseline_score"]
+    fin = r["final_score"]
+    b = f"{base:.2f}" if isinstance(base, (int, float)) else "?"
+    f_ = f"{fin:.2f}" if isinstance(fin, (int, float)) else "?"
+    fac = r["improvement_factor"]
+    fac_s = f"{fac:.2f}x" if isinstance(fac, (int, float)) else "?"
+    print(f"  baseline -> final: {b} -> {f_}   ({fac_s})")
+    print(f"  experiments     : {r['experiments_run']}   "
+          f"finished: {r['finished_reason']}")
+    print("tried (per-field win rates)")
+    if blocks["tried"]:
+        for f in sorted(blocks["tried"]):
+            s = blocks["tried"][f]
+            print(f"  {f:<24s} {s['wins']:>3.0f}/{s['trials']:<3d} "
+                  f"({100.0 * s['win_rate']:.0f}%)")
+    else:
+        print("  (no logged mutations)")
+    print("why the best won (accepted chain)")
+    for w in blocks["why"]:
+        mut = ",".join(w["mutation"] or []) if w["mutation"] else "seed spec"
+        s = w["score"]
+        s_s = f"{s:.2f}" if isinstance(s, (int, float)) else "?"
+        print(f"  [{w['step']}] {s_s}  {mut}")
+    print("where it's weak (holdout diagnostics)")
+    weak = blocks["weak"]
+    diag = weak["diagnostics"]
+    if diag is None:
+        print(f"  {weak['note']}")
+    else:
+        print(f"  {diag['correct']}/{diag['n']} correct")
+        for i, lbl in enumerate(diag["class_labels"]):
+            print(f"  class {str(lbl):<12s} {diag['per_class'][i]:5.1f}% "
+                  f"({diag['confusion'][i][i]}/{diag['class_counts'][i]})")
+        print(f"  {weak['note']}")
+    print("what's next (budget projection)")
+    n = blocks["next"]
+    if n["verdict"] == "insufficient":
+        print(f"  insufficient history (target {n['target']:g}, "
+              f"{n['points']} same-task point(s)) — need >= 2 (SPEC.md 41.1.4)")
+    elif n["verdict"] == "ceiling":
+        print(f"  CEILING — asymptote {n['vmax']:.2f} does not exceed the "
+              f"target {n['target']:g} (SPEC.md 41.1.4)")
+    else:
+        print(f"  MORE — ~{n['more']} more experiment(s) to reach "
+              f"{n['target']:g} (asymptote {n['vmax']:.2f}, SPEC.md 41.1.4)")
+    return 0
+
+
+# --- v0.29 (SPEC.md 43.2): `autorefine doctor` --------------------------------
+
+def _smoke_train() -> tuple:
+    """SPEC.md 43.2.2 (v0.29): the `run --demo` loop (41.3) at a smaller
+    budget — parity-v1, 1 experiment / 20 s wall / 5 s per train, seed 7,
+    search policy, un-gated — into a throwaway dir. Returns
+    ("ok" | "warn" | "FAIL", line, measured wall or None)."""
+    tmp = tempfile.mkdtemp(prefix="autorefine-doctor-")
+    t0 = time.monotonic()
+    try:
+        env = AutoRefineEnv(
+            task="parity-v1", seed=7,
+            budget=Budget(1, 20.0, 5.0),  # 43.2.2: the tiny smoke budget
+            runs_dir=tmp, policy="search", target=None,
+            **search_quality_v04())
+        policy = SearchPolicy(seed=7)
+        state = env.reset()
+        while not env.done:
+            state, _r, _d, _i = env.step(policy.propose(state))
+    except Exception as exc:  # a broken core is a FAIL, not a crash (43.2.2)
+        return "FAIL", f"smoke train: error — {type(exc).__name__}: {exc}", None
+    wall = time.monotonic() - t0
+    if wall >= _SMOKE_WALL_SECONDS:
+        return "warn", f"smoke train: parity-v1, 1 experiment, {wall:.2f} s " \
+                       f"(>= {_SMOKE_WALL_SECONDS:g} s)", wall
+    return "ok", f"smoke train: parity-v1, 1 experiment, {wall:.2f} s " \
+                 f"(< {_SMOKE_WALL_SECONDS:g} s)", wall
+
+
+def _probe_runs_dir(runs_dir: str) -> tuple:
+    """SPEC.md 43.2.2: create the dir (parents included) and write + delete
+    a probe file — a `fit` would die here, so any failure is `FAIL`."""
+    p = Path(runs_dir)
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+        probe = p / ".doctor-probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+    except OSError as exc:
+        return "FAIL", f"runs dir: {runs_dir} not writable — {exc}", None
+    return "ok", f"runs dir: {runs_dir} (writable)", None
+
+
+def _cmd_doctor(args: argparse.Namespace) -> int:
+    """`doctor` (SPEC.md 43.2, v0.29): the friendly first command —
+    version / numpy / optional extras (via `find_spec`, never `import` —
+    the A23 invariant), a micro parity smoke train (43.2.2), and
+    `--runs-dir` writability. rc 0 when nothing is `FAIL` (warns — an
+    absent extra, a slow smoke — do not fail); rc 1 on any `FAIL` (43.2.3).
+    The smoke train's run dir is a `tempfile` dir, never the user's
+    `--runs-dir` (doctor leaves no artifacts in the user's space)."""
+    import autorefine as _af  # the 33.1 single version source
+    counts = {"ok": 0, "warn": 0, "FAIL": 0}
+
+    def emit(status: str, line: str) -> None:
+        counts[status] += 1
+        print(f"  {status:<4} {line}")
+
+    print("autorefine doctor (SPEC.md 43.2)")
+    emit("ok", f"autorefine {_af.__version__} "
+               f"(python {sys.version.split()[0]})")
+    try:
+        import numpy as _np
+        emit("ok", f"numpy {_np.__version__}")
+    except Exception as exc:  # no core dependency available
+        emit("FAIL", f"numpy — import failed: {exc}")
+    # 43.2.2: the optional extras — probed, never imported (the A23
+    # invariant): `find_spec` for presence, `importlib.metadata` for the
+    # version (dist metadata — no module import, no sys.modules side effects)
+    for mod, extra, pkg in (("PIL", "image", "Pillow"),
+                            ("soundfile", "audio", "soundfile")):
+        if importlib.util.find_spec(mod) is None:
+            emit("warn", f"optional extra [{extra}] ({pkg}) not installed "
+                         f"— pip install autorefine[{extra}]")
+        else:
+            try:
+                version = importlib.metadata.version(pkg)
+            except Exception:
+                version = "?"
+            emit("ok", f"optional extra [{extra}] ({pkg} {version})")
+    status, line, _wall = _smoke_train()
+    emit(status, line)
+    status, line, _w = _probe_runs_dir(args.runs_dir)
+    emit(status, line)
+    print(f"result: {counts['ok']} ok, {counts['warn']} warn, "
+          f"{counts['FAIL']} FAIL")
+    return 1 if counts["FAIL"] else 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1196,6 +1618,10 @@ def build_parser() -> argparse.ArgumentParser:
                             "first F·n rows and full-train only strict beats of "
                             "the (screened) baseline; 0 < F < 1 to enable, "
                             "default 1.0 = off (pre-v0.18 behavior)")
+    p_run.add_argument("--kfold", type=int, default=0,
+                       help="v0.30 (SPEC.md 44.1): score each model on K "
+                            "distinct held-out subsets and average (k-fold "
+                            "holdout scoring; 0 = off, the legacy single split)")
     p_run.add_argument("--demo", action="store_true",
                        help="v0.27 (SPEC.md 41.3): the narrated demo — one tiny, "
                             "deterministic parity-v1 loop (3 experiments, 60 s "
@@ -1239,6 +1665,15 @@ def build_parser() -> argparse.ArgumentParser:
                             "(candidate, mutation, score, accepted/rejected + "
                             "reason); mutually exclusive with --json/--history/"
                             "--what-if/--project")
+    p_rep.add_argument("--importance", action="store_true",
+                       help="v0.30 (SPEC.md 44.2): permutation feature "
+                            "importance over the holdout — which columns the "
+                            "winning model uses (one extra pass, zero training); "
+                            "mutually exclusive with --json/--history/--what-if/"
+                            "--project/--trace")
+    p_rep.add_argument("--importance-repeats", type=int, default=5,
+                       help="with --importance: shuffles per column "
+                            "(default 5, SPEC.md 44.2)")
     p_rep.add_argument("--plot", action="store_true",
                        help="v0.7 (SPEC.md 21.2): ASCII charts on stdout + "
                             "score_curve.svg / pareto_frontier.svg in the run dir")
@@ -1317,6 +1752,10 @@ def build_parser() -> argparse.ArgumentParser:
                        help="v0.18 (SPEC.md 32.2): two-stage candidate "
                             "screening fraction (0 < F < 1 to enable; default "
                             "1.0 = off, pre-v0.18 behavior)")
+    p_fit.add_argument("--kfold", type=int, default=0,
+                       help="v0.30 (SPEC.md 44.1): score each model on K "
+                            "distinct held-out subsets and average (k-fold "
+                            "holdout scoring; 0 = off, the legacy single split)")
     p_fit.set_defaults(func=_cmd_fit)
 
     p_dash = sub.add_parser(
@@ -1337,6 +1776,57 @@ def build_parser() -> argparse.ArgumentParser:
     p_eval.add_argument("--run", required=True, help="path to a run directory")
     p_eval.add_argument("--episodes", type=int, default=200)
     p_eval.set_defaults(func=_cmd_eval)
+
+    p_pred = sub.add_parser(
+        "predict", help="v0.28 (SPEC.md 42.1): score NEW rows with a run's "
+                        "best model (--row/--csv/--stdin/--item; fitting tasks)")
+    p_pred.add_argument("--run", required=True, help="path to a run directory")
+    p_pred.add_argument("--row", default=None,
+                        help="one row as JSON: an object keyed by feature "
+                             "name (case-insensitive) or an array of exactly "
+                             "state_dim numbers")
+    p_pred.add_argument("--csv", default=None,
+                        help="a CSV of rows — a header line is matched by "
+                             "name (extra columns OK), else positional with "
+                             "exactly state_dim cells")
+    p_pred.add_argument("--stdin", action="store_true",
+                        help="rows as JSON lines on stdin (object or array "
+                             "per line); zero lines is an error")
+    p_pred.add_argument("--item", action="append", default=[],
+                        metavar="FILE",
+                        help="one media file (image/audio tasks); repeatable")
+    p_pred.add_argument("--json", action="store_true",
+                        help="print the predictions as a pure JSON array "
+                             "([{row, prediction, probabilities}, ...])")
+    p_pred.set_defaults(func=_cmd_predict)
+
+    p_cmp = sub.add_parser(
+        "compare", help="v0.28 (SPEC.md 42.2): the app's run-diff (38.4) in "
+                        "the terminal — score delta + best_spec field diff")
+    p_cmp.add_argument("--run", dest="runs", action="append", required=True,
+                       metavar="DIR",
+                       help="two run dirs, in order A then B (repeat --run)")
+    p_cmp.add_argument("--json", action="store_true",
+                       help="print the diff_two_summaries dict (pure JSON)")
+    p_cmp.set_defaults(func=_cmd_compare)
+
+    p_exp = sub.add_parser(
+        "explain", help="v0.28 (SPEC.md 42.3): a one-screen narrative — "
+                        "result / tried / why / weak / next")
+    p_exp.add_argument("--run", required=True, help="path to a run directory")
+    p_exp.add_argument("--target", type=float, default=95.0,
+                       help="the score target for the next-block projection "
+                            "(default 95.0, like fit's gate)")
+    p_exp.add_argument("--json", action="store_true",
+                       help="print {result, tried, why, weak, next} as pure JSON")
+    p_exp.set_defaults(func=_cmd_explain)
+
+    p_doc = sub.add_parser(
+        "doctor", help="v0.29 (SPEC.md 43.2): a friendly first command — "
+                       "version / numpy / extras / smoke train / runs-dir")
+    p_doc.add_argument("--runs-dir", default="runs",
+                       help="the runs dir to probe for writability (default runs)")
+    p_doc.set_defaults(func=_cmd_doctor)
 
     p_var = sub.add_parser(
         "variance", help="v0.15 (SPEC.md 29.1): the same budget under N seeds — "

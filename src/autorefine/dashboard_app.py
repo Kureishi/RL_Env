@@ -16,7 +16,10 @@ from pathlib import Path
 import streamlit as st
 
 from autorefine import __version__
-from autorefine.dashboard import DashboardRunner, ucb_trace
+from autorefine.dashboard import DashboardRunner, diff_two_summaries, ucb_trace
+# SPEC.md 42.2.2 (v0.28): `diff_two_summaries` moved to core (the
+# `autorefine compare` CLI prints it); the app keeps the name importable
+# (SPEC.md 38.4 unchanged) — this *is* `dashboard.diff_two_summaries`.
 from autorefine.plotting import (
     svg_action_probabilities,  # noqa: F401 (D2 view, SPEC.md 29.2)
     svg_audio_waveform,
@@ -30,33 +33,6 @@ from autorefine.plotting import (
     svg_task_returns,  # noqa: F401 (D2 view, SPEC.md 29.2)
 )
 from autorefine.tasks import CsvTask
-
-
-def diff_two_summaries(sa: dict, sb: dict) -> dict:
-    """SPEC.md 38.4 (v0.24, T1): the Past-runs compare widget, computed
-    without streamlit (testable without an app session): the final-score
-    delta, and the per-field `best_spec` diff (only differing fields;
-    a field present on one side only diffs against None)."""
-    score_a = sa.get("final_best_score")
-    score_b = sb.get("final_best_score")
-    spec_a = sa.get("best_spec") or {}
-    spec_b = sb.get("best_spec") or {}
-    diff = [
-        {"field": f, "a": spec_a.get(f), "b": spec_b.get(f)}
-        for f in sorted(set(spec_a) | set(spec_b))
-        if spec_a.get(f) != spec_b.get(f)
-    ]
-    delta = None
-    if isinstance(score_a, (int, float)) and isinstance(score_b, (int, float)) \
-            and not isinstance(score_a, bool) and not isinstance(score_b, bool):
-        delta = round(float(score_b) - float(score_a), 4)
-    return {
-        "score_a": score_a,
-        "score_b": score_b,
-        "score_delta": delta,
-        "spec_diff": diff,
-        "n_diff_fields": len(diff),
-    }
 
 
 def _render_past_runs(runs_dir: str) -> None:

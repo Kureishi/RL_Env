@@ -699,6 +699,45 @@ Fixed-dim `Box` observation, `Discrete` action space (the mutation catalog).
   → candidates → gate → best spec — a cheap "here's what this tool does";
   a demo run is a run (normal run dir, artifacts, registry entry; rc 0)
   (SPEC.md 41.1–41.3, A31, M30.)
+- **Use the model (v0.28):** close the last gap of the loop — the model
+  itself — with three additive, pure commands over an existing run dir:
+  **no new data, no training, no writes** (A1–A31 stay green, `fit`/
+  `report`/`eval` byte-identical under the defaults), version per 33.1
+  (v0.28 ⇒ `0.28.0`, both sources together).
+  **Predict (42.1):** `autorefine predict --run DIR` scores **new** rows
+  with the run's best model — exactly one input mode: `--row JSON` (an
+  object keyed by feature name, case-insensitive, extra keys ignored — or
+  a positional array), `--csv FILE` (header auto-detected and matched by
+  name, an extra label column is fine; otherwise positional), `--stdin`
+  (JSON lines), or `--item FILE` (repeatable; media tasks only — the file
+  goes through the task's own `item_features` decode). A new row is
+  standardized with the **task's own training stats** (`feature_mean` /
+  `feature_std`, the §22.1 rule — `sine-v1` is the identity, already
+  unit-scaled) and decoded with one forward pass: the softmax argmax
+  mapped back through the user's labels (0/1 values or class names like
+  `high`/`low`) + `--json` softmax probabilities; mse → the scalar. Human
+  view: one `row_index<TAB>prediction` line per row (rc 0; rc 1 on any
+  error — episode tasks point at `eval`, mode exclusivity, missing run
+  dir, wrong cell count, undecodable file).
+  **Compare (42.2):** `autorefine compare --run A --run B` is the app's
+  Past-runs compare widget in the terminal — `diff_two_summaries` now
+  lives in **core** `autorefine.dashboard` (no streamlit; the app's name
+  *is* the core one, 38.4 unchanged): the final-score delta (B − A) +
+  the per-field `best_spec` diff (only differing fields; identical specs
+  → an `identical` line); `--json` the pure dict (rc 1 on a missing
+  summary).
+  **Explain (42.3):** `autorefine explain --run DIR [--target 95]` is a
+  one-screen narrative assembled from the run's own artifacts —
+  **result** (task/seed/policy, baseline → final, improvement factor,
+  finished reason), **tried** (per-field trial/wins/win-rate), **why**
+  (the baseline champion + the accepted chain in log order), **weak**
+  (per-class holdout diagnostics + the weakest-class hint — “the model
+  fails on class X”; an mse/episode run degrades to `n/a`), and **next**
+  (the 41.1 budget projection: CEILING / ~N MORE / insufficient
+  history) — rc 0 informational, `--json` exactly those five blocks
+  (SPEC.md 42.1–42.3, A32, M31.)
+- **Stable scores, visible features (v0.30):** two opt-in scoring surfaces, both **no behavior change under the defaults** (kfold = 0 is bit-identical to the legacy single-split path — A1–A33 stay green; the A24 summary key set and the `search_quality` 5-key set untouched), version per 33.1 (v0.30 ⇒ `0.30.0`, both sources together). **K-fold holdout scoring (44.1):** `--kfold K` (on `run` and `fit`, default 0 = off) scores each *trained* model on **K distinct held-out subsets** and averages — the score becomes the fold mean and the fold σ feeds the CI gate, so baseline/candidate comparisons are materially more stable for small tabular datasets without K× retraining; CSV folds draw distinct, deterministic random subsets of the non-train pool (documented seed scheme — no leakage), generative tasks fold to distinct fresh point sets; the summary carries a **conditional** `kfold` key (absent at 0), and `RunConfig` / `fit --from-run` round-trip the recipe's K. **Feature importance (44.2):** `report --importance [--importance-repeats R]` (default 5) — pure-numpy **permutation importance** over the run's holdout ("importance = score drop when the column is shuffled"), answering *which columns does my winning model actually use*; sorted feature list, `n/a` line (still rc 0) on episode / non-flat / non-softmax-mse runs (SPEC.md 44.1–44.2, A34, M33.)
+- **Trust before you train (v0.29):** catch the bad idea before the 30-minute run — no behavior change under the defaults (A1–A32 stay green; the 40.1 dry-run rc contract unchanged), version per 33.1 (v0.29 ⇒ `0.29.0`, both sources together). **Preflight (43.1):** `fit --dry-run` now also prints a **data-health block** from the probe task it already builds — class balance + a headroom note against your `--target` (“majority class alone scores 90.0 — 5.0 points of headroom below target 95”, or “already meets target”), constant / near-constant (≥ 99% one value) columns named with the offending value/share, per-column missing values (an *ignored* column is named as such), and min/max/mean per feature; media tasks degrade to item count + class balance; bad health is a **warning in the plan, never a failure** (rc 0). **Doctor (43.2):** `autorefine doctor [--runs-dir DIR]` — the friendly first command: version + Python, numpy, the optional extras (via `find_spec` + dist metadata — never imported, A23 invariant), a micro parity-v1 smoke train (< 1 s → ok, slow → warn, error → FAIL, into a throwaway dir), and runs-dir writability; `result: N ok, N warn, N FAIL`; rc 0 unless something FAILs (SPEC.md 43.1–43.2, A33, M32.)
 - **Input modalities (v0.10):** `autorefine fit --data DIR` now accepts a
   labelled directory — one subfolder per class (or an `index.csv`) of
   **images** (PNG/JPG/JPEG/BMP/GIF; grayscale 32×32 features; optional

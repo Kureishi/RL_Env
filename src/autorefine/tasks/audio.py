@@ -112,6 +112,10 @@ class AudioTask(Task):
     # sets the instance metric alongside `head` (r2 for mse-labelled data).
     metric = "accuracy"
     capabilities = frozenset({"grid", "media"})
+    # SPEC.md 42.1.3 (v0.28): the train-only standardization stats —
+    # instance values; None keeps class introspection usable.
+    feature_mean = None
+    feature_std = None
 
     def __init__(self, seed: int, path: str | Path | None = None,
                  label: str | None = None, split_frac: float = 0.2,
@@ -154,6 +158,8 @@ class AudioTask(Task):
         std = x[tr].std(axis=0)
         std = np.where(std == 0.0, 1.0, std)
         x = (x - mean) / std
+        self.feature_mean = mean  # SPEC.md 42.1.3 (v0.28): expose the stats
+        self.feature_std = std  # so `predict` standardizes new clips like train
         self._x_tr, self._y_tr = x[tr], self._y[tr]
         self._x_ho, self._y_ho = x[ho], self._y[ho]
         self._x_ge, self._y_ge = x[ge], self._y[ge]
@@ -222,6 +228,14 @@ class AudioTask(Task):
     def _features(self, p: Path) -> np.ndarray:
         """Flat log-mel feature (bands,) — the time-mean of `_frames` (25.3)."""
         return self._frames(p).mean(axis=0)
+
+    def item_features(self, path: str | Path) -> np.ndarray:
+        """SPEC.md 42.1.3 (v0.28): decode one audio clip to the raw
+        (unstandardized) flat log-mel (bands,) feature — the public
+        wrapper over `_features` that `predict --item` (42.1.1) and
+        `autorefine.predict` call; the exact feature the model was
+        trained on (the flat path, SPEC.md 25.3)."""
+        return self._features(Path(path))
 
     # --- protocol (SPEC.md 15, 24.2 — mirrors CsvTask) ------------------------
     def _rows_for(self, split: str) -> tuple[np.ndarray, np.ndarray]:

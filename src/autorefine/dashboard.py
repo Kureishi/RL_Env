@@ -486,6 +486,35 @@ def _sweep_seed_worker(job: tuple[dict, int]) -> dict:
 # renders them; the runner attaches them to each update (SPEC.md 26.5).
 # G2: same stream → bit-identical output. No streamlit (SPEC.md 23.1).
 
+def diff_two_summaries(sa: dict, sb: dict) -> dict:
+    """SPEC.md 38.4 (v0.24, T1) — moved to core in v0.28 (42.2.2): the
+    Past-runs compare widget, computed without streamlit (testable without
+    an app session; the `autorefine compare` CLI, 42.2, prints it): the
+    final-score delta, and the per-field `best_spec` diff (only differing
+    fields; a field present on one side only diffs against None).
+    `dashboard_app.py` re-imports this name (38.4 unchanged)."""
+    score_a = sa.get("final_best_score")
+    score_b = sb.get("final_best_score")
+    spec_a = sa.get("best_spec") or {}
+    spec_b = sb.get("best_spec") or {}
+    diff = [
+        {"field": f, "a": spec_a.get(f), "b": spec_b.get(f)}
+        for f in sorted(set(spec_a) | set(spec_b))
+        if spec_a.get(f) != spec_b.get(f)
+    ]
+    delta = None
+    if isinstance(score_a, (int, float)) and isinstance(score_b, (int, float)) \
+            and not isinstance(score_a, bool) and not isinstance(score_b, bool):
+        delta = round(float(score_b) - float(score_a), 4)
+    return {
+        "score_a": score_a,
+        "score_b": score_b,
+        "score_delta": delta,
+        "spec_diff": diff,
+        "n_diff_fields": len(diff),
+    }
+
+
 def field_stats(updates) -> dict[str, dict]:
     """D1 (SPEC.md 26.1): per-field {trials, wins, win_rate}, crediting each
     update's `mutation` fields with its `accepted` outcome — the exact
