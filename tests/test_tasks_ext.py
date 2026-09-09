@@ -50,6 +50,18 @@ def _fixture_wav_dir(base) -> "Path":
     return d
 
 
+def _fixture_text_dir(base) -> "Path":
+    """Two word classes, one subfolder each (SPEC.md 45.2, v0.31)."""
+    d = Path(base) / "words"
+    for name, words in (("up", "up up up rising higher"),
+                        ("down", "down down down falling lower")):
+        sub = d / name
+        sub.mkdir(parents=True)
+        for i in range(5):
+            (sub / f"t{i:02d}.txt").write_text(words + " ", encoding="utf-8")
+    return d
+
+
 def _fixture_image_dir(base) -> "Path":
     """Two bar-orientation classes, one subfolder each (SPEC.md 24.3)."""
     pytest.importorskip("PIL", reason="image fixture needs autorefine[image] (SPEC.md 24.1)")
@@ -76,10 +88,10 @@ class _TargetModel:
 
 
 def test_task_registry_covers_all_tasks(tmp_path):
-    # SPEC.md 22.1/24: csv/image/audio are data-driven (need a file/dir),
-    # the rest are seed-constructable
+    # SPEC.md 22.1/24/45.2: csv/image/audio/text are data-driven (need a
+    # file/dir), the rest are seed-constructable
     assert set(TASKS) == {"cartpole-v1", "sine-v1", "gridnav-v1", "parity-v1",
-                          "csv", "image", "audio"}
+                          "csv", "image", "audio", "text"}
     for name, cls in TASKS.items():
         if name == "csv":
             task = CsvTask(seed=7, path=str(_fixture_csv(tmp_path / "csv_fixture.csv")))
@@ -87,6 +99,8 @@ def test_task_registry_covers_all_tasks(tmp_path):
             task = cls(seed=7, path=str(_fixture_wav_dir(tmp_path)))
         elif name == "image":
             task = cls(seed=7, path=str(_fixture_image_dir(tmp_path)))
+        elif name == "text":
+            task = cls(seed=7, path=str(_fixture_text_dir(tmp_path)))
         else:
             task = cls(seed=7)
         assert task.name == name

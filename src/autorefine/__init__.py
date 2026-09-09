@@ -21,7 +21,11 @@ from .improver.meta_env import (
 from .improver.policy import SearchPolicy
 from .improver.bandit import BanditPolicy
 from .improver.rl_policy import MetaRLPolicy, train_policy, train_multi_policy
-from .improver.curriculum import ParityCurriculum
+from .improver.curriculum import (  # 46.2 (v0.32): the three ladders
+    CartPoleCurriculum,
+    ParityCurriculum,
+    SineCurriculum,
+)
 from .models.trees import TreeEnsemble, BoostingEnsemble
 from .models.knn import KNN
 from .models.convnet import ConvNet
@@ -44,12 +48,13 @@ from .tasks import (
     Parity4V1,
     ParityTask,
     SineRegressionV1,
+    TextTask,
 )
 
 # SPEC.md 33.1 (C1): single version source — must equal pyproject.toml's
 # [project].version (enforced by the A23 test); one step per feature round
-# (v0.30 ⇒ 0.30.0, M33, SPEC.md 44)
-__version__ = "0.30.0"
+# (v0.33 ⇒ 0.33.0, M36, SPEC.md 46)
+__version__ = "0.33.0"
 
 __all__ = [
     "AutoRefineEnv",
@@ -63,6 +68,8 @@ __all__ = [
     "train_policy",
     "train_multi_policy",
     "ParityCurriculum",
+    "SineCurriculum",
+    "CartPoleCurriculum",
     "ascii_score_curve",
     "svg_score_curve",
     "ascii_pareto",
@@ -94,5 +101,6 @@ __all__ = [
     "Parity4V1",
     "ParityTask",
     "SineRegressionV1",
+    "TextTask",
     "__version__",
 ]

@@ -41,8 +41,16 @@ class CartPoleV1(Task):
     # Reference linear controller gains: u = a*th + b*w + c*x + d*v (tuned)
     GAINS = (20.0, 2.0, 0.5, -1.0)
 
-    def __init__(self, seed: int) -> None:
+    def __init__(self, seed: int, ic_scale: float = 1.0) -> None:
+        # SPEC.md 46.2.4: the curriculum difficulty knob — the IC box is
+        # widened by ic_scale (>= 1.0); the default reproduces the
+        # historical box exactly (bit-identical task, 46.2.6). The ladder
+        # caps at 3.0: beyond it the th box leaves the AUG_BOX envelope.
+        if not ic_scale >= 1.0:
+            raise ValueError(
+                f"ic_scale must be >= 1.0, got {ic_scale!r} (SPEC.md 46.2.4)")
         self.seed = int(seed)
+        self.ic_scale = float(ic_scale)
 
     # --- seeding -----------------------------------------------------------
     def _split_rng(self, split: str) -> np.random.Generator:
@@ -52,10 +60,11 @@ class CartPoleV1(Task):
 
     def initial_conditions(self, split: str, n: int) -> np.ndarray:
         rng = self._split_rng(split)
-        x = rng.uniform(-0.2, 0.2, n)
-        v = rng.uniform(-0.1, 0.1, n)
-        th = rng.uniform(-0.1, 0.1, n)
-        w = rng.uniform(-0.5, 0.5, n)
+        s = self.ic_scale  # 1.0 default: the historical box, unchanged
+        x = rng.uniform(-0.2 * s, 0.2 * s, n)
+        v = rng.uniform(-0.1 * s, 0.1 * s, n)
+        th = rng.uniform(-0.1 * s, 0.1 * s, n)
+        w = rng.uniform(-0.5 * s, 0.5 * s, n)
         return np.stack([x, v, th, w], axis=1)
 
     # --- dynamics ----------------------------------------------------------

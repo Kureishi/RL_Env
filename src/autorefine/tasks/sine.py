@@ -38,6 +38,25 @@ def target_function(u: np.ndarray) -> np.ndarray:
     return y
 
 
+def sine_ceiling(noise: float = LABEL_NOISE, freq_scale: float = 1.0,
+                 amplitude: float = 1.0) -> float:
+    """Bayes ceiling (score points) of a sine level (SPEC.md 46.2.3).
+
+    100 * (1 - noise^2 / var(target)) clamped at 0 — the score a perfect
+    model can earn: it explains all signal variance, leaving only the
+    label noise. Deterministic (a fixed 4096-point uniform grid, no
+    RNG — G2). Monotone decreasing in `noise` and in a shrinking
+    `amplitude`; not monotone in `freq_scale` in general (the component
+    sum's variance depends on phase alignment) — SPEC.md 46.2.3.
+    """
+    u = np.linspace(0.0, 1.0, 4096)
+    y = float(amplitude) * target_function(u * float(freq_scale))
+    var = float(((y - y.mean()) ** 2).mean())
+    if var <= 0.0:
+        return 0.0
+    return max(0.0, 100.0 * (1.0 - float(noise) ** 2 / var))
+
+
 class SineRegressionV1(Task):
     name = "sine-v1"
     state_dim = 1
@@ -49,8 +68,26 @@ class SineRegressionV1(Task):
     metric = "r2"  # score() = 100 * R^2 (clamped at 0)
     capabilities = frozenset()
 
-    def __init__(self, seed: int) -> None:
+    def __init__(self, seed: int, noise: float = LABEL_NOISE,
+                 freq_scale: float = 1.0, amplitude: float = 1.0) -> None:
+        # SPEC.md 46.2.3: the curriculum difficulty knobs — the defaults
+        # reproduce the historical constants exactly (bit-identical task,
+        # 46.2.6); a ladder level passes explicit values (same seed — G2).
+        if not noise >= 0.0:
+            raise ValueError(f"noise must be >= 0, got {noise!r}")
+        if not freq_scale > 0.0:
+            raise ValueError(f"freq_scale must be > 0, got {freq_scale!r}")
+        if not amplitude > 0.0:
+            raise ValueError(f"amplitude must be > 0, got {amplitude!r}")
         self.seed = int(seed)
+        self.noise = float(noise)          # train-split label noise (was LABEL_NOISE)
+        self.freq_scale = float(freq_scale)
+        self.amplitude = float(amplitude)
+
+    def _target(self, u: np.ndarray) -> np.ndarray:
+        """The instance's held-out target (SPEC.md 46.2.3): the level's
+        amplitude + frequency scaling of the fixed component sum."""
+        return self.amplitude * target_function(u * self.freq_scale)
 
     def _split_rng(self, split: str) -> np.random.Generator:
         seq = np.random.SeedSequence([self.seed, zlib.crc32(split.encode("utf-8"))])
@@ -66,7 +103,7 @@ class SineRegressionV1(Task):
         """(u (n,1), y (n,)) on the train split, with seed-derived label noise."""
         X = self.initial_conditions("train", n_points)
         rng = self._split_rng("train-noise")
-        y = target_function(X[:, 0]) + rng.normal(0.0, LABEL_NOISE, n_points)
+        y = self._target(X[:, 0]) + rng.normal(0.0, self.noise, n_points)
         return X, y
 
     def prepare(self, states: np.ndarray) -> np.ndarray:
@@ -76,7 +113,7 @@ class SineRegressionV1(Task):
     def score(self, model, split: str, n: int) -> float:
         """100 * R^2 on fresh points of `split` (clamped at 0); higher is better."""
         X = self.initial_conditions(split, n)
-        y = target_function(X[:, 0])
+        y = self._target(X[:, 0])
         pred = np.asarray(model.forward(X), dtype=np.float64).reshape(-1)
         ss_res = float(((pred - y) ** 2).sum())
         ss_tot = float(((y - y.mean()) ** 2).sum())

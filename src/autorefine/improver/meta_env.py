@@ -641,8 +641,11 @@ class AutoRefineEnv:
         event = {
             "level": self.curriculum.level,
             "difficulty": self.curriculum.level_description(),
-            "n_bits": self.curriculum.n_bits,
-            "p_flip": self.curriculum.p_flip,
+            # SPEC.md 46.2.2: the level's task parameters — splatted via the
+            # curriculum's level_params() (parity keeps its historical
+            # n_bits/p_flip keys byte-identical; sine rows carry
+            # noise/freq_scale/amplitude, cartpole rows ic_scale)
+            **self.curriculum.level_params(),
             "ceiling": self.curriculum.ceiling,
             "best_before_step": best_before,
             "new_baseline_score": score,

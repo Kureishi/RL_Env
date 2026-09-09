@@ -82,6 +82,10 @@ class _FakeCurriculum:
     def level_description(self):
         return "fake level 1"
 
+    def level_params(self):
+        # SPEC.md 46.2.2: the parity-shaped row keys the env splats
+        return {"n_bits": self.n_bits, "p_flip": self.p_flip}
+
     def levels_left(self):
         return 0
 

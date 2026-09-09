@@ -51,6 +51,9 @@ numbers and carry none.)
 | M31 | v0.28   | 42     | A32 | tests/test_usecase_v028.py |
 | M32 | v0.29   | 43     | A33 | tests/test_trust_v029.py |
 | M33 | v0.30   | 44     | A34 | tests/test_kfold_v030.py |
+| M34 | v0.31   | 45     | A35 | tests/test_adapt_v031.py |
+| M35 | v0.32   | 46     | A36 | tests/test_v032.py |
+| M36 | v0.33   | 47     | A37 | tests/test_ergonomics_v033.py |
 
 ---
 
@@ -4054,3 +4057,649 @@ models).
 
 **M33** — v0.30 stable scores / visible features: k-fold holdout
 scoring (44.1) + permutation feature importance (44.2) (A34).
+
+---
+
+## 45. v0.31 — Adapt to more use cases (A35, M34)
+
+Three use-case widenings, all **no behavior change under the defaults**
+(45.4): 45.1 adds a task-level `split_mode` (temporal / walk-forward
+splits for time-ordered CSVs) on top of the G1 `Task` ABC; 45.2 adds the
+text modality — a fourth modality with the same §22.1/24.2 protocol,
+hashed word n-gram features, pure NumPy + stdlib; 45.3 records the
+gradient-boosted-trees status (shipped since v0.5, §19.2 — this round
+verifies, does not re-add). The default split stays random (A1–A34 pins
+untouched).
+
+### 45.1 Temporal / walk-forward split mode (45.1.1–45.1.4)
+
+**Motivation (45.1.1).** Every split in the repo is a seed-derived
+random permutation (22.1), which silently leaks for any time-ordered
+CSV (finance, sensor, log data): the holdout rows interleave with the
+train rows in time, so a model that merely learns the time trend scores
+well on a holdout it has effectively seen, and a `fit` on such data
+overstates what the model can do on future rows. A walk-forward split
+(train = earliest rows, holdout = the next block, gen = the latest
+block) is the honest evaluation for that whole category.
+
+**Contract (45.1.2).**
+
+- A new class attribute `split_mode: str = "random"` on the `Task` ABC
+  (`tasks/base.py`, 36.1-style documented contract) — the task-level
+  home the G1 ABC already provides. All existing tasks keep the default
+  `"random"` (their splits are seed-derived point sets, and the value is
+  inert on non-CSV tasks).
+- `CsvTask.__init__` gains `split_mode: str = "random"`:
+  - `"random"` (default): the exact 22.1 seed permutation
+    (`SeedSequence([seed, zlib.crc32(b"csv-split")])`) — byte-identical
+    to the pre-45.1 path;
+  - `"temporal"`: rows are used **in file order** — train = the first
+    `n_train` rows, holdout = the next `n_hold`, gen = the last `n_gen`
+    (the same sizes: `n_train = int(n·(1−split_frac))`, `rest//2`
+    split); the seed is not used for the partition (file order is the
+    signal). Train-only standardization, head inference, and the score
+    rule are unchanged (22.1).
+  - any other value is a `ValueError` at construction (31.1-style
+    construction-time failure).
+- `fit --temporal` (store_true, `fit` only): passes
+  `task_config["split_mode"] = "temporal"` to the csv task — the same
+  path as the existing `--label` / `--split` data knobs (22.1), so
+  `fit --dry-run --temporal` reports it in the plan and `fit
+  --from-run` re-runs it exactly (37.1.4 — `task_config` is the recipe).
+- It is **not** a KNOBS registry row (33.2): it changes data splits,
+  not loop knobs — the A23 KNOBS set is unchanged, and the A23 parser
+  scan is unaffected (non-knob data flags on `fit` have precedent:
+  `--label`, `--split`).
+
+**Semantics (45.1.3).** The split is a property of the task
+construction, not the loop: `make_dataset`, `score`, `holdout_rows`,
+`score_fold` (44.1.2 — the non-train pool is now the later rows),
+preflight (43.1), importance (44.2), and the app all consume the split
+unchanged. `split_mode` is exposed as a task attribute for introspection
+(`task.split_mode`).
+
+**Pin safety (45.1.4).** `split_mode = "random"` (the default, and the
+default of every other task) → the random branch is byte-for-byte the
+pre-45.1 code (same seed, same salt, same permutation) — A1–A34 stay
+green. `--temporal` is `store_true` with default False, so a `fit`
+without it builds the identical config dict as today.
+
+### 45.2 Text modality (45.2.1–45.2.4)
+
+**The feature leaf (45.2.1).** A new pure leaf in `tasks/text.py`
+(stdlib + NumPy only, 3.1, import-cycle-free):
+
+- `ngram_features(text: str, dim: int = 128) -> np.ndarray` — a
+  (dim,) float64 count vector of hashed word unigram + bigram n-grams:
+  lowercase, split on non-alphanumeric runs; each token (and each
+  adjacent token pair) hashed with `zlib.crc32` of its UTF-8 bytes into
+  bucket `h % dim` and counted. `crc32` is used deliberately — Python
+  `hash()` is salted per process, `crc32` is not (G2).
+  Deterministic, zero new dependencies; an empty / no-token text is the
+  zero vector (train-only standardization, 22.1, handles the all-zero
+  columns via the std-0 → 1 rule).
+- `TextTask(Task)` (`tasks/text.py`) — the §22.1/24.2 protocol verbatim,
+  mirroring `ImageTask` (24.3): `collect_items(path, _TEXT_EXTS,
+  "text")` (one subfolder per class, or an `index.csv`), `resolve_labels`
+  (string class names → softmax over the sorted unique names; numeric
+  labels → the §22.1 rule), `split_indices(..., b"text-split")`,
+  train-only standardization with `feature_mean` / `feature_std`
+  (42.1.3), `_items` + `_ho` (28.3 error-gallery protocol),
+  `holdout_rows`, `item_features(path)`, `score` (100·accuracy /
+  100·max(0, R²)). `capabilities = frozenset({"media"})` (no grid —
+  text features are flat); `feature_names = ["hashed word n-grams
+  (dim)"]`; `state_dim = dim` (default 128, a constructor kwarg);
+  `metric` is `accuracy` / `r2` per data (36.1.3).
+- `_TEXT_EXTS = (".txt", ".text")` in `tasks/media.py` (24.2 home for
+  the extension rules); `detect_modality` (24.5) now counts text files
+  too: exactly one modality present → its name ("image" | "audio" |
+  "text"), two or more present → `"mixed"` (the caller asks for an
+  explicit `--task`), none → `None`. Image+audio stays `"mixed"`
+  (the v0.10 pin, unchanged).
+
+**Wiring (45.2.2).**
+
+- `TASKS["text"] = TextTask` (15 registry — zero core-loop changes);
+  `fit --task` choices gain `"text"`; `fit --data DIR` auto-detects a
+  text directory; `variance --task` and `DashboardRunner(modality=…)`
+  accept `"text"` (29.1/24.5 parity); the resolve errors name all three
+  modalities.
+- Everything downstream is protocol-driven and needs no change: the
+  improver loop, `eval`, `predict --item` (42.1.1 — a text file is an
+  item), `holdout_diagnostics` (28.2), the preflight media shape (43.1
+  — `TextTask` carries `_items` + `class_values`, so it degrades to the
+  item-count + class-balance block automatically), the bandit families.
+
+**Semantics (45.2.3).** Text is a fourth modality with the same
+protocol — the pattern the three existing modalities already prove
+(22.1 csv, 24.3 image, 24.4 audio): file/directory in, standardized
+flat features out, §22.1 score. No new dependencies, no new loop
+machinery; the model families (mlp / tree / boost / knn) all consume
+the flat (dim,) vector.
+
+**Pin safety (45.2.4).** Additive: a new task file + a new registry
+entry. The registry-shape pins advance in place (`len(TASKS)` 7 → 8,
+the `set(TASKS)` pin gains `"text"`, the data-driven task lists gain
+`"text"`) — the v0.8/v0.10 pattern (22.3/24.6). `detect_modality`'s
+image+audio behavior is bit-identical; `fit --task auto` on a
+pre-existing image/audio directory resolves exactly as today (text
+counts are 0).
+
+### 45.3 Gradient-boosted trees — status note
+
+Flagged in the user's v0.31 request as "never implemented" — it was:
+`BoostingEnsemble` shipped in **v0.5 (SPEC.md 19.2)** (residual CART,
+`BOOST_SHRINK = 0.1`), is in `MODEL_FAMILIES`, the trainer, the bandit
+offered families, the RL catalog, and the plotting paths. This round
+**verifies** it (A35: it trains and scores finitely on parity, and the
+families are wired) and does **not** re-add it or add new knobs
+(a boost-shrinkage spec field is a future round, not this one).
+
+### 45.4 Acceptance (A35)
+
+- **temporal (45.1)** — `Task.split_mode` defaults to `"random"` on the
+  ABC and on every registered task; `CsvTask(split_mode="temporal")`
+  splits in file order (train = first rows, then holdout, then gen;
+  same sizes as the random rule); `split_mode="random"` is
+  byte-identical to the pre-45.1 permutation (same seed/salt
+  reconstruction); a bad value is a construction `ValueError`; `--temporal`
+  is on `fit` only (not a KNOBS row — the A23 KNOBS set and parser scan
+  are unchanged); `fit --dry-run --temporal` prints the plan with rc 0
+  and names the mode.
+- **text (45.2)** — `"text"` is in `TASKS` with `TextTask`;
+  `ngram_features` is deterministic, (dim,)-shaped, non-negative,
+  nonzero for tokened text, and zero for empty text; `TextTask` on a
+  two-class txt directory infers softmax over the sorted class names,
+  splits 80/10/10 with disjoint blocks, standardizes with train-only
+  stats, and round-trips `make_dataset` / `score` / `holdout_rows` /
+  `item_features` deterministically; a numeric-labelled (index.csv)
+  mse variant infers `head = "mse"`; `detect_modality` returns
+  `"text"` for a text-only directory, `"mixed"` for image+text and
+  (unchanged) image+audio; `fit --task text --data DIR` on separable
+  words passes the §22.1 gate with rc 0; `fit --task csv` on a
+  directory is still rc 1; the preflight media shape degrades cleanly
+  (43.1); `len(TASKS)` = 8 with the registry pins advanced in place.
+- **boost (45.3)** — `"boost" in MODEL_FAMILIES`; `BoostingEnsemble`
+  trains and scores finitely on parity; the bandit offered families
+  include `"boost"`.
+- **Regression** — A1–A34 stay green (default random split; registry
+  shape advanced in place; `detect_modality` image+audio unchanged;
+  `fit`/`eval`/app unchanged); the A25 index advances (30 → 31
+  acceptance rows; `defined == set(range(1, 36))`); the version stepped
+  to `0.31.0` in both sources (33.1) with the round assertions
+  advanced (v0.31 ⇒ `0.31.0`).
+
+### 45.5 Milestone
+
+**M34** — v0.31 adapts to more use cases: temporal / walk-forward
+splits (45.1) + the text modality (45.2) + the boost-family status
+note (45.3) (A35).
+
+---
+
+## 46. v0.32 — Probabilistic outputs, curriculum beyond parity, portfolio mode (A36, M35)
+
+Three generalizations, all **no behavior change under the defaults** (46.4):
+46.1 exposes calibrated probabilities (`predict --prob`) and adds
+log-loss as a declared CSV task metric (G1: the metric is a task
+property, not a head string); 46.2 generalizes the §20.1
+adaptive-difficulty machinery beyond parity — a 3-axis sine ladder and
+a single-axis cartpole ladder on the same curriculum API; 46.3 adds
+portfolio mode — `fit --tasks A.csv,B.csv` runs one shared budget
+sequentially over several user datasets (v1: CSV files; cross-task
+policy transfer is a follow-up). A1–A35 stay green under the defaults.
+
+### 46.1 Probabilistic outputs for binary CSV (46.1.1–46.1.4)
+
+**Motivation (46.1.1).** The `predict` leaf already computes per-class
+probabilities (42.1.4 — softmax of the logits, class-mapped) and the
+`--json` mode already prints them, but the human output shows only the
+argmax class. Risk-scoring users need the probability distribution, and
+they increasingly need a metric that rewards *calibration* (log-loss)
+more than raw accuracy — a 95% accurate model with overconfident
+probabilities is not a good risk model.
+
+**Contract (46.1.2).**
+
+- `predict --prob` (store_true, `predict` only): a **display-only**
+  addition on any softmax-head fitting task — per row, one line per
+  class: `<row>\t<class>: p=<prob>` (probs to 4 decimals, the
+  class's user label — `task.class_values` — in class order). The
+  `--json` output is unchanged (it already carries
+  `{row, prediction, probabilities}`; 42.1.4). On a non-softmax head
+  (e.g. an mse-head CSV) `--prob` is an error: the probabilities do
+  not exist — stderr + rc 1 (46.1.4), never a silent omission.
+- `CsvTask.__init__` gains `metric: str = "accuracy"` (G1, 36.1 — the
+  metric is a task property, not a head string):
+  - `"accuracy"` (default): the exact 22.1 rule — unchanged;
+  - `"logloss"`: requires the §22.1 head inference to produce
+    `head = "softmax"` — a non-softmax (mse) CSV is a construction
+    `ValueError` citing SPEC.md 46.1 (like the 45.1 `split_mode`
+    validation, it fails at construction, i.e. at the dry-run probe
+    and at `fit` resolve, before any training). The declared
+    `task.metric` is `"logloss"` (the gate line and the dry-run plan
+    name it — 36.1.5), and `_score_xy` (the shared body of `score`
+    **and** `score_fold`, 44.1.2) branches on it:
+    score = `100 · (1 − mean_NLL / ln 2)` clamped at 0, where
+    `mean_NLL = mean_i(−log p_i)` over the split's rows, `p_i` = the
+    softmax probability the model assigns to the true class (clipped
+    to `[1e-12, 1]` for numerical safety). The loop maximizes the
+    score, so log-loss is converted to higher-is-better points on the
+    same 0–100 scale: a perfect model → 0 NLL → 100; a constant
+    (uniform) model → `ln K` NLL → 0 for the 2-class case, clamped to
+    0 for K > 2. `100·(1 − NLL/ln 2)` is a linear, monotone map in
+    NLL for K = 2 (and monotone for any K), so the improver's
+    acceptance comparisons, the §18.3 CI gate, and the §18.5 gen-gap
+    penalty all behave exactly as under accuracy — only the scale of
+    the reward changes.
+- `fit --metric {accuracy,logloss}` (default `accuracy`): passes
+  `task_config["metric"]` to the csv task — the same path as the
+  existing `--label` / `--split` / `--temporal` data knobs (22.1/45.1),
+  so `fit --dry-run --metric logloss` reports it in the plan (the
+  `task:` line names the metric, as today for accuracy/r2 — 36.1.5) and
+  `fit --from-run` re-runs it exactly (37.1.4 — `task_config` is the
+  recipe). It is **not** a KNOBS registry row (33.2): it is a
+  data-task knob, not a loop knob (the `--label`/`--temporal`
+  precedent; the A23 KNOBS set and parser scan are unchanged).
+- **Preflight nuance (46.1.3).** The 43.1 headroom note ("majority
+  class alone scores X — headroom below target Y") is an *accuracy*
+  statement. For a logloss task it would misstate the scale (a constant
+  model scores 0 under logloss, not `100·share`), so `fit --dry-run`
+  passes `target=None` to `data_health` when the probe's declared
+  metric is `"logloss"` — the class-balance block still prints
+  (useful), the headroom note does not (it is meaningless on that
+  scale). Accuracy tasks are unchanged.
+
+**Semantics (46.1.4).** `predict --prob` on a non-softmax head is rc 1
+with a stderr message naming the head (an mse CSV: "probabilities are
+only available for softmax-head models (SPEC.md 46.1)"); `fit --metric
+logloss` on a mse-head CSV is the 46.1.2 construction `ValueError`
+surfaced as rc 1 (dry-run and fit both, at the probe); the default
+(`--metric accuracy`) builds the identical config dict as today.
+
+**Pin safety (46.1.5).** `metric = "accuracy"` (default) → `_score_xy`
+takes the exact 22.1 branch; `predict` without `--prob` prints the
+exact 42.1 lines; the `fit` config dict without `--metric` is
+byte-identical to pre-46.1. A1–A35 stay green.
+
+### 46.2 Curriculum beyond parity (46.2.1–46.2.5)
+
+**Motivation (46.2.1).** The §20.1 adaptive-difficulty machinery is
+parity-only today; the saturation-stall story (the loop plateaus long
+before the budget runs out) applies to every built-in task. This
+section adds a ladder for `sine-v1` and one for `cartpole-v1` on the
+**same** curriculum API — the env (`_advance_curriculum`), the summary
+contract, the stall reset, and the plotting all stay task-agnostic.
+
+**The shared API (46.2.2).** Every curriculum implements: `ceiling`
+(property), `level_description()`, `levels_left()`, `task()`,
+`step_up_if_saturated(best_score) -> bool` (saturated =
+`best_score >= trigger_fraction · ceiling`, a level remains), `level`,
+`events`, and — new this round — `level_params() -> dict`: the
+level's task parameters as a plain dict, which
+`_advance_curriculum` splats into the curriculum event row
+(`**self.curriculum.level_params()`). `ParityCurriculum.level_params()`
+returns `{"n_bits": …, "p_flip": …}` — so parity event rows stay
+byte-identical to the §20.1/A10 shape (the pinned row keys
+`level/difficulty/n_bits/p_flip/ceiling/best_before_step/new_baseline_score`);
+sine rows gain `noise/freq_scale/amplitude`, cartpole rows gain
+`ic_scale`.
+
+**Sine (46.2.3).**
+
+- `SineRegressionV1(seed, noise=0.05, freq_scale=1.0, amplitude=1.0)`
+  (defaults = the historical constants — bit-identical task, 46.2.5):
+  - `noise` (≥ 0): the train-split label noise (was the `LABEL_NOISE`
+    constant); the module-level `LABEL_NOISE` and `target_function`
+    stay unchanged (pinned);
+  - `freq_scale` (> 0): the held-out target becomes
+    `amplitude · target_function(u · freq_scale)` — the instance's
+    `make_dataset` and `score` both evaluate it (scaling the unit
+    input scales every component frequency), so a higher scale
+    demands more frequency content;
+  - `amplitude` (> 0): scales the target's variance — R²-invariant in
+    isolation, but with fixed noise a smaller amplitude means the
+    signal carries relatively less information (the ceiling falls).
+  - construction `ValueError` on any invalid value (the 45.1-style
+    contract).
+- `sine_ceiling(noise, freq_scale, amplitude)` (module function,
+  deterministic — a fixed 4096-point uniform grid, no RNG, G2):
+  `100 · (1 − noise² / var(target))` clamped at 0 — the score a
+  perfect model can earn at that level (the §20.1 parity-ceiling
+  analogue). Monotone **decreasing** in `noise` and in a shrinking
+  `amplitude`. Not monotone in `freq_scale` in general — the fixed
+  component sum's variance depends on phase alignment, so the ceiling
+  is checked bounded (0–100), not ordered, there; the level is still
+  *harder* for a small net at higher scale (more frequency content),
+  which is what the curriculum needs.
+- `SineCurriculum(seed, noise_start=0.05, noise_step=0.05,
+  max_noise=0.15, freq_start=1.0, freq_step=0.5, max_freq=2.0,
+  amp_start=1.0, amp_step=0.25, min_amp=0.5, trigger_fraction=0.9)` —
+  a 3-axis ladder (3×3×3 = 27 levels, 26 step-ups), **noise swept
+  first** (fastest axis), then `freq_scale`, then `amplitude` — the
+  same index arithmetic as `ParityCurriculum` (no float accumulation
+  beyond one multiply; G2): level `(a, f, n)` =
+  `amp_start − a·amp_step, freq_start + f·freq_step,
+  noise_start + n·noise_step`; `step_up` increments `n`, re-sweeps
+  `f` (resetting `n`), then `a` (resetting `f`, `n`); exhausted at
+  `(max_amp_index, max_freq_index, max_noise_index)`. `ceiling` =
+  `sine_ceiling(…)` at the current level; `levels_left` counts the
+  remaining combinations; `task()` = `SineRegressionV1(seed, noise=…,
+  freq_scale=…, amplitude=…)`; `level_description()` =
+  `sine-n{noise:.2f}-f{freq:.2f}-a{amp:.2f}`.
+
+**CartPole (46.2.4).**
+
+- `CartPoleV1(seed, ic_scale=1.0)` (default = the historical IC box —
+  bit-identical, 46.2.5): `initial_conditions` widens the
+  initial-condition box by `ic_scale` (≥ 1.0, construction
+  `ValueError` below): `x ± 0.2·s, v ± 0.1·s, th ± 0.1·s,
+  w ± 0.5·s` — wider starting states are harder to keep balanced. The
+  ladder is capped at `ic_scale = 3.0`: beyond it the `th` box
+  (±0.3) leaves the `AUG_BOX` augmentation envelope (±0.2), where the
+  imitation labels stop covering the state space.
+- `CartPoleCurriculum(seed, ic_scale_start=1.0, ic_scale_step=1.0,
+  max_ic_scale=3.0, trigger_fraction=0.9)` — a single-axis ladder
+  (1.0 → 2.0 → 3.0, 2 step-ups). `ceiling` is the **proxy**
+  `task.max_steps` (500.0 — the mean-steps metric's upper bound;
+  cartpole has no closed-form Bayes ceiling like parity's, so the
+  trigger is `best_score >= trigger_fraction · 500`, the same
+  `step_up_if_saturated` contract as every other curriculum);
+  `level_description()` = `cartpole-ics{ic_scale:g}`; `task()` =
+  `CartPoleV1(seed, ic_scale=…)`; `level_params()` =
+  `{"ic_scale": …}`.
+
+**Wiring (46.2.5).**
+
+- `run --curriculum` dispatches by task: `parity-v1` →
+  `ParityCurriculum` (unchanged), `sine-v1` → `SineCurriculum`,
+  `cartpole-v1` → `CartPoleCurriculum`; every other task (gridnav-v1,
+  csv, image, audio, text) is a clean error: stderr + rc 1 (the
+  message names the three supported tasks).
+- `report`/`eval` reconstruction (`_task_from_summary`) is
+  task-aware: the last curriculum level row's parameters rebuild the
+  level task — `n_bits/p_flip` → `ParityTask` (the §20.1 path,
+  unchanged for existing run dirs), `noise/freq_scale/amplitude` →
+  `SineRegressionV1`, `ic_scale` → `CartPoleV1`.
+- The ladder curve renderer (`svg_ladder_curve`, 27.3) falls back to
+  the row's `difficulty` label when `p_flip` is absent (parity rows
+  keep the exact `{n_bits} bits, p_flip {p_flip}` label — the 27.3
+  pin is unchanged).
+- `improver/curriculum.py` exports all three classes; the top-level
+  package re-exports `SineCurriculum` and `CartPoleCurriculum`
+  (33.1-style additive `__all__` entries).
+
+**Pin safety (46.2.6).** `ParityCurriculum` is untouched except the
+additive `level_params()` — the pinned ladder
+(test_env_loop_design: order/exhaustion/trigger/validation) and the
+pinned event-row keys stay byte-identical. The sine and cartpole task
+**defaults** reproduce the historical tasks exactly
+(`noise=LABEL_NOISE`, `freq_scale=1.0`, `amplitude=1.0`;
+`ic_scale=1.0`), so A1–A35 (including every sine/cartpole score pin)
+stay green.
+
+### 46.3 Portfolio mode (46.3.1–46.3.4)
+
+**Motivation (46.3.1).** A practitioner rarely has one dataset — they
+have several (churn, support tickets, sensor exports), and they want
+one budget, one command, one pass/fail answer across all of them.
+
+**Contract (46.3.2).**
+
+- `fit --tasks A.csv,B.csv` (comma-separated, ≥ 2 **CSV file** paths —
+  v1 scope; directories and built-in tasks are out of scope): runs
+  the `fit` loop **sequentially** over the listed tasks under one
+  shared budget:
+  - experiments are split evenly: each task gets
+    `ceil(max_experiments / N)` of its own sub-budget (the
+    `max_experiments` flag is the *total*); `max_train_seconds`
+    carries over unchanged per task;
+  - the wall clock is **shared**: the `max_seconds` budget is a single
+    deadline — task k's sub-budget gets
+    `max_seconds − elapsed_so_far` (recomputed with
+    `time.perf_counter` before each task starts; clamped to a small
+    positive floor, since `Budget` requires `max_wall_seconds > 0`
+    (5.2) — a non-positive remainder means that task is
+    wall-capped at its baseline: the baseline always runs, and the
+    loop stops at its first step). Documented edge behavior, not a
+    crash.
+  - tasks run **in the order given** (deterministic — G2); each gets
+    its own run dir (the usual `fit` artifacts: summary, artifacts,
+    registry entry) and its own gate line (`fit`'s §22.1 gate or the
+    `--gate` objective set — 37.2); each task's data knobs (`--label`,
+    `--split`, `--temporal`, `--metric`) apply to every task in the
+    list (a per-task config is a follow-up).
+  - **overall rc**: 0 iff **every** task PASSES its gate; 2 if any
+    task MISSES (the strictest answer — a portfolio that ships
+    requires all datasets to meet the bar). A resolve/probe failure
+    on any task (a bad label column, a missing file) is rc 1, before
+    any training — the 40.1 dry-run failure mode generalized.
+- `fit --dry-run --tasks A.csv,B.csv`: the plan per task (data, label,
+  split, recipe, task/head/metric, dataset size, the 43.1
+  data-health block, the per-task sub-budget, the catalog, and the
+  wall-time estimate) — still zero training, zero artifacts (40.1).
+- `--tasks` is **mutually exclusive** with `--data` and `--from-run`
+  (rc 1, a stderr message naming 46.3) — one input surface per
+  invocation, like the existing `--data`/`--from-run` exclusivity
+  (37.1.4).
+
+**Semantics (46.3.3).** Portfolio v1 is **sequential sub-budget
+runs** — each task is a complete, independently-gated `fit` that
+happens to share a budget and a command. Cross-task policy transfer
+(MetaRL task conditioning, §20.2) across a *shared* budget is the
+documented follow-up (v0.32 does not attempt it: the `fit` loop is
+per-task by construction, and the transfer research question is
+orthogonal to this plumbing).
+
+**Pin safety (46.3.4).** Purely additive on `fit`: without `--tasks`
+the `_cmd_fit` path is byte-identical to pre-46.3 (the `--tasks`
+default is `None`); A1–A35 stay green.
+
+### 46.4 Acceptance (A36)
+
+- **probabilities (46.1)** — `predict --prob` on a softmax-head CSV
+  run prints one `<row>\t<class>: p=…` line per row per class (rc 0;
+  probs sum to 1 within float tolerance), on an mse-head CSV run is
+  rc 1 with a stderr message naming the head (SPEC.md 46.1), and the
+  `--json` output is unchanged; `CsvTask(metric="logloss")` on a
+  softmax CSV scores a perfect model at 100 and a constant model at
+  0 (clamped), on an mse CSV is a construction `ValueError` citing
+  46.1; `fit --metric logloss` runs end-to-end (gate line names
+  `logloss`, rc per the gate), `fit --metric` default `accuracy` is
+  byte-identical to a `fit` without the flag (same config dict),
+  and `fit --dry-run --metric logloss` names the metric in the plan
+  with rc 0 (and omits the accuracy headroom note — 46.1.3).
+- **sine curriculum (46.2.3)** — `SineRegressionV1(seed)` defaults are
+  bit-identical to the pre-46.2 task (a fixed model's score is
+  unchanged); `sine_ceiling` is monotone decreasing in `noise` and in
+  a shrinking `amplitude`; the ladder order is noise → freq →
+  amplitude (27 levels, exhaustion at the last combination; the
+  trigger threshold is exact like the §20.1 pin); bad constructor
+  values raise `ValueError`; `run --curriculum --task sine-v1` on a
+  tiny budget completes rc 0 with a ladder in the summary.
+- **cartpole curriculum (46.2.4)** — `CartPoleV1(seed)` default ICs
+  are bit-identical (`ic_scale=1.0`); `ic_scale < 1.0` raises;
+  `initial_conditions(ic_scale=2.0)` are exactly the 1.0 box
+  scaled by 2 on every axis; the ladder is 1.0 → 2.0 → 3.0 (ceiling
+  proxy 500.0, exhaustion after the last level); `run --curriculum
+  --task cartpole-v1` on a tiny budget completes rc 0; `run
+  --curriculum --task gridnav-v1` is still rc 1 (an unsupported
+  task) with a message naming the three supported tasks.
+- **curriculum API (46.2.2)** — `level_params()` exists on all three
+  curricula; parity's is `{"n_bits", "p_flip"}` and a parity
+  curriculum event row still carries exactly the historical keys
+  (`level/difficulty/n_bits/p_flip/ceiling/best_before_step/new_baseline_score`);
+  sine rows carry `noise/freq_scale/amplitude`, cartpole rows
+  `ic_scale`; `SineCurriculum` and `CartPoleCurriculum` are exported
+  from the top-level package.
+- **portfolio (46.3)** — `fit --tasks a.csv,b.csv` on two separable
+  CSVs runs both loops (two run dirs, two registry rows) and returns
+  0 when both PASS; `--tasks` combined with `--data` or `--from-run`
+  is rc 1; a single path in `--tasks` is rc 1 (≥ 2 required);
+  `fit --dry-run --tasks a.csv,b.csv` prints the per-task plans with
+  rc 0 (zero artifacts).
+- **Regression** — A1–A35 stay green (defaults byte-identical:
+  accuracy metric, parity curriculum, no `--tasks`, sine/cartpole
+  task defaults, `predict` without `--prob`); the A25 index advances
+  (31 → 32 acceptance rows; `defined == set(range(1, 37))`); the
+  version stepped to `0.32.0` in both sources (33.1) with the round
+  assertions advanced (v0.32 ⇒ `0.32.0`).
+
+### 46.5 Milestone
+
+**M35** — v0.32 generalizes: probabilistic CSV outputs + log-loss
+metric (46.1), the sine and cartpole curricula (46.2), and portfolio
+`fit --tasks` (46.3) (A36).
+
+## 47. Ergonomics (v0.33)
+
+### 47.1 `--config FILE` on any command (47.1.1–47.1.5)
+
+**Motivation (47.1.1).** Scripts and CI currently have to build argv
+by hand, and a finished run's recipe lives in a JSON file that no
+command can read back. §37.1 already defines the canonical `RunConfig`
+and `fit_recipe`/`format_recipe` already define its CLI flag vocabulary;
+`--config` makes both shapes — a canonical `run_config.json` or a plain
+JSON object of kebab-case flag names — an input to **any** subcommand,
+so a run dir is directly re-runnable:
+`autorefine fit --config runs/<run_id>/run_config.json`.
+
+**Contract (47.1.2).** Every subcommand (`run`, `report`, `watch`,
+`fit`, `dashboard`, `plugins`, `eval`, `predict`, `compare`, `explain`,
+`doctor`, `variance`, `policy-report`, `share`) accepts `--config FILE`
+(default `None` — absent, the path is byte-identical to pre-47.1):
+
+- a file whose `schema` key equals `RUN_CONFIG_SCHEMA`
+  (`autorefine.run_config/1`) is a **canonical** recipe: it is
+  validated by `RunConfig.from_dict` and translated into the CLI flag
+  vocabulary by `runconfig_to_flags` (47.1.4);
+- any other JSON object is taken as-is as a map of kebab-case flag
+  names to values (the same vocabulary the flags' own `--help` uses);
+- values are applied to the parsed namespace after argparse and before
+  the command function runs — the command functions are unchanged.
+
+**Conversion (47.1.3).** Per-flag value conversion reuses the parser
+action's own machinery, so a config value is exactly as valid as the
+same token on the command line: `store_true`/`store_false` flags take
+a JSON boolean (anything else is an error); `append` flags (`--gate`,
+`--item`, …) take a JSON array (a bare value is wrapped in a
+one-element array); typed flags get the action's `type` applied
+(`int`, `float`); `choices`-constrained flags are checked against the
+choices; plain flags pass through. A conversion failure is rc 1 with
+a stderr message citing the offending `--flag`.
+
+**Canonical shape (47.1.4).** The canonical path is loud, matching the
+37.1.4 rule: `runconfig_to_flags` raises on anything not expressible
+as flags (a non-preset search-quality knob, an unknown `task_config`
+key). A canonical recipe that names a flag the current subcommand does
+not own (e.g. a `fit`-shaped `data` entry under `run`) is rc 1 with a
+stderr message listing the command's valid flags and noting that a
+canonical config pairs with the command that owns its flags.
+
+**Precedence (47.1.5).** Explicit CLI flags > the config file > the
+argparse defaults. "Explicit" means an `--` token anywhere in argv —
+`--flag=value` counts — and a config key that is also present on the
+command line is not applied. Errors — unreadable file, invalid JSON,
+non-object top level, unknown flag, bad value — are all rc 1 with a
+stderr message citing the file (or the flag), and the command function
+never runs.
+
+### 47.2 Help polish (47.2.1–47.2.3)
+
+**`--version` (47.2.1).** Top-level `autorefine --version` prints
+`autorefine <version>` from the 33.1 single version source and exits 0
+(argparse's `action="version"`; the version is read through a lazy
+import so no module-level cycle is introduced — the 43.2 doctor
+pattern).
+
+**Per-command examples (47.2.2).** Every subparser carries an
+`examples:` epilog — the canonical invocations lifted from the README
+Quickstart (`run`, `fit`, `variance`, `share`, …) — rendered verbatim
+by a `RawDescriptionHelpFormatter` on each subparser. CPython's
+`add_subparsers` does not forward `epilog`/`formatter_class`, so the
+formatter is set on each subparser explicitly (the plugins nested
+`list` parser needs none — it has no epilog).
+
+**Exit-code table (47.2.3).** The top-level `--help` ends with the
+table the CLI already honors: `0` success (gate PASS where a gate
+applies), `1` error (bad arguments, missing files, a resolve/probe
+failure), `2` gate MISS (`fit`, `variance`, `report --what-if`),
+`130` Ctrl-C while `watch` polls. Pure documentation — no behavior
+change.
+
+### 47.3 `--quiet` on `run` and `fit` (47.3.1–47.3.2)
+
+**Motivation (47.3.1).** Per-experiment stdout is great interactively
+but noisy in logs and CI transcripts.
+
+**Contract (47.3.2).** `run` and `fit` accept `--quiet` (default
+off): the per-experiment `exp N` lines, the `run dir:`/`baseline:`
+echos, the RL episode lines (`run --policy rl`), and `fit`'s
+diagnostics block (28.2–28.4) are suppressed. Kept, always: the
+`=== summary ===` block, `fit`'s gate verdict line (PASS/MISS and its
+rc semantics), and the portfolio per-task headers (`fit --tasks`,
+46.3). `run --demo` and `fit --dry-run` ignore the flag — they are
+already minimal (41.3 / 40.1). rc semantics are unchanged.
+
+### 47.4 `autorefine share --run DIR` (47.4.1–47.4.4)
+
+**Motivation (47.4.1).** The "send this to a colleague" case, with the
+no-GUI-core stance (23.1) intact: a file, not a server.
+
+**Contents (47.4.2).** The bundle is one `.zip` containing: `report.html`
+— **always regenerated in memory** with the exact `report --html`
+call (22.2: `html_report` over the summary, the experiments, and the
+28.2–28.4 extras, None-safe per 28.5) and never written into the run
+dir, so a share of an old run carries a current renderer's HTML —
+plus `summary.json`, `run_config.json` (when present, 37.1),
+`best_spec.json` (when present), and every flat `*.svg` in the run
+dir (the 21.2/28.2/30.1 artifacts). `--out FILE` names the archive;
+default `<run_dir>-share.zip` next to the run dir.
+
+**Determinism (47.4.3).** `ZipInfo` timestamps are fixed at
+1980-01-01 00:00:00, compression is `ZIP_DEFLATED`, and entries are
+written in sorted name order — two shares of the same run dir are
+byte-for-byte equal (G2).
+
+**Errors (47.4.4).** A missing run dir or one without `summary.json`
+is rc 1 with a stderr message (no partial zip). On success the
+listing is printed (name + byte count per entry) followed by a single
+`share   : <path>` line.
+
+### 47.5 Acceptance (A37)
+
+- **config (47.1)** — a plain `--config` JSON on `run` (parity, tiny
+  budget) reproduces the `best_spec.json` of the equivalent explicit
+  argv; a canonical `run_config.json` read from a finished `fit` run
+dir is accepted by `fit --config` (rc per the gate); an explicit
+  `--seed N` — both `--seed N` and `--seed=N` forms — overrides the
+  config's seed (the run dir name carries the CLI seed); a
+  `store_true` flag set from a JSON boolean works (`quiet: true`);
+an unknown flag key is rc 1 citing the key and listing the command's
+valid flags; an invalid JSON file is rc 1; a non-boolean for a
+`store_true` flag is rc 1 citing the flag.
+- **help (47.2)** — `autorefine --version` is rc 0 printing
+`autorefine 0.33.0`; the top-level `--help` contains the 47.2.3
+exit-code table; every subcommand's `--help` contains its `examples:`
+block verbatim (checked for a representative set: `run`, `fit`,
+`variance`, `predict`, `share`, `doctor`).
+- **quiet (47.3)** — `run --quiet` output has no `exp ` lines but does
+have the `=== summary ===` block, with rc unchanged; `fit --quiet`
+keeps the gate verdict line and drops the diagnostics block.
+- **share (47.4)** — the zip of a finished run contains
+`report.html`, `summary.json`, `run_config.json`, `best_spec.json`;
+`report.html` is present and non-empty even though the run dir itself
+has none; two shares of the same dir are byte-equal; a missing run
+dir is rc 1.
+- **Regression** — A1–A36 stay green (defaults byte-identical: no
+`--config` applied, `--quiet` absent, no `share` artifacts); the A25
+index advances (32 → 33 acceptance rows; `defined ==
+set(range(1, 38))`); the version stepped to `0.33.0` in both sources
+(33.1) with the round assertions advanced (v0.33 ⇒ `0.33.0`).
+
+### 47.6 Milestone
+
+**M36** — v0.33 ergonomics: `--config` on every command (47.1), help
+polish — `--version`, per-command examples, the exit-code table
+(47.2), `--quiet` on `run`/`fit` (47.3), and `autorefine share`
+(47.4) (A37).

@@ -633,6 +633,12 @@ def svg_ladder_curve(entries, levels, width: int = 640, height: int = 360) -> st
             parts.append(f'<text x="{x:.1f}" y="{T - 8:.1f}" text-anchor="middle" '
                          f'font-size="10" fill="{_LADDER}">'
                          f'{lv.get("n_bits")} bits, p_flip {lv["p_flip"]:.2f}</text>')
+        elif isinstance(lv, dict) and lv.get("difficulty"):
+            # SPEC.md 46.2 (v0.32): the sine / cartpole ladder levels carry
+            # their own parameter keys, so the marker is labelled with the
+            # curriculum's difficulty string (e.g. "sine-n0.10-f1.5-a0.75")
+            parts.append(f'<text x="{x:.1f}" y="{T - 8:.1f}" text-anchor="middle" '
+                         f'font-size="10" fill="{_LADDER}">{lv["difficulty"]}</text>')
     colors = []
     for i, k, _v in pts:
         if k == KIND_CURRICULUM:  # SPEC.md 35.1 (C4)

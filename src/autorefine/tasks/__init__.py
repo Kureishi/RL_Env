@@ -7,6 +7,7 @@ from .images import ImageTask
 from .media import collect_items, detect_modality
 from .parity import Parity4V1, ParityTask, parity_ceiling
 from .sine import SineRegressionV1
+from .text import TextTask, ngram_features
 
 # task registry (SPEC.md 15): new tasks register here, zero core-loop changes
 TASKS = {
@@ -18,6 +19,8 @@ TASKS = {
     # v0.10: input modalities (SPEC.md 24.3/24.4; need task_config.path dir)
     "image": ImageTask,
     "audio": AudioTask,
+    # v0.31: text modality (SPEC.md 45.2; needs task_config.path dir)
+    "text": TextTask,
 }
 
 __all__ = [
@@ -25,4 +28,5 @@ __all__ = [
     "SineRegressionV1", "Parity4V1", "ParityTask", "parity_ceiling", "TASKS",
     "ImageTask", "AudioTask", "log_mel_features", "log_mel_frames",
     "collect_items", "detect_modality",
+    "TextTask", "ngram_features",
 ]

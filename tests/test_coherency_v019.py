@@ -99,6 +99,10 @@ class _FakeCurriculum:
     def level_description(self) -> str:
         return f"fake-level-{self.level}"
 
+    def level_params(self) -> dict:
+        # SPEC.md 46.2.2: the parity-shaped row keys the env splats
+        return {"n_bits": self.n_bits, "p_flip": self.p_flip}
+
     def levels_left(self) -> int:
         return 0 if self.level >= 1 else 1
 
@@ -158,10 +162,10 @@ def test_version_single_source():
     import autorefine
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
     assert py["project"]["version"] == autorefine.__version__
-    # round label == package version (v0.30 ⇒ 0.30.0, M33 — the round
-    # advanced per SPEC.md 33.1 with the v0.30 stable-scores batch,
-    # SPEC.md 44)
-    assert autorefine.__version__ == "0.30.0"
+    # round label == package version (v0.33 ⇒ 0.33.0, M36 — the round
+    # advanced per SPEC.md 33.1 with the v0.31 adapt-to-use-cases batch,
+    # SPEC.md 45)
+    assert autorefine.__version__ == "0.33.0"
     # the app caption is `v{__version__}` — the same number, no third copy
     app_src = (REPO / "src" / "autorefine" / "dashboard_app.py"
                ).read_text(encoding="utf-8")

@@ -93,9 +93,10 @@ HISTORICAL_ORDERED = (
 HISTORICAL_TREE_FIELDS = ("architecture", "train_steps", "input_noise",
                           "model_family")
 
-# SPEC.md 36.1.3: the declared metric set (new metrics such as F1 or
-# log-loss are a task property, not a head string).
-DECLARED_METRICS = frozenset({"accuracy", "r2", "mean_steps", "success"})
+# SPEC.md 36.1.3: the declared metric set (new metrics such as F1 are a
+# task property, not a head string); logloss joined in v0.32 (SPEC.md 46.1).
+DECLARED_METRICS = frozenset(
+    {"accuracy", "r2", "mean_steps", "success", "logloss"})
 
 
 # --- fixtures (duplicated; no cross-test imports) ---------------------------
@@ -203,8 +204,9 @@ def test_task_is_nominal_abc_with_two_abstract_methods():
 def test_every_task_is_a_task_subclass():
     """A26 (SPEC.md 36.1): every `TASKS` value lists Task as its base —
     the nominal interface the §23 plugin loader targets (frozen
-    interface, no duck-typing guess)."""
-    assert len(TASKS) == 7
+    interface, no duck-typing guess). v0.31 (SPEC.md 45.2): the text
+    modality advances the count 7 -> 8 in place."""
+    assert len(TASKS) == 8
     for name, cls in TASKS.items():
         assert issubclass(cls, Task), name
 
@@ -439,9 +441,9 @@ def test_bandit_search_views_are_consistent():
 # --- 36.3 (regression) -------------------------------------------------------
 
 def test_version_round_v022():
-    """A26 (SPEC.md 36.3, 33.1): the version stepped to `0.30.0` in both
-    sources with the round (v0.30 ⇒ `0.30.0`, both together — the round
+    """A26 (SPEC.md 36.3, 33.1): the version stepped to `0.33.0` in both
+    sources with the round (v0.33 ⇒ `0.33.0`, both together — the round
     assertion advanced in place per SPEC.md 33.1)."""
     py = tomllib.loads(
         (REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.30.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.33.0"

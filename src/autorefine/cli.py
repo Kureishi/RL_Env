@@ -12,10 +12,12 @@ import importlib
 import importlib.metadata
 import importlib.util
 import json
+import math
 import subprocess
 import sys
 import tempfile
 import time
+import zipfile
 from pathlib import Path
 
 from .config import Budget, ModelSpec
@@ -26,11 +28,20 @@ from .gate import (
     evaluate,
     parse_objective,
 )
-from .runconfig import RunConfig, format_recipe
+from .runconfig import (
+    RUN_CONFIG_SCHEMA,
+    RunConfig,
+    format_recipe,
+    runconfig_to_flags,
+)
 from .dashboard import diff_two_summaries, field_stats  # 42.2/42.3 (v0.28)
 from .improver.meta_env import AutoRefineEnv, search_quality_v04
 from .improver.bandit import BanditPolicy
-from .improver.curriculum import ParityCurriculum
+from .improver.curriculum import (  # 46.2 (v0.32): the three ladders
+    CartPoleCurriculum,
+    ParityCurriculum,
+    SineCurriculum,
+)
 from .improver.policy import SearchPolicy
 from .improver.rl_policy import MetaRLPolicy, train_policy
 from .accounting import account_run  # 39.2 (T4): decision accounting
@@ -79,25 +90,39 @@ from .plugins import (
     discover,
     register_tasks,
 )
-from .tasks import TASKS, ParityTask
+from .tasks import (  # 46.2 (v0.32): the curriculum-level task fallbacks
+    TASKS,
+    CartPoleV1,
+    ParityTask,
+    SineRegressionV1,
+)
 from .models.mlp import MLP
 from .evaluator import evaluate_full
 
 
 def _drive(args: argparse.Namespace, env: AutoRefineEnv) -> None:
-    """Shared improver driver for `run` and `fit` (SPEC.md 22.1)."""
+    """Shared improver driver for `run` and `fit` (SPEC.md 22.1).
+
+    SPEC.md 47.3 (v0.33, `--quiet`): the loop's stdout (run dir / baseline /
+    per-experiment / RL episode lines) is suppressed when `args.quiet`;
+    the `=== summary ===` block is always kept (47.3.2)."""
+    quiet = getattr(args, "quiet", False)  # 47.3 (run/fit only; safe elsewhere)
     if args.policy == "rl":
         # SPEC.md 15: meta-RL improver — policy trained on AutoRefineEnv itself
         policy = MetaRLPolicy(seed=args.seed)
-        print(f"task    : {args.task}  (meta-RL, {args.rl_episodes} full-budget episodes)")
-        rl_summary = train_policy(env, policy, args.rl_episodes, verbose=True)
-        print(f"rl episodes: {rl_summary['episodes']}, returns: "
-              f"{[round(r, 4) for r in rl_summary['episode_returns']]}")
+        if not quiet:
+            print(f"task    : {args.task}  (meta-RL, {args.rl_episodes} full-budget episodes)")
+        rl_summary = train_policy(env, policy, args.rl_episodes,
+                                  verbose=not quiet)  # 47.3.2
+        if not quiet:
+            print(f"rl episodes: {rl_summary['episodes']}, returns: "
+                  f"{[round(r, 4) for r in rl_summary['episode_returns']]}")
         summary = env.memory.load_summary() if env.memory else {}
     else:
         state = env.reset()
-        print(f"run dir : {env.run_dir}")
-        print(f"baseline: {state['baseline_score']:.2f}")
+        if not quiet:  # 47.3.2: the loop's stdout is the quiet surface
+            print(f"run dir : {env.run_dir}")
+            print(f"baseline: {state['baseline_score']:.2f}")
 
         # SPEC.md 17: the UCB field-bandit is a second reference policy
         policy = (SearchPolicy(seed=args.seed) if args.policy == "search"
@@ -105,10 +130,11 @@ def _drive(args: argparse.Namespace, env: AutoRefineEnv) -> None:
         while not env.done:
             action = policy.propose(state)
             state, reward, done, info = env.step(action)
-            mark = "+" if info.get("accepted") else " "
-            score = info.get("candidate_score")
-            score_s = f"{score:8.2f}" if isinstance(score, (int, float)) else "  duplicate"
-            print(f" {mark} exp {env.bm.used_experiments:3d}  score {score_s}  reward {reward:+.4f}")
+            if not quiet:  # 47.3.2: per-experiment line suppressed
+                mark = "+" if info.get("accepted") else " "
+                score = info.get("candidate_score")
+                score_s = f"{score:8.2f}" if isinstance(score, (int, float)) else "  duplicate"
+                print(f" {mark} exp {env.bm.used_experiments:3d}  score {score_s}  reward {reward:+.4f}")
 
         summary = env.memory.load_summary() if env.memory else {}
     print("\n=== summary ===")
@@ -128,11 +154,18 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # SPEC.md 20.1: opt-in curriculum (adaptive difficulty; parity for now)
     curriculum = None
     if args.curriculum:
-        if args.task != "parity-v1":
-            print("--curriculum currently supports parity-v1 only "
-                  "(SPEC.md 20.1)", file=sys.stderr)
+        # SPEC.md 46.2 (v0.32): the ladder per task family (20.1 for parity,
+        # 46.2.3 sine, 46.2.4 cartpole)
+        if args.task == "parity-v1":
+            curriculum = ParityCurriculum(seed=args.seed)
+        elif args.task == "sine-v1":
+            curriculum = SineCurriculum(seed=args.seed)
+        elif args.task == "cartpole-v1":
+            curriculum = CartPoleCurriculum(seed=args.seed)
+        else:
+            print("--curriculum supports parity-v1, sine-v1, and cartpole-v1 "
+                  "(SPEC.md 46.2)", file=sys.stderr)
             return 1
-        curriculum = ParityCurriculum(seed=args.seed)
     env = AutoRefineEnv(
         task=args.task, seed=args.seed, budget=_budget(args), runs_dir=args.runs_dir,
         ensemble_top_k=2 if args.ensemble_final else 0,
@@ -217,10 +250,13 @@ def _print_summary(args: argparse.Namespace, env: AutoRefineEnv,
 
 
 def _resolve_fit_task(data: Path, want: str) -> str:
-    """v0.10 (SPEC.md 24.5): `--data` file → csv; directory → image/audio.
+    """v0.10 (SPEC.md 24.5; v0.31 45.2.2): `--data` file → csv; directory
+    → image/audio/text.
 
-    `want` is the `--task` value ('auto' | 'csv' | 'image' | 'audio');
-    auto-detection counts modality extensions in the directory's subfolders.
+    `want` is the `--task` value ('auto' | 'csv' | 'image' | 'audio' |
+    'text'); auto-detection counts modality extensions in the directory's
+    subfolders (SPEC.md 45.2.1: one modality → its name, two or more →
+    'mixed', none → None).
     """
     from .tasks import detect_modality
     if data.is_file():
@@ -232,15 +268,16 @@ def _resolve_fit_task(data: Path, want: str) -> str:
             m = detect_modality(data)
             if m == "mixed":
                 raise ValueError(
-                    f"{data} holds both image and audio items: pass "
-                    f"--task image or --task audio (SPEC.md 24.5)")
+                    f"{data} holds items of more than one modality: pass "
+                    f"--task image, --task audio, or --task text "
+                    f"(SPEC.md 24.5)")
             if m is None:
                 raise ValueError(
-                    f"no image or audio items under {data} — one subfolder "
-                    f"per class, or an index.csv (SPEC.md 24.2); or pass a "
-                    f"CSV file with --task csv")
+                    f"no image, audio, or text items under {data} — one "
+                    f"subfolder per class, or an index.csv (SPEC.md 24.2); "
+                    f"or pass a CSV file with --task csv")
             return m
-        if want in ("image", "audio"):
+        if want in ("image", "audio", "text"):
             return want
         raise ValueError(f"--task csv needs a CSV file, got directory {data}")
     raise ValueError(f"no such file or directory: {data}")
@@ -255,9 +292,21 @@ def _cmd_fit(args: argparse.Namespace) -> int:
     `--gate` → the §22.1 score bar (PASS → rc 0, MISS → rc 2, byte-identical
     to pre-v0.23); `--gate "name op threshold"` (repeatable) → the objective
     set (37.2). `--from-run RUN_DIR` re-runs a finished run exactly (37.1.4)
-    — mutually exclusive with `--data`.
+    — mutually exclusive with `--data`. `--tasks A.csv,B.csv` (SPEC.md 46.3,
+    v0.32) runs one shared budget over several CSV datasets — mutually
+    exclusive with both single-file modes.
     """
     from .tasks import TASKS  # noqa: F401 (registry; the helpers use it)
+    # SPEC.md 46.3 (v0.32): portfolio mode — first, because it is mutually
+    # exclusive with the --data / --from-run checks below
+    if getattr(args, "tasks", None) is not None:
+        if args.data is not None or args.from_run is not None:
+            print("--tasks is mutually exclusive with --data and --from-run "
+                  "(SPEC.md 46.3)", file=sys.stderr)
+            return 1
+        if getattr(args, "dry_run", False):
+            return _fit_dry_run_portfolio(args)
+        return _fit_portfolio(args)
     if args.data is not None and args.from_run is not None:
         print("--data and --from-run are mutually exclusive (SPEC.md 37.1.4)",
               file=sys.stderr)
@@ -278,11 +327,123 @@ def _cmd_fit(args: argparse.Namespace) -> int:
     if env is None:
         return 1
     _drive(args, env)
-    rc = _fit_gate(args, env, bar, metric)
+    rc = _fit_gate(args, env, bar, metric)  # kept under --quiet (47.3.2)
     # C2/C3 (SPEC.md 28.2/28.3): after the gate line, per-class accuracy +
     # weakest-class hint (and the media error gallery)
-    _print_fit_diagnostics(env)
+    if not getattr(args, "quiet", False):  # 47.3.2: the diagnostics block
+        _print_fit_diagnostics(env)
     return rc
+
+
+def _portfolio_paths(args: argparse.Namespace) -> list[str] | int:
+    """SPEC.md 46.3 (v0.32): parse + validate `--tasks` — the CSV file paths
+    in order, or 1 (the CLI error already printed by the caller)."""
+    paths = [p.strip() for p in str(args.tasks).split(",")]
+    paths = [p for p in paths if p]
+    if len(paths) < 2:
+        print("--tasks needs at least 2 CSV files (SPEC.md 46.3)",
+              file=sys.stderr)
+        return 1
+    return paths
+
+
+def _fit_dry_run_portfolio(args: argparse.Namespace) -> int:
+    """`fit --tasks A.csv,B.csv --dry-run` (SPEC.md 46.3, v0.32 S1×portfolio):
+    the per-task dry-run plans — the same plan `fit --dry-run` prints for a
+    single file, once per CSV in the given order, each with its sub-budget
+    (experiments = ceil(total/N); the wall-time deadline is shared, so only
+    the experiments count is split in the plan). rc 0 when every plan
+    prints; rc 1 on a resolve/probe failure (the *same* errors `fit` would
+    hit — e.g. a wrong label column — surfaced before any training)."""
+    paths = _portfolio_paths(args)
+    if isinstance(paths, int):
+        return paths
+    for p in paths:
+        if not Path(p).is_file():
+            print(f"portfolio: no such file: {p} (SPEC.md 46.3)",
+                  file=sys.stderr)
+            return 1
+    sub_experiments = max(1, math.ceil(args.experiments / len(paths)))
+    saved = (args.data, args.experiments)
+    try:
+        for k, p in enumerate(paths, start=1):
+            print(f"\n=== portfolio task {k}/{len(paths)}: {p} ===")
+            args.data = p  # the shared planner reads `args.data`
+            args.experiments = sub_experiments
+            rc = _fit_dry_run(args)
+            if rc != 0:
+                return rc
+    finally:
+        args.data, args.experiments = saved
+    return 0
+
+
+def _fit_portfolio(args: argparse.Namespace) -> int:
+    """`fit --tasks A.csv,B.csv` (SPEC.md 46.3, v0.32): portfolio mode —
+    one shared budget over several CSV datasets, run sequentially in the
+    given order (v1: CSV files; cross-task policy transfer is a documented
+    follow-up).
+
+    Sub-budgets: each task gets experiments = ceil(total/N); the wall-time
+    deadline is shared — the elapsed time is subtracted and clamped to a
+    small positive floor (a task starting with no wall time left runs its
+    baseline only; `Budget` requires max_wall_seconds > 0). Per-task gate
+    lines as usual; rc 0 iff every task PASSes, else 2; a resolve failure
+    is rc 1 (never a partial-portfolio score)."""
+    from .tasks import CsvTask
+    paths = _portfolio_paths(args)
+    if isinstance(paths, int):
+        return paths
+    t0 = time.perf_counter()
+    rcs: list[int] = []
+    for k, p in enumerate(paths, start=1):
+        f = Path(p)
+        if not f.is_file():
+            print(f"portfolio: no such file: {p} (SPEC.md 46.3)",
+                  file=sys.stderr)
+            return 1
+        config: dict = {"path": str(f)}
+        if args.label is not None:
+            config["label"] = args.label
+        if args.split_frac != 0.2:
+            config["split_frac"] = args.split_frac
+        if getattr(args, "temporal", False):  # v0.31 (SPEC.md 45.1.2)
+            config["split_mode"] = "temporal"
+        if getattr(args, "metric", "accuracy") != "accuracy":  # 46.1
+            config["metric"] = args.metric
+        try:
+            probe = CsvTask(seed=args.seed, **config)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        elapsed = time.perf_counter() - t0
+        sub = Budget(
+            max(1, math.ceil(args.experiments / len(paths))),
+            max(0.001, args.max_seconds - elapsed),
+            args.max_train_seconds,
+        )
+        quality = {} if args.search_quality == "legacy" else search_quality_v04()
+        args.task = "csv"  # _drive's print lines
+        print(f"\n=== portfolio task {k}/{len(paths)}: {f} ===")
+        env = AutoRefineEnv(
+            task="csv", seed=args.seed, budget=sub, runs_dir=args.runs_dir,
+            ensemble_top_k=2 if args.ensemble_final else 0,
+            dataset_episodes=int(probe.default_dataset_size),
+            task_config=config,
+            stall_patience=args.stall_patience,  # v0.17 (SPEC.md 31.1)
+            screen_frac=args.screen_frac,  # v0.18 (SPEC.md 32.2)
+            kfold=args.kfold,  # v0.30 (SPEC.md 44.1)
+            policy=args.policy, target=args.target,
+            rl_episodes=args.rl_episodes if args.policy == "rl" else None,
+            **quality,
+        )
+        _drive(args, env)
+        metric = getattr(probe, "metric", None) or "score"
+        rcs.append(_fit_gate(args, env, args.target, metric))
+        # 47.3.2: the diagnostics block is the quiet surface (kept header)
+        if not getattr(args, "quiet", False):
+            _print_fit_diagnostics(env)  # the fit output shape (28.2)
+    return 0 if all(rc == 0 for rc in rcs) else 2
 
 
 def _fit_dry_run(args: argparse.Namespace) -> int:
@@ -314,6 +475,10 @@ def _fit_dry_run(args: argparse.Namespace) -> int:
         config["label"] = args.label
     if args.split_frac != 0.2:
         config["split_frac"] = args.split_frac
+    if getattr(args, "temporal", False):  # v0.31 (SPEC.md 45.1.2)
+        config["split_mode"] = "temporal"
+    if getattr(args, "metric", "accuracy") != "accuracy":  # 46.1 (v0.32)
+        config["metric"] = args.metric
     # the *same* probe constructor `fit` uses — a bad label column raises here
     try:
         probe = TASKS[task_name](seed=args.seed, **config)
@@ -330,6 +495,10 @@ def _fit_dry_run(args: argparse.Namespace) -> int:
         print(f"  label      : {args.label}")
     print(f"  split      : non-train share {args.split_frac:g} "
           f"(evenly into holdout + gen)")
+    if getattr(args, "temporal", False):
+        # v0.31 (SPEC.md 45.1): walk-forward splits — file order, csv tasks
+        print("  split mode : temporal (walk-forward, file order; "
+              "SPEC.md 45.1)")
     print(f"  recipe     : task {task_name} | seed {args.seed} | policy "
           f"{args.policy} | target {args.target:g}")
     print(f"  ensemble   : top-{2 if args.ensemble_final else 0}   "
@@ -346,7 +515,12 @@ def _fit_dry_run(args: argparse.Namespace) -> int:
         print("  dataset    : task default size")
     # SPEC.md 43.1 (v0.29): the data-health preflight — pure stats over the
     # probe already built above; warnings in the plan, never failures (43.1.3)
-    for line in format_health(data_health(probe, args.target)):
+    # SPEC.md 46.1 (v0.32): the headroom note is an accuracy statement, so it
+    # is suppressed when the declared metric is logloss (the class-balance
+    # block still prints)
+    _health_target = None if getattr(probe, "metric", None) == "logloss" \
+        else args.target
+    for line in format_health(data_health(probe, _health_target)):
         print(line)
     print(f"  budget     : experiments {budget.max_experiments} | "
           f"max-seconds {budget.max_wall_seconds:g} | "
@@ -400,6 +574,10 @@ def _fit_data(args: argparse.Namespace) -> tuple:
         config["label"] = args.label
     if args.split_frac != 0.2:
         config["split_frac"] = args.split_frac
+    if getattr(args, "temporal", False):  # v0.31 (SPEC.md 45.1.2)
+        config["split_mode"] = "temporal"
+    if getattr(args, "metric", "accuracy") != "accuracy":  # 46.1 (v0.32)
+        config["metric"] = args.metric
     # deterministic probe for the train-split size (the env re-derives the
     # identical split from the same seed, SPEC.md 22.1)
     try:
@@ -1091,9 +1269,19 @@ def _task_from_summary(summary: dict):
     if task_name in TASKS:
         return TASKS[task_name](seed=seed, **cfg) if cfg \
             else TASKS[task_name](seed=seed)
-    if summary.get("curriculum"):  # SPEC.md 20.1: a curriculum level name
+    if summary.get("curriculum"):  # SPEC.md 20.1/46.2: a curriculum level
         lvl = summary["curriculum"]["levels"][-1]
-        return ParityTask(seed=seed, n_bits=lvl["n_bits"], p_flip=lvl["p_flip"])
+        if "n_bits" in lvl and "p_flip" in lvl:
+            # the historical parity shape (20.1) — byte-identical rule
+            return ParityTask(seed=seed, n_bits=lvl["n_bits"], p_flip=lvl["p_flip"])
+        if "noise" in lvl and "freq_scale" in lvl and "amplitude" in lvl:
+            # SPEC.md 46.2.3: the sine ladder level
+            return SineRegressionV1(
+                seed, noise=lvl["noise"], freq_scale=lvl["freq_scale"],
+                amplitude=lvl["amplitude"])
+        if "ic_scale" in lvl:
+            # SPEC.md 46.2.4: the cartpole ladder level
+            return CartPoleV1(seed, ic_scale=lvl["ic_scale"])
     return None
 
 
@@ -1273,6 +1461,10 @@ def _cmd_predict(args: argparse.Namespace) -> int:
               "image, audio) — use `autorefine eval` for episode tasks "
               "(SPEC.md 42.1.2)", file=sys.stderr)
         return 1
+    if args.prob and getattr(task, "head", None) != "softmax":  # 46.1 (v0.32)
+        print("predict: probabilities are only available for softmax-head "
+              "models (SPEC.md 46.1)", file=sys.stderr)
+        return 1
     modes = [m for m, on in (("row", args.row is not None),
                             ("csv", args.csv is not None),
                             ("stdin", args.stdin),
@@ -1319,7 +1511,13 @@ def _cmd_predict(args: argparse.Namespace) -> int:
         print(json.dumps(results, sort_keys=True))
     else:
         for r in results:
-            print(f"{r['row']}\t{_pred_str(r['prediction'])}")
+            if args.prob:  # SPEC.md 46.1 (v0.32): the calibrated probabilities
+                classes = list(task.class_values)
+                for ci, cls in enumerate(classes):
+                    print(f"{r['row']}\t{_pred_str(cls)}: "
+                          f"p={r['probabilities'][ci]:.4f}")
+            else:
+                print(f"{r['row']}\t{_pred_str(r['prediction'])}")
     return 0
 
 
@@ -1575,16 +1773,198 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     return 1 if counts["FAIL"] else 0
 
 
+# --- v0.33 (SPEC.md 47.4): `autorefine share` --------------------------------
+
+def _share_report_html(run_dir: Path) -> str | None:
+    """SPEC.md 47.4.2: the share bundle's `report.html` — ALWAYS regenerated
+    in memory with the exact `report --html` call (22.2: `html_report` over
+    the summary, the experiments, and the 28.2–28.4 extras) and never
+    written into the run dir — so a share of an old run dir carries a
+    current renderer's HTML. None when there is no summary (the caller
+    already errors in that case; 47.4.4)."""
+    mem = RunMemory(run_dir)
+    try:
+        summary = mem.load_summary()
+    except FileNotFoundError:
+        return None
+    try:
+        entries = mem.load_experiments()
+    except FileNotFoundError:
+        entries = []  # a summary-only dir: the report still renders (22.2)
+    extras = _report_extras(summary, run_dir)  # None-safe (28.5)
+    return html_report(summary, entries,
+                       diagnostics=extras["diagnostics"],
+                       gallery=extras["gallery"],
+                       arch_svg=extras["arch_svg"])
+
+
+def _cmd_share(args: argparse.Namespace) -> int:
+    """`share` (SPEC.md 47.4, v0.33): bundle a finished run into one
+    self-contained .zip — the "send this to a colleague" case, respecting
+    the no-GUI-core stance (23.1: a file, not a server).
+
+    Contents (47.4.2): `report.html` (always regenerated in memory, never
+    written to the run dir), `summary.json`, `run_config.json` (when
+    present, 37.1), `best_spec.json` (when present), and every flat
+    `*.svg` in the run dir (21.2/28.2/30.1 artifacts).
+
+    Deterministic (47.4.3, G2): the `ZipInfo` timestamp is fixed at
+    1980-01-01 00:00:00, `ZIP_DEFLATED`, entries written in sorted name
+    order — two shares of the same run dir are byte-identical.
+
+    rc 0 with the entry listing (name + byte size) and the output path;
+    rc 1 when the run dir is missing or has no `summary.json` (47.4.4).
+    Stdlib `zipfile` only — no new dependency (SPEC.md 3).
+    """
+    run_dir = Path(args.run)
+    if not (run_dir / "summary.json").is_file():
+        print(f"no summary.json in run dir {str(run_dir)!r} — finish the run "
+              f"first (SPEC.md 47.4.4)", file=sys.stderr)
+        return 1
+    out = (Path(args.out) if args.out is not None
+           else run_dir.parent / f"{run_dir.name}-share.zip")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, bytes] = {}
+    html = _share_report_html(run_dir)  # 47.4.2: always regenerated
+    if html is not None:
+        payload["report.html"] = html.encode("utf-8")
+    for name in ("summary.json", "run_config.json", "best_spec.json"):
+        p = run_dir / name
+        if p.is_file():
+            payload[name] = p.read_bytes()
+    for p in sorted(run_dir.glob("*.svg")):  # flat SVGs only (47.4.2)
+        payload[p.name] = p.read_bytes()
+    with zipfile.ZipFile(out, "w") as zf:
+        for name in sorted(payload):  # 47.4.3: sorted entry order
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            zf.writestr(info, payload[name])
+    for name in sorted(payload):
+        print(f"  {name:24s} {len(payload[name]):8d} bytes")
+    print(f"share   : {out}")
+    return 0
+
+
+# --- v0.33 (SPEC.md 47.2): help polish ----------------------------------------
+
+def _version_string() -> str:
+    """SPEC.md 47.2.1: the `--version` line — the 33.1 single version
+    source, imported inside the function (no module-level import cycle;
+    the 43.2 `_cmd_doctor` pattern)."""
+    import autorefine  # local: avoid the package-init cycle
+    return f"autorefine {autorefine.__version__}"
+
+
+# SPEC.md 47.2.3: the exit-code table the CLI already honors (0/1/2/130).
+_TOP_EPILOG = """exit codes (SPEC.md 47.2.3):
+  0    success (gate PASS where a gate applies)
+  1    error (bad arguments, missing files, a resolve/probe failure)
+  2    gate MISS (fit, variance, report --what-if)
+  130  Ctrl-C while `watch` is polling
+"""
+
+# SPEC.md 47.2.2: the per-subcommand example blocks — the canonical
+# invocations lifted from the README Quickstart, rendered verbatim by the
+# RawDescriptionHelpFormatter (forwarded to every subparser).
+_EP_RUN = """examples (README Quickstart):
+  autorefine run --task cartpole-v1 --seed 7 --experiments 30
+  autorefine run --task parity-v1 --policy bandit --seed 7 --experiments 6
+  autorefine run --task parity-v1 --policy bandit --seed 7 --curriculum
+  autorefine run --task sine-v1 --policy rl --rl-episodes 5
+  autorefine run --demo
+"""
+_EP_REPORT = """examples (README Quickstart):
+  autorefine report --run runs/<run_id>
+  autorefine report --run runs/<run_id> --plot
+  autorefine report --run runs/<run_id> --html
+  autorefine report --run runs/<run_id> --json
+  autorefine report --history
+"""
+_EP_WATCH = """examples:
+  autorefine watch --run runs/<run_id>
+  autorefine watch --run runs/<run_id> --tail
+"""
+_EP_FIT = """examples (README Quickstart):
+  autorefine fit --data sales.csv --label churn --target 95.0
+  autorefine fit --data examples/data/churn_sample.csv
+  autorefine fit --data sales.csv --dry-run
+  autorefine fit --from-run runs/<run_id>
+  autorefine fit --tasks a.csv,b.csv
+"""
+_EP_DASHBOARD = """examples:
+  autorefine dashboard            # needs pip install autorefine[gui]
+"""
+_EP_PLUGINS = """examples:
+  autorefine plugins list
+"""
+_EP_EVAL = """examples:
+  autorefine eval --run runs/<run_id>
+"""
+_EP_PREDICT = """examples:
+  autorefine predict --run runs/<run_id> --row '{"x1": 0.5, "x2": -0.2}'
+  autorefine predict --run runs/<run_id> --csv new_rows.csv --prob
+"""
+_EP_COMPARE = """examples:
+  autorefine compare --run runs/<run_id_A> --run runs/<run_id_B>
+"""
+_EP_EXPLAIN = """examples:
+  autorefine explain --run runs/<run_id>
+  autorefine explain --run runs/<run_id> --json
+"""
+_EP_DOCTOR = """examples:
+  autorefine doctor
+"""
+_EP_VARIANCE = """examples:
+  autorefine variance --data sales.csv --seeds 5
+  autorefine variance --data sales.csv --seeds 5 --json
+"""
+_EP_POLICY = """examples:
+  autorefine policy-report --task sine-v1 --episodes 3
+  autorefine policy-report --multi --tasks sine-v1,parity-v1,cartpole-v1
+"""
+_EP_SHARE = """examples:
+  autorefine share --run runs/<run_id>
+  autorefine share --run runs/<run_id> --out archive.zip
+"""
+
+
+def _add_config_flag(sp: argparse.ArgumentParser) -> None:
+    """SPEC.md 47.1.2: the shared `--config` flag — every subcommand adds
+    it exactly once (one place for the help text and the default)."""
+    sp.add_argument("--config", default=None, metavar="FILE",
+                    help="v0.33 (SPEC.md 47.1): read flag values from a JSON "
+                         "file — a canonical run_config.json (schema "
+                         "autorefine.run_config/1) or a plain JSON object of "
+                         "kebab-case flag names; explicit CLI flags win over "
+                         "the file, the file wins over the defaults")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The full argparse tree (SPEC.md 33.2, C2): exposed separately so
     the KNOBS registry's CLI claims (which subcommand exposes which
     `--knob`) can be checked against the real parser by the A23 tests.
-    Pure extraction from `main` — identical flags, no behavior change."""
-    parser = argparse.ArgumentParser(prog="autorefine",
-                                     description="Autonomous iterative model-improvement environment")
+    Pure extraction from `main` — identical flags, no behavior change.
+
+    SPEC.md 47.2 (v0.33): the top-level `--version` + the exit-code
+    epilog, and the per-subcommand `examples:` epilog blocks (rendered
+    verbatim — `RawDescriptionHelpFormatter` on the top parser, forwarded
+    to every subparser)."""
+    parser = argparse.ArgumentParser(
+        prog="autorefine",
+        description="Autonomous iterative model-improvement environment",
+        formatter_class=argparse.RawDescriptionHelpFormatter,  # 47.2
+        epilog=_TOP_EPILOG)  # 47.2.3: the exit-code table
+    parser.add_argument("--version", action="version",
+                        version=_version_string(),  # 47.2.1
+                        help="print the version (autorefine <version>) and "
+                             "exit (SPEC.md 47.2.1)")
+    # 47.2.2: the epilog + RawDescriptionHelpFormatter are set on each
+    # subparser below (CPython's add_subparsers does not forward them)
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p_run = sub.add_parser("run", help="run the autonomous improvement loop")
+    p_run = sub.add_parser("run", help="run the autonomous improvement loop",
+                           epilog=_EP_RUN,  # 47.2.2
+                           formatter_class=argparse.RawDescriptionHelpFormatter)
     p_run.add_argument("--task", default="cartpole-v1",
                        choices=sorted(TASKS), help=f"task ({', '.join(sorted(TASKS))})")
     p_run.add_argument("--policy", default="search",
@@ -1605,9 +1985,11 @@ def build_parser() -> argparse.ArgumentParser:
                        help="v0.5 (SPEC.md 19.3): also report an ensemble final "
                             "score (average of the top-2 frontier models)")
     p_run.add_argument("--curriculum", action="store_true",
-                       help="v0.6 (SPEC.md 20.1): adaptive difficulty — step the "
-                            "parity task up (p_flip, then n_bits) as the "
-                            "improver saturates")
+                       help="v0.6 (SPEC.md 20.1; v0.32 46.2): adaptive "
+                            "difficulty — step the task up as the improver "
+                            "saturates (parity-v1: p_flip then n_bits; "
+                            "sine-v1: noise/frequency/amplitude; "
+                            "cartpole-v1: initial-condition scale)")
     p_run.add_argument("--stall-patience", type=int, default=None,
                        help="v0.17 (SPEC.md 31.1): stop after K consecutive "
                             "non-improving experiments (finished_reason='stalled'); "
@@ -1627,9 +2009,17 @@ def build_parser() -> argparse.ArgumentParser:
                             "deterministic parity-v1 loop (3 experiments, 60 s "
                             "wall) printed with the full decision trace; "
                             "--task/--experiments/etc. are ignored")
+    p_run.add_argument("--quiet", action="store_true",
+                       help="v0.33 (SPEC.md 47.3): suppress the per-experiment "
+                            "loop output (keep the === summary === block); "
+                            "--demo ignores it (already minimal, 41.3)")
+    _add_config_flag(p_run)  # 47.1.2
     p_run.set_defaults(func=_cmd_run)
 
-    p_rep = sub.add_parser("report", help="print a run's summary and experiment log")
+    p_rep = sub.add_parser(
+        "report", help="print a run's summary and experiment log",
+        epilog=_EP_REPORT,  # 47.2.2
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p_rep.add_argument("--run", default=None,
                        help="path to a run directory")
     # SPEC.md 38.3 (v0.24, T1): the run registry across finished runs
@@ -1680,11 +2070,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_rep.add_argument("--html", action="store_true",
                        help="v0.8 (SPEC.md 22.2): write a self-contained "
                             "report.html (embedded SVGs + tables) into the run dir")
+    _add_config_flag(p_rep)  # 47.1.2
     p_rep.set_defaults(func=_cmd_report)
 
     p_watch = sub.add_parser(
         "watch", help="v0.25 (SPEC.md 39.1): tail a run's experiments.jsonl "
-                      "live (re-render ASCII charts, or --tail JSON lines for CI)")
+                      "live (re-render ASCII charts, or --tail JSON lines for CI)",
+        epilog=_EP_WATCH,  # 47.2.2
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p_watch.add_argument("--run", required=True,
                          help="path to a run directory (may not exist yet)")
     p_watch.add_argument("--tail", action="store_true",
@@ -1698,12 +2091,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch.add_argument("--clear", action="store_true",
                          help="human mode: ANSI clear-and-home before each "
                               "frame (live refresh); off by default")
+    _add_config_flag(p_watch)  # 47.1.2
     p_watch.set_defaults(func=_cmd_watch)
 
     p_fit = sub.add_parser(
         "fit", help="v0.8 (SPEC.md 22.1) / v0.10 (24.5): fit a model on your data "
                     "(CSV file, or a directory of labelled images/audio) and "
-                    "gate on a target")
+                    "gate on a target",
+        epilog=_EP_FIT,  # 47.2.2
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p_fit.add_argument("--data", default=None,
                        help="CSV file, or a directory of labelled images/audio "
                             "(v0.10, SPEC.md 24.5); or pass --from-run to re-run "
@@ -1711,6 +2107,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_fit.add_argument("--from-run", dest="from_run", default=None,
                        help="v0.23 (SPEC.md 37.1.4): re-run a finished run exactly "
                             "from its run_config (mutually exclusive with --data)")
+    p_fit.add_argument("--tasks", default=None,
+                       metavar="CSV1,CSV2,...",
+                       help="v0.32 (SPEC.md 46.3): portfolio mode — one shared "
+                            "budget over several CSV files, run in the given "
+                            "order (at least 2; mutually exclusive with --data "
+                            "and --from-run; rc 0 iff every task passes its "
+                            "gate)")
+    p_fit.add_argument("--metric", default="accuracy",
+                       choices=("accuracy", "logloss"),
+                       help="v0.32 (SPEC.md 46.1): the CSV task metric — "
+                            "accuracy (default, the §22.1 contract) or "
+                            "logloss (softmax-head CSV files only; score = "
+                            "100·(1 − mean NLL/ln 2), clamped at 0)")
     p_fit.add_argument("--dry-run", dest="dry_run", action="store_true",
                        help="v0.26 (SPEC.md 40.1): resolve data -> task -> head -> "
                             "split and print the plan + wall-time estimate, then exit "
@@ -1721,13 +2130,18 @@ def build_parser() -> argparse.ArgumentParser:
                        help="v0.23 (SPEC.md 37.2): an acceptance objective, e.g. "
                             "'score>=95', 'train<=30', 'model<=100000' "
                             "(repeatable); none → the §22.1 score gate")
-    p_fit.add_argument("--task", default="auto", choices=("auto", "csv", "image", "audio"),
-                       help="v0.10 (SPEC.md 24.5): force the data task; default auto "
-                            "(file → csv, directory → detected)")
+    p_fit.add_argument("--task", default="auto",
+                       choices=("auto", "csv", "image", "audio", "text"),
+                       help="v0.10 (SPEC.md 24.5; v0.31 45.2.2): force the data "
+                            "task; default auto (file -> csv, directory -> detected)")
     p_fit.add_argument("--label", default=None,
                        help="label column (default: label/target/y/class, else last column)")
     p_fit.add_argument("--split", dest="split_frac", type=float, default=0.2,
                        help="non-train share of the rows, split evenly into holdout/gen")
+    p_fit.add_argument("--temporal", action="store_true", default=False,
+                       help="v0.31 (SPEC.md 45.1): walk-forward split for CSV "
+                            "data — train = first rows, holdout = next, gen = "
+                            "last (file order; default: the random seed split)")
     p_fit.add_argument("--target", type=float, default=95.0,
                        help="your acceptance bar on final_best_score (score points)")
     p_fit.add_argument("--policy", default="bandit",
@@ -1756,30 +2170,48 @@ def build_parser() -> argparse.ArgumentParser:
                        help="v0.30 (SPEC.md 44.1): score each model on K "
                             "distinct held-out subsets and average (k-fold "
                             "holdout scoring; 0 = off, the legacy single split)")
+    p_fit.add_argument("--quiet", action="store_true",
+                       help="v0.33 (SPEC.md 47.3): suppress the per-experiment "
+                            "loop output and the per-class diagnostics (keep "
+                            "the gate verdict + the === summary === block); "
+                            "--dry-run ignores it (already minimal, 40.1)")
+    _add_config_flag(p_fit)  # 47.1.2
     p_fit.set_defaults(func=_cmd_fit)
 
     p_dash = sub.add_parser(
         "dashboard", help="v0.9 (SPEC.md 23.4): launch the Streamlit app "
-                          "(pip install autorefine[gui])")
+                          "(pip install autorefine[gui])",
+        epilog=_EP_DASHBOARD,  # 47.2.2
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p_dash.add_argument("--port", type=int, default=8501,
                         help="streamlit server port (default 8501)")
     p_dash.add_argument("--runs-dir", default="runs",
                         help="where the dashboard's runs land (default runs)")
+    _add_config_flag(p_dash)  # 47.1.2
     p_dash.set_defaults(func=_cmd_dashboard)
 
-    p_plug = sub.add_parser("plugins", help="plugin entry points (SPEC.md 21.3)")
+    p_plug = sub.add_parser("plugins", help="plugin entry points (SPEC.md 21.3)",
+                            epilog=_EP_PLUGINS,  # 47.2.2
+                            formatter_class=argparse.RawDescriptionHelpFormatter)
     p_plug_sub = p_plug.add_subparsers(dest="plug_cmd", required=True)
     p_plug_sub.add_parser("list", help="report discovered autorefine.* entry points")
+    _add_config_flag(p_plug)  # 47.1.2
     p_plug.set_defaults(func=_cmd_plugins_list)
 
-    p_eval = sub.add_parser("eval", help="re-score a run's best model on fresh splits")
+    p_eval = sub.add_parser(
+        "eval", help="re-score a run's best model on fresh splits",
+        epilog=_EP_EVAL,  # 47.2.2
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p_eval.add_argument("--run", required=True, help="path to a run directory")
     p_eval.add_argument("--episodes", type=int, default=200)
+    _add_config_flag(p_eval)  # 47.1.2
     p_eval.set_defaults(func=_cmd_eval)
 
     p_pred = sub.add_parser(
         "predict", help="v0.28 (SPEC.md 42.1): score NEW rows with a run's "
-                        "best model (--row/--csv/--stdin/--item; fitting tasks)")
+                        "best model (--row/--csv/--stdin/--item; fitting tasks)",
+        epilog=_EP_PREDICT,  # 47.2.2
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p_pred.add_argument("--run", required=True, help="path to a run directory")
     p_pred.add_argument("--row", default=None,
                         help="one row as JSON: an object keyed by feature "
@@ -1795,46 +2227,65 @@ def build_parser() -> argparse.ArgumentParser:
     p_pred.add_argument("--item", action="append", default=[],
                         metavar="FILE",
                         help="one media file (image/audio tasks); repeatable")
+    p_pred.add_argument("--prob", action="store_true",
+                        help="v0.32 (SPEC.md 46.1): also print the calibrated "
+                             "per-class probabilities for every row (softmax-head "
+                             "models only; one '<row>\t<class>: p=…' line per "
+                             "class, in class order)")
     p_pred.add_argument("--json", action="store_true",
                         help="print the predictions as a pure JSON array "
                              "([{row, prediction, probabilities}, ...])")
+    _add_config_flag(p_pred)  # 47.1.2
     p_pred.set_defaults(func=_cmd_predict)
 
     p_cmp = sub.add_parser(
         "compare", help="v0.28 (SPEC.md 42.2): the app's run-diff (38.4) in "
-                        "the terminal — score delta + best_spec field diff")
+                        "the terminal — score delta + best_spec field diff",
+        epilog=_EP_COMPARE,  # 47.2.2
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p_cmp.add_argument("--run", dest="runs", action="append", required=True,
                        metavar="DIR",
                        help="two run dirs, in order A then B (repeat --run)")
     p_cmp.add_argument("--json", action="store_true",
                        help="print the diff_two_summaries dict (pure JSON)")
+    _add_config_flag(p_cmp)  # 47.1.2
     p_cmp.set_defaults(func=_cmd_compare)
 
     p_exp = sub.add_parser(
         "explain", help="v0.28 (SPEC.md 42.3): a one-screen narrative — "
-                        "result / tried / why / weak / next")
+                        "result / tried / why / weak / next",
+        epilog=_EP_EXPLAIN,  # 47.2.2
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p_exp.add_argument("--run", required=True, help="path to a run directory")
     p_exp.add_argument("--target", type=float, default=95.0,
                        help="the score target for the next-block projection "
                             "(default 95.0, like fit's gate)")
     p_exp.add_argument("--json", action="store_true",
                        help="print {result, tried, why, weak, next} as pure JSON")
+    _add_config_flag(p_exp)  # 47.1.2
     p_exp.set_defaults(func=_cmd_explain)
 
     p_doc = sub.add_parser(
         "doctor", help="v0.29 (SPEC.md 43.2): a friendly first command — "
-                       "version / numpy / extras / smoke train / runs-dir")
+                       "version / numpy / extras / smoke train / runs-dir",
+        epilog=_EP_DOCTOR,  # 47.2.2
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p_doc.add_argument("--runs-dir", default="runs",
                        help="the runs dir to probe for writability (default runs)")
+    _add_config_flag(p_doc)  # 47.1.2
     p_doc.set_defaults(func=_cmd_doctor)
 
     p_var = sub.add_parser(
         "variance", help="v0.15 (SPEC.md 29.1): the same budget under N seeds — "
-                         "\"is the improvement real?\" (seed-variance box plot)")
+                         "\"is the improvement real?\" (seed-variance box plot)",
+        epilog=_EP_VARIANCE,  # 47.2.2
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p_var.add_argument("--data", required=True,
-                       help="CSV file, or a directory of labelled images/audio")
-    p_var.add_argument("--task", default="auto", choices=("auto", "csv", "image", "audio"),
-                       help="force the data task; default auto (file -> csv, directory -> detected)")
+                       help="CSV file, or a directory of labelled images/audio/text")
+    p_var.add_argument("--task", default="auto",
+                       choices=("auto", "csv", "image", "audio", "text"),
+                       help="force the data task; default auto (file -> csv, "
+                            "directory -> detected; v0.31 45.2.2)")
     p_var.add_argument("--label", default=None,
                        help="label column (default: auto-detect)")
     p_var.add_argument("--split", dest="split_frac", type=float, default=0.2)
@@ -1865,11 +2316,14 @@ def build_parser() -> argparse.ArgumentParser:
                        help="v0.23 (SPEC.md 37.2): per-seed acceptance objective, "
                             "e.g. 'score>=95', 'train<=30', 'model<=100000' "
                             "(repeatable); none → the §22.1 score gate")
+    _add_config_flag(p_var)  # 47.1.2
     p_var.set_defaults(func=_cmd_variance)
 
     p_pol = sub.add_parser(
         "policy-report", help="v0.15 (SPEC.md 29.2): train the meta-RL policy and "
-                              "render the action-probability + task-return views")
+                              "render the action-probability + task-return views",
+        epilog=_EP_POLICY,  # 47.2.2
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p_pol.add_argument("--task", default="sine-v1", choices=sorted(TASKS),
                        help="task (single mode)")
     p_pol.add_argument("--seed", type=int, default=7)
@@ -1884,9 +2338,111 @@ def build_parser() -> argparse.ArgumentParser:
                        help="comma-separated task names (with --multi)")
     p_pol.add_argument("--top-k", type=int, default=8, help="top-K actions per row")
     p_pol.add_argument("--n-steps", type=int, default=12, help="rows shown (last N steps)")
+    _add_config_flag(p_pol)  # 47.1.2
     p_pol.set_defaults(func=_cmd_policy_report)
 
+    p_share = sub.add_parser(
+        "share", help="v0.33 (SPEC.md 47.4): bundle a finished run into one "
+                      "deterministic, self-contained .zip (report.html + JSON "
+                      "artifacts + SVGs)",
+        epilog=_EP_SHARE,  # 47.2.2
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p_share.add_argument("--run", required=True, help="path to a run directory")
+    p_share.add_argument("--out", default=None, metavar="FILE",
+                         help="output .zip path (default: <run_dir>-share.zip "
+                              "next to the run dir)")
+    _add_config_flag(p_share)  # 47.1.2
+    p_share.set_defaults(func=_cmd_share)
+
     return parser
+
+
+def _config_value(action: argparse.Action, value, key: str):
+    """SPEC.md 47.1.3: translate one JSON config value into the flag's value.
+
+    `store_true`/`store_false` <- a JSON boolean; `append` flags (<nargs='*'>)
+    <- a JSON list (a bare value is wrapped); typed flags <- the parser
+    action's own `type`; `choices` are validated. Raises `ValueError` citing
+    `--<key>` on any bad conversion (the caller prints it + exits 1)."""
+    if isinstance(action, (argparse._StoreTrueAction, argparse._StoreFalseAction)):
+        if not isinstance(value, bool):
+            raise ValueError(f"--{key}: expected a JSON boolean, got {value!r}")
+        return bool(value)
+    if action.nargs == "*":  # append flags such as --gate / --item
+        vals = value if isinstance(value, (list, tuple)) else [value]
+        conv = action.type if action.type is not None else (lambda v: v)
+        return [v if isinstance(v, str) else conv(str(v)) for v in vals]
+    if action.type is not None:
+        try:
+            return action.type(value)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"--{key}: {value!r} is not a valid value "
+                             f"({exc})") from exc
+    if action.choices is not None and value not in action.choices:
+        raise ValueError(f"--{key}: {value!r} is not one of "
+                         f"{sorted(action.choices)}")
+    return value
+
+
+def _apply_config(parser: argparse.ArgumentParser, args, argv: list[str]):
+    """SPEC.md 47.1.1: apply the `--config` file to the parsed namespace.
+
+    A file whose `schema` equals `RUN_CONFIG_SCHEMA` is a canonical
+    run_config.json and is translated via `RunConfig.from_dict` +
+    `runconfig_to_flags` (47.1.4); any other object is taken as plain
+    kebab-case flag names. Precedence (47.1.5): explicit CLI flags > the
+    config file > the parser defaults (an `--` token anywhere in `argv`
+    wins, `--flag=value` included). Returns a non-zero exit code on any
+    error (already printed to stderr), `None` on success."""
+    path = args.config
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except OSError as exc:
+        print(f"error: --config {path}: {exc}", file=sys.stderr)
+        return 1
+    except json.JSONDecodeError as exc:
+        print(f"error: --config {path}: not valid JSON ({exc})", file=sys.stderr)
+        return 1
+    if not isinstance(data, dict):
+        print(f"error: --config {path}: the top level must be a JSON object",
+              file=sys.stderr)
+        return 1
+    if data.get("schema") == RUN_CONFIG_SCHEMA:  # 47.1.4: canonical recipe
+        try:
+            flags = runconfig_to_flags(RunConfig.from_dict(data))
+        except ValueError as exc:
+            print(f"error: --config {path}: {exc}", file=sys.stderr)
+            return 1
+    else:
+        flags = data
+    sub_action = next(a for a in parser._actions
+                      if isinstance(a, argparse._SubParsersAction))
+    sp = sub_action.choices[args.cmd]
+    opts = {}
+    for action in sp._actions:
+        for opt in getattr(action, "option_strings", ()):
+            if opt.startswith("--"):
+                opts[opt[2:]] = action
+    explicit = {tok[2:].split("=", 1)[0] for tok in argv
+                if isinstance(tok, str) and tok.startswith("--")}
+    for key, value in flags.items():
+        action = opts.get(key)
+        if action is None:  # 47.1.4: canonical configs pair with their command
+            valid = ", ".join(f"--{k}" for k in sorted(opts))
+            print(f"error: --config {path}: --{key} is not a flag of the "
+                  f"'{args.cmd}' command (valid: {valid}); a canonical "
+                  f"run_config.json pairs with the command that owns its "
+                  f"flags (SPEC.md 47.1.4)", file=sys.stderr)
+            return 1
+        if key in explicit:
+            continue  # 47.1.5: explicit CLI flags win
+        try:
+            setattr(args, action.dest, _config_value(action, value, key))
+        except ValueError as exc:
+            print(f"error: --config {path}: {exc}", file=sys.stderr)
+            return 1
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1897,6 +2453,12 @@ def main(argv: list[str] | None = None) -> int:
     except PluginError as exc:
         print(str(exc), file=sys.stderr)
         return 1
+    if argv is None:
+        argv = list(sys.argv[1:])
     parser = build_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "config", None) is not None:  # 47.1: optional config file
+        rc = _apply_config(parser, args, list(argv))
+        if rc is not None:
+            return rc
     return int(args.func(args))

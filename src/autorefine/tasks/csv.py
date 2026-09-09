@@ -21,7 +21,16 @@ Rules (all deterministic, stdlib `csv` only — SPEC.md 22.1):
     train / holdout / gen (default 80/10/10; `split_frac` is the non-train
     share, split evenly); features are standardized with train-only
     statistics (std 0 → 1);
-  * score = 100·accuracy (softmax) or 100·R² clamped at 0 (mse).
+  * `split_mode` (SPEC.md 45.1, v0.31): "random" (the rule above, the
+    default) or "temporal" (walk-forward: rows in file order — train =
+    first block, holdout = next, gen = last; same sizes);
+  * score = 100·accuracy (softmax) or 100·R² clamped at 0 (mse);
+  * `metric` (SPEC.md 46.1, v0.32): the declared task metric — the
+    default ("accuracy") keeps the §22.1 score contract; "logloss" is
+    softmax-head only (an mse-head file raises at construction) and
+    scores 100·(1 − mean_NLL/ln 2) clamped at 0 (perfect model → 100,
+    a uniform-predictor baseline → 0; G1: the metric is a task
+    property, not a head string).
 
 Split strings are matched by prefix — `gen*` → gen, `train*` → train,
 else holdout — so the §18.3 block-bootstrap names (`holdout-b3`, `gen-b2`)
@@ -62,9 +71,28 @@ class CsvTask(Task):
     # None keeps class introspection usable before a file is given.
     feature_mean = None
     feature_std = None
+    # SPEC.md 45.1 (v0.31): the split rule — "random" (the §22.1 seed
+    # permutation, the default) or "temporal" (walk-forward, file order);
+    # instance value (the class default stays "random" per the ABC).
+    split_mode = "random"
 
     def __init__(self, seed: int, path: str | Path | None = None,
-                 label: str | None = None, split_frac: float = 0.2) -> None:
+                 label: str | None = None, split_frac: float = 0.2,
+                 split_mode: str = "random", metric: str = "accuracy") -> None:
+        if split_mode not in ("random", "temporal"):
+            raise ValueError(
+                f"split_mode must be 'random' or 'temporal', got "
+                f"{split_mode!r} (SPEC.md 45.1)")
+        self.split_mode = split_mode
+        # SPEC.md 46.1 (v0.32): the declared metric — validated before head
+        # inference (the head is inferred below); "accuracy" is the default
+        # (the §22.1 contract, byte-identical runs), "logloss" requires a
+        # softmax head (enforced after inference; an mse-head file raises).
+        if metric not in ("accuracy", "logloss"):
+            raise ValueError(
+                f"metric must be 'accuracy' or 'logloss', got {metric!r} "
+                f"(SPEC.md 46.1)")
+        self._metric_requested = metric
         if path is None:
             raise ValueError(
                 "CsvTask needs a data path: use `autorefine fit --data FILE` "
@@ -98,8 +126,20 @@ class CsvTask(Task):
             self._y = np.array(
                 [int(np.flatnonzero(classes == v)[0]) for v in y], dtype=np.int64
             )
-            self.metric = "accuracy"  # SPEC.md 36.1.3 (score = 100*accuracy)
+            if self._metric_requested == "logloss":
+                # SPEC.md 46.1 (v0.32): log-loss declared on a softmax-head
+                # file — the task's metric becomes logloss (score contract
+                # in `_score_xy`)
+                self.metric = "logloss"
+            else:
+                self.metric = "accuracy"  # SPEC.md 36.1.3 (100*accuracy)
         else:
+            if self._metric_requested == "logloss":
+                # SPEC.md 46.1 (v0.32): logloss is softmax-head only
+                raise ValueError(
+                    f"CSV {self.path!r}: metric 'logloss' requires a "
+                    f"classification (softmax-head) file; this file infers "
+                    f"the mse head (SPEC.md 46.1)")
             self.head = "mse"
             self.n_outputs = 1
             self.class_values = None
@@ -117,10 +157,21 @@ class CsvTask(Task):
         if n_train < 1 or n_hold < 1 or n_gen < 1:
             raise ValueError(f"CSV {self.path!r}: {n} rows are too few for "
                              f"train/holdout/gen splits with split_frac={self.split_frac}")
-        seq = np.random.SeedSequence([self.seed, zlib.crc32(b"csv-split")])
-        perm = np.random.default_rng(seq).permutation(n)
-        tr, ho, ge = (perm[:n_train], perm[n_train:n_train + n_hold],
-                      perm[n_train + n_hold:])
+        if self.split_mode == "temporal":
+            # SPEC.md 45.1 (v0.31): walk-forward — rows in file order:
+            # train = the first n_train rows, holdout = the next n_hold,
+            # gen = the last n_gen (the same sizes as the random rule;
+            # the seed is not used for the partition).
+            tr = np.arange(0, n_train)
+            ho = np.arange(n_train, n_train + n_hold)
+            ge = np.arange(n_train + n_hold, n)
+        else:
+            # SPEC.md 22.1: seed-derived permutation (G2) — byte-identical
+            # to the pre-v0.31 path (SPEC.md 45.1.4)
+            seq = np.random.SeedSequence([self.seed, zlib.crc32(b"csv-split")])
+            perm = np.random.default_rng(seq).permutation(n)
+            tr, ho, ge = (perm[:n_train], perm[n_train:n_train + n_hold],
+                          perm[n_train + n_hold:])
 
         # standardize with train-only statistics (no leakage)
         mean = x[tr].mean(axis=0)
@@ -205,14 +256,27 @@ class CsvTask(Task):
         return self._x_tr[:n], self._y_tr[:n]
 
     def _score_xy(self, model, x: np.ndarray, y: np.ndarray) -> float:
-        """The head metric on given rows — softmax → 100·accuracy, mse →
-        100·max(0, R²) — the exact §22.1 score contract, factored so
+        """The head metric on given rows — softmax → 100·accuracy (or the
+        46.1 log-loss score when the task declared `metric='logloss'`),
+        mse → 100·max(0, R²) — the exact §22.1 score contract, factored so
         `score` (a split) and `score_fold` (a subset) share one body.
-        SPEC.md 44.1.2 (v0.30)."""
+        SPEC.md 44.1.2 (v0.30), 46.1 (v0.32)."""
         if len(x) == 0:
             return 0.0
         pred = np.asarray(model.forward(x), dtype=np.float64)
         if self.head == "softmax":
+            if self.metric == "logloss":
+                # SPEC.md 46.1 (v0.32): 100·(1 − mean_NLL/ln 2), clamped at 0 —
+                # NLL of the softmax probability of the true class (p clipped
+                # to [1e-12, 1]); a perfect model → 0 NLL → 100, a uniform
+                # binary predictor → mean NLL = ln 2 → 0.
+                m = pred.max(axis=1, keepdims=True)
+                probs = np.exp(pred - m)
+                probs = probs / probs.sum(axis=1, keepdims=True)
+                p_true = probs[np.arange(len(y)), y]
+                p_true = np.clip(p_true, 1e-12, 1.0)
+                mean_nll = float(-np.log(p_true).mean())
+                return max(0.0, 100.0 * (1.0 - mean_nll / np.log(2.0)))
             acc = (pred.argmax(axis=1) == y).mean()
             return float(100.0 * acc)
         pred = pred.reshape(-1)

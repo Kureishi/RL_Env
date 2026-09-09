@@ -55,6 +55,11 @@ class Task(ABC):
     metric: str
     # SPEC.md 36.1.4: capability strings; empty by default
     capabilities: frozenset[str] = frozenset()
+    # SPEC.md 45.1 (v0.31): the split rule for data-driven tasks —
+    # "random" (the §22.1 seed permutation, the default; every existing
+    # task keeps it) or "temporal" (walk-forward, file order — CsvTask
+    # only; inert on the other tasks)
+    split_mode: str = "random"
 
     # --- abstract core (the only two a task must implement) ----------------
     @abstractmethod

@@ -245,3 +245,80 @@ def fit_recipe(config: RunConfig) -> list[str]:
 def format_recipe(config: RunConfig) -> str:
     """The recipe as a single copy-pasteable line (37.1.4)."""
     return " ".join(fit_recipe(config))
+
+
+def runconfig_to_flags(config: RunConfig) -> dict[str, Any]:
+    """The config as plain CLI flag names (SPEC.md 47.1.4, v0.33):
+    the canonical `RunConfig` translated into the CLI's kebab-case flag
+    vocabulary, so `--config` can apply a canonical recipe and a plain
+    flag file with one mechanism (47.1.2).
+
+    A pure function of the `RunConfig`. Only non-CLI-default values are
+    emitted (an absent key = the parser's default; the same omission
+    rule as `fit_recipe`, 37.1.4). Raises `ValueError` when a field is
+    not expressible as flags — a non-preset search-quality knob or an
+    unknown `task_config` key: a wrong re-run is worse than a loud
+    refusal (47.1.4), unlike `fit_recipe`'s note-and-continue.
+    """
+    d = config.to_dict()
+    tc = d["task_config"]
+    flags: dict[str, Any] = {}
+    if tc.get("path"):  # data task (37.1.4) -> `fit`'s data flags
+        flags["data"] = str(tc["path"])
+        if tc.get("label") is not None:
+            flags["label"] = str(tc["label"])
+        if tc.get("split_frac") not in (None, _CLI_DEFAULTS["split_frac"]):
+            flags["split"] = tc["split_frac"]
+        if tc.get("split_mode") == "temporal":  # v0.31 (SPEC.md 45.1)
+            flags["temporal"] = True
+        if tc.get("metric") not in (None, "accuracy"):  # v0.32 (46.1)
+            flags["metric"] = tc["metric"]
+        unknown = set(tc) - {"path", "label", "split_frac",
+                            "split_mode", "metric"}
+        if unknown:
+            raise ValueError(
+                f"task_config key(s) not expressible as CLI flags: "
+                f"{sorted(unknown)} (SPEC.md 47.1.4)")
+    else:  # built-in task -> `run --task`
+        flags["task"] = d["task"]
+    # budget (5.2) — non-default values only (47.1.4)
+    if d["max_experiments"] != _CLI_DEFAULTS["max_experiments"]:
+        flags["experiments"] = d["max_experiments"]
+    if d["max_wall_seconds"] != _CLI_DEFAULTS["max_wall_seconds"]:
+        flags["max-seconds"] = d["max_wall_seconds"]
+    if d["max_train_seconds"] != _CLI_DEFAULTS["max_train_seconds"]:
+        flags["max-train-seconds"] = d["max_train_seconds"]
+    if d["seed"] != _CLI_DEFAULTS["seed"]:
+        flags["seed"] = d["seed"]
+    # driver metadata (37.1.2) — emitted whenever recorded: the two
+    # commands' defaults differ (run: search, fit: bandit), so the
+    # parser default may not stand in for the recipe's policy
+    if d["policy"] is not None:
+        flags["policy"] = d["policy"]
+    if (d["rl_episodes"] is not None
+            and d["rl_episodes"] != _CLI_DEFAULTS["rl_episodes"]):
+        flags["rl-episodes"] = d["rl_episodes"]
+    if d["target"] is not None and d["target"] != 95.0:
+        # 95.0 is `fit`'s parser default (omitted); `run` owns no
+        # --target (ungated, 37.2.3), so it can never need one
+        flags["target"] = d["target"]
+    # search quality (18) — presets only (the v04 preset is the default)
+    quality = _quality(config)
+    if quality == _PRESET_LEGACY:
+        flags["search-quality"] = "legacy"
+    elif quality != _PRESET_V04:
+        raise ValueError(
+            f"custom search-quality knobs {quality} are not expressible "
+            f"as CLI flags (SPEC.md 47.1.4)")
+    # options (19.3 / 20.1 / 31.1 / 32.2 / 44.1) — non-default values only
+    if d["ensemble_top_k"] > 0:
+        flags["ensemble-final"] = True
+    if d["curriculum"]:
+        flags["curriculum"] = True
+    if d["stall_patience"] is not None:
+        flags["stall-patience"] = d["stall_patience"]
+    if d["screen_frac"] < 1.0:
+        flags["screen-frac"] = d["screen_frac"]
+    if d["kfold"] > 0:  # v0.30 (SPEC.md 44.1)
+        flags["kfold"] = d["kfold"]
+    return flags

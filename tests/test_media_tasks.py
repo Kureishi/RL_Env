@@ -292,7 +292,8 @@ def test_fit_cli_mixed_dir_needs_explicit_task(tmp_path, capsys):
     rc = cli_main(["fit", "--data", str(d), "--experiments", "1"])
     err = capsys.readouterr().err
     assert rc == 1
-    assert "--task image or --task audio" in err
+    # v0.31 (SPEC.md 45.2) added the text option to the message
+    assert "--task image, --task audio, or --task text" in err
     # explicit --task resolves it (probe-level: the task builds)
     assert detect_modality(d) == "mixed"
 

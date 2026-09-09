@@ -1,0 +1,93 @@
+{
+  "baseline_effective": 33.3136862333334,
+  "baseline_score": 33.33333333333333,
+  "best_score_at_1s": 50.0,
+  "best_spec": {
+    "activation": "tanh",
+    "architecture": [
+      16,
+      8
+    ],
+    "batch_size": 32,
+    "early_stopping_patience": 0,
+    "gradient_clipping": 0.0,
+    "init_scale": 1.0,
+    "input_noise": 0.02,
+    "knn_k": 5,
+    "label_smoothing": 0.0,
+    "learning_rate": 0.001,
+    "lr_schedule": "constant",
+    "model_family": "mlp",
+    "optimizer": "momentum",
+    "train_steps": 1000,
+    "weight_decay": 0.0001
+  },
+  "effective_improvement_factor": 1.4993945296278774,
+  "efficiency_at_1s": 1.0,
+  "experiments_run": 2,
+  "final_best_effective": 49.95035889999963,
+  "final_best_score": 50.0,
+  "finished_reason": "budget_exhausted",
+  "improvement_factor": 1.5000000000000002,
+  "mutation_win_rate": {
+    "train_steps": {
+      "trials": 1,
+      "wins": 1
+    },
+    "weight_decay": {
+      "trials": 1,
+      "wins": 0
+    }
+  },
+  "pareto_frontier": [
+    {
+      "score": 33.33333333333333,
+      "spec_hash": "362bf6efd9c24720",
+      "train_seconds": 0.03929419999985839
+    },
+    {
+      "score": 50.0,
+      "spec_hash": "63f317eb004cc64a",
+      "train_seconds": 0.09928220000074361
+    }
+  ],
+  "run_config": {
+    "autorefine_version": "0.33.0",
+    "block_size": 512,
+    "ci_blocks": 8,
+    "curriculum": false,
+    "dataset_size": 48,
+    "efficiency_weight": 0.5,
+    "ensemble_top_k": 0,
+    "gen_gap_penalty": 0.5,
+    "kfold": 0,
+    "max_experiments": 2,
+    "max_train_seconds": 30.0,
+    "max_wall_seconds": 900.0,
+    "policy": "bandit",
+    "rl_episodes": null,
+    "schema": "autorefine.run_config/1",
+    "screen_frac": 1.0,
+    "seed": 7,
+    "stall_patience": null,
+    "target": 95.0,
+    "task": "csv",
+    "task_config": {
+      "path": "C:\\tmp\\pytest-of-kurei\\pytest-214\\test_app_seed_sweep_progress_s0\\data.csv"
+    },
+    "z_accept": 1.0
+  },
+  "search_quality": {
+    "block_size": 512,
+    "ci_blocks": 8,
+    "efficiency_weight": 0.5,
+    "gen_gap_penalty": 0.5,
+    "z_accept": 1.0
+  },
+  "seed": 7,
+  "task": "csv",
+  "task_config": {
+    "path": "C:\\tmp\\pytest-of-kurei\\pytest-214\\test_app_seed_sweep_progress_s0\\data.csv"
+  },
+  "wall_seconds": 0.185
+}

@@ -253,17 +253,31 @@ def _ci_image_dir(base: Path) -> Path:
     return d
 
 
+def _ci_text_dir(base: Path) -> Path:
+    """Two word classes, one subfolder each (SPEC.md 45.2, v0.31)."""
+    d = base / "words"
+    for name, words in (("up", "up up up rising higher"),
+                        ("down", "down down down falling lower")):
+        sub = d / name
+        sub.mkdir(parents=True)
+        for i in range(5):
+            (sub / f"t{i:02d}.txt").write_text(words + " ", encoding="utf-8")
+    return d
+
+
 @pytest.mark.parametrize("task_name", sorted(TASKS))
 def test_score_with_ci_all_tasks(task_name, tmp_path):
     """SPEC.md 18.3: block CI works for every registered task with zero task
-    changes; deterministic given the seed (G2); the csv/image/audio fixtures
-    cover the data-driven tasks (SPEC.md 22.1/24)."""
+    changes; deterministic given the seed (G2); the csv/image/audio/text
+    fixtures cover the data-driven tasks (SPEC.md 22.1/24/45.2)."""
     if task_name == "csv":
         task = CsvTask(seed=1, path=str(_ci_csv_fixture(tmp_path / "ci_fixture.csv")))
     elif task_name == "audio":
         task = TASKS[task_name](seed=1, path=str(_ci_wav_dir(tmp_path)))
     elif task_name == "image":
         task = TASKS[task_name](seed=1, path=str(_ci_image_dir(tmp_path)))
+    elif task_name == "text":
+        task = TASKS[task_name](seed=1, path=str(_ci_text_dir(tmp_path)))
     else:
         task = TASKS[task_name](seed=1)
     spec = ModelSpec.from_dict({**DEFAULT_SPEC.to_dict(), "train_steps": 200})

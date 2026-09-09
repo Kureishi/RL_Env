@@ -67,9 +67,9 @@ class DashboardRunner:
         if search_quality not in ("v04", "legacy"):
             raise ValueError(f"search_quality must be 'v04' or 'legacy', "
                              f"got {search_quality!r}")
-        if modality is not None and modality not in ("auto", "csv", "image", "audio"):
-            raise ValueError(f"modality must be one of auto/csv/image/audio, "
-                             f"got {modality!r} (SPEC.md 24.5)")
+        if modality is not None and modality not in ("auto", "csv", "image", "audio", "text"):
+            raise ValueError(f"modality must be one of auto/csv/image/audio/text, "
+                             f"got {modality!r} (SPEC.md 24.5; v0.31 45.2.2)")
         # `csv_path` is the data path (v0.10: a CSV file or a media directory)
         self.csv_path = csv_path
         self.modality = modality or "auto"  # SPEC.md 24.5
@@ -110,17 +110,17 @@ class DashboardRunner:
                 return "csv"
             raise ValueError(f"{data} is a file: modality must be 'csv' or 'auto'")
         if data.is_dir():
-            if mod in ("image", "audio"):
+            if mod in ("image", "audio", "text"):  # v0.31 (SPEC.md 45.2.2)
                 return mod
             m = detect_modality(data)
             if m == "mixed":
                 raise ValueError(
-                    f"{data} holds both image and audio items: set "
-                    f"modality='image' or 'audio' (SPEC.md 24.5)")
+                    f"{data} holds items of more than one modality: set "
+                    f"modality='image', 'audio', or 'text' (SPEC.md 24.5)")
             if m is None:
                 raise ValueError(
-                    f"no image or audio items under {data} — one subfolder "
-                    f"per class, or an index.csv (SPEC.md 24.2)")
+                    f"no image, audio, or text items under {data} — one "
+                    f"subfolder per class, or an index.csv (SPEC.md 24.2)")
             return m
         raise ValueError(f"no such CSV file: {data}")
 

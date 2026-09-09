@@ -1,11 +1,12 @@
-"""Shared labelled-directory rules for the v0.10 media tasks (SPEC.md 24.2).
+"""Shared labelled-directory rules for the media tasks (SPEC.md 24.2).
 
-Both `ImageTask` and `AudioTask` load "one directory, one subfolder per
-class (or an `index.csv` of file+label rows)" and then run the identical
-§22.1 head-inference / seed-split / train-only-standardization protocol.
-This module owns the directory + label rules so the two tasks share one
-source of truth; the feature decoding (pixels / log-mel) lives in each
-task's own file.
+`ImageTask`, `AudioTask`, and `TextTask` (v0.31, SPEC.md 45.2) all load
+"one directory, one subfolder per class (or an `index.csv` of file+label
+rows)" and then run the identical §22.1 head-inference / seed-split /
+train-only-standardization protocol. This module owns the directory +
+label rules so the tasks share one source of truth; the feature
+decoding (pixels / log-mel / hashed n-grams) lives in each task's own
+file.
 
 Rules (all deterministic, stdlib only — SPEC.md 24.2):
   * `index.csv` in the directory: column 1 = file path (relative to the
@@ -26,18 +27,23 @@ import numpy as np
 
 _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".gif")   # SPEC.md 24.3
 _AUDIO_EXTS = (".wav", ".mp3")                            # SPEC.md 24.4
+_TEXT_EXTS = (".txt", ".text")                            # SPEC.md 45.2 (v0.31)
 _MAX_CLASSES = 50  # §22.1 rule: integer labels with more classes → regression
 _INDEX_HINTS = ("label", "target", "y", "class")
 
 
 def detect_modality(path: str | Path) -> str | None:
-    """'image' | 'audio' | None for a directory (SPEC.md 24.5 auto-detect).
+    """'image' | 'audio' | 'text' | 'mixed' | None for a directory
+    (SPEC.md 24.5 auto-detect; text per SPEC.md 45.2, v0.31).
 
     Counts items by extension (subfolders only, plus `index.csv` which
-    labels either modality — in that case the *files* decide).
+    labels any modality — in that case the *files* decide). Exactly one
+    modality present → its name; two or more → "mixed" (the caller must
+    ask for an explicit --task); none → None. Image+audio stays
+    "mixed" (the v0.10 pin, SPEC.md 45.2.4).
     """
     d = Path(path)
-    n_img = n_aud = 0
+    n_img = n_aud = n_txt = 0
     if d.is_dir():
         for sub in sorted(d.iterdir()):
             if not sub.is_dir():
@@ -50,12 +56,14 @@ def detect_modality(path: str | Path) -> str | None:
                     n_img += 1
                 elif ext in _AUDIO_EXTS:
                     n_aud += 1
-    if n_img and not n_aud:
-        return "image"
-    if n_aud and not n_img:
-        return "audio"
-    if n_img and n_aud:
+                elif ext in _TEXT_EXTS:
+                    n_txt += 1
+    present = [m for m, c in (("image", n_img), ("audio", n_aud),
+                              ("text", n_txt)) if c]
+    if len(present) >= 2:
         return "mixed"  # caller must ask for an explicit --task
+    if present:
+        return present[0]
     return None
 
 
