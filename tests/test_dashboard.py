@@ -345,14 +345,22 @@ def test_app_renders_and_runs_end_to_end(tmp_path):
     assert len(at.get("download_button")) == 0
 
 
-def _app_chart_marks(at) -> tuple[int, int]:
-    """(bar, line) chart counts. streamlit 1.5x's AppTest has no typed
-    bar/line elements — both arrive as `arrow_vega_lite_chart`, so the mark
-    type is read from the element's Vega-Lite spec."""
-    bars = lines = 0
+def _app_chart_marks(at) -> tuple[int, int, int]:
+    """(bar, line, best-curve) chart counts. streamlit 1.5x's AppTest has
+    no typed bar/line elements — both arrive as `arrow_vega_lite_chart`,
+    so the mark type is read from the element's Vega-Lite spec. The third
+    count distinguishes the best-score curve (a single-column line_chart
+    keeps its column name — `"best score"` — in the spec) from the bandit
+    UCB trace (a multi-column line_chart is pivoted to long form and
+    carries only streamlit-generated color/value fields): `line − best`
+    is the UCB-trace count, zero for the search policy (SPEC.md 26.4).
+    v0.37 renders the best curve in both the Run tab's live loop and the
+    Experiments tab (SPEC.md 51.1.1), so the A16 assertions are on *which*
+    curves render, not on a total count."""
+    bars = lines = best = 0
 
     def walk(node):
-        nonlocal bars, lines
+        nonlocal bars, lines, best
         ch = getattr(node, "children", None)
         if not isinstance(ch, dict):
             return
@@ -363,10 +371,12 @@ def _app_chart_marks(at) -> tuple[int, int]:
                     bars += 1
                 elif '"type": "line"' in spec:
                     lines += 1
+                    if '"field": "best score"' in spec:
+                        best += 1
             walk(el)
 
     walk(at.main)
-    return bars, lines
+    return bars, lines, best
 
 
 def test_app_renders_decision_views(tmp_path):
@@ -392,18 +402,20 @@ def test_app_renders_decision_views(tmp_path):
         return at
 
     b = run_policy("bandit")
-    bars, lines = _app_chart_marks(b)
-    assert bars >= 2   # D1 win-rate bars: live + result (SPEC.md 26.1/26.5)
-    assert lines >= 2  # best-score curve + the bandit UCB trace (SPEC.md 26.4)
+    bars, lines, best = _app_chart_marks(b)
+    assert bars >= 2    # D1 win-rate bars: live + result (SPEC.md 26.1/26.5)
+    assert best >= 1    # the best-score curve (SPEC.md 26.4)
+    assert lines > best  # and the bandit UCB trace (SPEC.md 26.4)
     md = " ".join(m.value for m in b.markdown)
     assert md.count("mutation timeline") >= 2  # D3 timeline: live + result
     assert "Decision views" in " ".join(h.value for h in b.subheader)
     assert "→" in " ".join(c.value for c in b.caption)  # D2 chips (SPEC.md 26.2)
 
     s = run_policy("search")
-    sbars, slines = _app_chart_marks(s)
-    assert sbars >= 1   # D1 renders for both policies
-    assert slines == 1  # best-score curve only — no UCB chart (SPEC.md 26.4)
+    sbars, slines, sbest = _app_chart_marks(s)
+    assert sbars >= 1     # D1 renders for both policies
+    assert sbest >= 1     # the best-score curve (SPEC.md 26.4)
+    assert slines == sbest  # best-score curves only — no UCB chart (SPEC.md 26.4)
     assert "mutation timeline" in " ".join(m.value for m in s.markdown)
 
 

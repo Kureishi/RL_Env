@@ -20,7 +20,7 @@ score drop per shuffled column, deterministic shuffles, sorted desc;
 block (rc 0, n/a line rc 0, mutual exclusions rc 1).
 
 Regression (44.3): A1–A33 stay green (default single split; summary
-key set; artifacts; app views); the version stepped to `0.36.0` in
+key set; artifacts; app views); the version stepped to `0.37.0` in
 both sources (33.1, advanced again with v0.32, SPEC.md 45).
 
 House rules: no cross-test imports (fixtures duplicated per file);
@@ -463,10 +463,10 @@ def test_report_importance_mutual_exclusions(tmp_path, capsys):
 # --- 44.3 regression -------------------------------------------------------------
 
 def test_version_round_v030():
-    """A34 (SPEC.md 44.3, 33.1): the version stepped to `0.36.0` in
-    both sources (advanced again with v0.36 ⇒ `0.36.0`, M39, SPEC.md 49)."""
+    """A34 (SPEC.md 44.3, 33.1): the version stepped to `0.37.0` in
+    both sources (advanced again with v0.37 ⇒ `0.37.0`, M40, SPEC.md 51)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.36.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.37.0"
 
 
 def test_spec_cites_a34_and_round():

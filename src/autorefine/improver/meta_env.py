@@ -248,9 +248,20 @@ class AutoRefineEnv:
         rl_episodes: int | None = None,
         # --- v0.24 lineage (SPEC.md 38.2; None = a fresh run) -----------------
         parent_run: str | None = None,
+        # --- v0.37 stop hook (SPEC.md 51.2.1; None = off, pre-v0.37 exact)
+        # a driver-supplied zero-arg callable consulted at the top of
+        # step(); truthy -> the run finishes with `stopped`. Not a knob
+        # (51.2.1): absent from KNOBS, RunConfig, and the CLI.
+        stop_check: Callable[[], bool] | None = None,
     ) -> None:
         if task not in TASKS:  # registry: SPEC.md 15 "more tasks"
             raise ValueError(f"unknown task {task!r} (available: {sorted(TASKS)})")
+        # SPEC.md 51.2.1: a non-callable non-None stop hook is a
+        # construction-time error (the same fail-loud style as the knobs)
+        if stop_check is not None and not callable(stop_check):
+            raise ValueError(
+                f"stop_check must be a zero-arg callable or None, got "
+                f"{type(stop_check).__name__} (SPEC.md 51.2.1)")
         # SPEC.md 33.2 (C2): validation routes through the KNOBS registry —
         # one home for the rules, the A21/A22 error messages unchanged
         _sp = KNOBS["stall_patience"].validate(stall_patience)
@@ -324,6 +335,9 @@ class AutoRefineEnv:
         # SPEC.md 38.2 (v0.24, T2): the parent run's dir name for a re-run
         # (`fit --from-run`); None = a fresh run
         self.parent_run = parent_run
+        # SPEC.md 51.2.1 (v0.37): the driver's stop hook (None = off);
+        # consulted at the top of step(), honored between experiments
+        self.stop_check = stop_check
         self._started = False
 
     # --- lifecycle ----------------------------------------------------------
@@ -442,6 +456,16 @@ class AutoRefineEnv:
             raise RuntimeError("call reset() before step()")
         if self.done:
             raise RuntimeError(f"environment is done ({self.done_reason}); call reset()")
+
+        # SPEC.md 51.2.1 (v0.37): the driver's stop request — honored
+        # *between* experiments (never inside one): the env finishes with
+        # `stopped` through the normal _finish path (the full artifact set)
+        if self.stop_check is not None and self.stop_check():
+            self._finish("stopped")
+            return (
+                self._state(), 0.0, True,
+                {"accepted": False, "reason": "stopped", "candidate_score": None},
+            )
 
         # SPEC.md 25.4: an invalid spec from an external proposer (gym agent,
         # hand-written dict) is a logged rejection, never a crash

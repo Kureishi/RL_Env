@@ -394,7 +394,7 @@ def test_run_demo_narrates_tiny_loop_and_creates_artifacts(tmp_path, capsys):
 # --- SPEC.md 33.1 / 41.4 (A31): version --------------------------------------
 
 def test_version_027_both_sources():
-    """A31 (41.4, 33.1): the version stepped to `0.36.0` in both sources
-    (advanced again with v0.36 ⇒ `0.36.0`, M39, SPEC.md 49 — per 33.1)."""
+    """A31 (41.4, 33.1): the version stepped to `0.37.0` in both sources
+    (advanced again with v0.37 ⇒ `0.37.0`, M40, SPEC.md 51 — per 33.1)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.36.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.37.0"

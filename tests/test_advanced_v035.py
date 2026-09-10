@@ -22,7 +22,7 @@ Covers:
 - 49.4 the app renders the "Advanced analysis" section with the three
   panels wired in and every action behind a unique-keyed button
   (inert until pressed — checked by scanning the app source);
-- the A39 round regression — the version stepped to `0.36.0` in both
+- the A39 round regression — the version stepped to `0.37.0` in both
   sources (33.1).
 
 House rules: no cross-test imports (all fixtures synthesized here);
@@ -300,7 +300,7 @@ def test_app_renders_advanced_section():
 # --- A39 round regression -------------------------------------------------------
 
 def test_version_round_v035():
-    """A39 (SPEC.md 49.5, 33.1): the version stepped to `0.36.0` in
-    both sources (v0.36 ⇒ `0.36.0`, M39, SPEC.md 49)."""
+    """A39 (SPEC.md 49.5, 33.1): the version stepped to `0.37.0` in
+    both sources (v0.37 ⇒ `0.37.0`, M40, SPEC.md 51)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.36.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.37.0"

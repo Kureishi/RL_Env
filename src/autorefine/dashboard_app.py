@@ -10,12 +10,15 @@ from __future__ import annotations
 import csv as _csv
 import json
 import os
+import queue as _queue
 import tempfile
+import threading
 from pathlib import Path
 
 import streamlit as st
 
 from autorefine import __version__
+from autorefine.accounting import candidate_reason  # 51.3.2 (v0.37)
 from autorefine.dashboard import (
     DashboardRunner,
     diff_n_summaries,  # N-run compare (SPEC.md 50.1.1, v0.36)
@@ -45,6 +48,7 @@ from autorefine.simulate import what_if_block
 from autorefine.plotting import (
     svg_action_probabilities,  # noqa: F401 (D2 view, SPEC.md 29.2)
     svg_audio_waveform,
+    svg_score_curve,  # 51.4.4 (v0.37): the palette/dark result re-render
     svg_field_value_matrix,  # V2 view (SPEC.md 30.2)
     svg_frontier_overlay,  # A/B view (SPEC.md 49.3.3)
     svg_loss_curves,
@@ -200,6 +204,35 @@ def _spec_v(v) -> str:
     return str(v)
 
 
+def _palette_kwargs() -> dict:
+    """SPEC.md 51.4.4 (v0.37): the Setup-tab `cb_palette` checkbox → kwargs
+    for the result view's multi-series SVG re-render. Off (default) → `{}`
+    (the stored pre-v0.37 SVGs render byte-identically, G2). On →
+    `palette="okabe"` + the auto-detected dark mode (`theme.base == "dark"`).
+    A view preference, not a run knob (51.4.4: `ALL_KNOBS` unchanged)."""
+    if not st.session_state.get("cb_palette", False):
+        return {}
+    try:
+        dark = st.get_option("theme.base") == "dark"
+    except Exception:  # pragma: no cover — the theme option is always present
+        dark = False
+    return {"palette": "okabe", "dark": bool(dark)}
+
+
+def _pal_svg(pal: dict, stored: str, recompute) -> str:
+    """SPEC.md 51.4.4 (v0.37): the palette-on/off SVG choice. Off → the
+    stored pre-v0.37 SVG (byte-identical, G2). On → re-render the
+    multi-series SVG from the stored data (a deterministic function of the
+    same inputs); a run dir that lacks the source falls back to `stored`."""
+    if not pal:
+        return stored
+    try:
+        return recompute()
+    except Exception:
+        return stored  # an older run dir may lack the re-render source
+
+
+
 def _resolve_csv(upload, path_str: str) -> str | None:
     """Uploaded bytes → session temp file; otherwise the sidebar path.
 
@@ -303,144 +336,255 @@ def _preview(csv_path: str) -> None:
         st.dataframe(pd.DataFrame(data["rows"]).head(5), width="stretch")
 
 
+def _worker_loop(runner: DashboardRunner, record: dict) -> None:
+    """SPEC.md 51.2.3 (v0.37): the daemon worker — drives the runner and
+    posts ``info`` / ``update`` / ``result`` / ``error`` / ``end`` messages
+    onto the shared ``record``.
+
+    The main thread drains those messages synchronously (the AppTest
+    contract: a run still completes within one script run). This thread
+    only ever touches the runner + the record — never ``st.session_state``
+    (Streamlit's session is not thread-safe); the drain does the rendering.
+    A Stop request (``record["stop"]["flag"]``) is honored *between*
+    experiments: it calls ``request_stop()`` before the next ``next()``
+    (51.2.3), never inside one.
+    """
+    msgs = record["messages"]
+    q = record["queue"]
+
+    def post(kind: str, payload) -> None:
+        msgs.append((kind, payload))
+        q.put(True)  # a wakeup token; the payload itself lives in `msgs`
+
+    try:
+        info = runner.start()
+        post("info", info)
+        while not runner.done:
+            if record["stop"]["flag"]:  # 51.2.3: honor Stop between experiments
+                runner.request_stop()
+            u = runner.next()
+            post("update", u)
+            if u.get("done"):
+                break
+        res = runner.finish()
+        post("result", res)
+    except Exception as exc:  # start() ValueError + any runtime error (51.2.3)
+        post("error", exc)
+    finally:
+        post("end", None)
+
+
+def _drain_live(record: dict, narrate: bool = False) -> None:
+    """SPEC.md 51.2.3 (v0.37): the synchronous drain — render the existing
+    live UI (Task line, table, curve, decision views, progress) on the main
+    thread from the worker's messages. A run still completes within one
+    script run (the AppTest contract, 51.1.2).
+
+    Re-runnable: it replays ``record["messages"]`` from the start, so if a
+    script re-run **preempts** a live drain, the new run reattaches and
+    re-renders from the accumulated messages (51.2.3/51.2.4) — the worker
+    still owns the runner and writes the full artifact set.
+
+    The live table carries the 51.3.2 **reason** column (accepted /
+    score / overfit / ci / dup) via ``candidate_reason`` — the running best
+    is tracked (the baseline seeds it; each update's ``best_score``
+    succeeds it), so the verdict is correct for every row.
+    """
+    runner = record["runner"]
+    msgs = record["messages"]
+    q = record["queue"]
+    thread = record["thread"]
+    idx = 0
+
+    import pandas as pd  # a streamlit dependency, app-only
+
+    info = None
+    rows: list[dict] = []
+    best_series: list[float] = []
+    best_before = None
+    stream: list[dict] = []
+    table = chart = bar = note = narr = None
+    vbars = vmatrix = vtimeline = vucb = vstrip = vscatter = None
+
+    while True:
+        if idx >= len(msgs):
+            if not thread.is_alive():
+                record["drained"] = True
+                break
+            try:
+                q.get(timeout=300)
+            except _queue.Empty:
+                st.error("run stalled — no worker progress; press Stop or "
+                         "refresh (SPEC.md 51.2.4)")
+                record["drained"] = True
+                break
+        kind, payload = msgs[idx]
+        idx += 1
+
+        if kind == "info":
+            info = payload
+            st.subheader("Task")
+            st.caption(
+                f"label **{info['label']}** · head **{info['head']}** · "
+                f"rows {info['rows']['train']}/{info['rows']['holdout']}/{info['rows']['gen']} "
+                f"· baseline **{info['baseline_score']:.2f}** vs target **{info['target']:.1f}** "
+                f"· {info['policy']}, seed {info['seed']}"
+            )
+            if narrate:  # SPEC.md 48.5.2: the friendly first line (off by default)
+                st.caption(narrate_baseline(info))
+            # all table cells are strings (st.dataframe → Arrow; mixed types
+            # break it); the reason column is the 51.3.2 addition
+            rows = [{
+                "#": 0, "accepted": "—", "reason": "—",
+                "candidate": f"{info['baseline_score']:.2f}", "gen gap": "—",
+                "mutation": "baseline", "best": f"{info['baseline_score']:.2f}",
+                "diff": "—",
+            }]
+            best_series = [round(info["baseline_score"], 2)]
+            best_before = info["baseline_score"]
+            table = st.empty()
+            chart = st.empty()
+            bar = st.progress(0.0, text="starting…")
+            note = st.empty()
+            narr = st.empty() if narrate else None  # SPEC.md 48.5.1 placeholder
+            # decision-view placeholders, live (SPEC.md 26.5): D1 win-rate bars,
+            # V2 field x value matrix, D3 mutation timeline, D4 UCB trace
+            vbars = st.empty()
+            vmatrix = st.empty()  # V2 (SPEC.md 30.2)
+            vtimeline = st.empty()
+            vucb = st.empty() if runner.policy_name == "bandit" else None
+            vstrip = st.empty()  # G1 (SPEC.md 27.1)
+            vscatter = st.empty()  # G2 (SPEC.md 27.2)
+            continue
+
+        if kind == "update":
+            u = payload
+            budget = info["budget_experiments"]
+            spent = budget - int(u["experiments_left"])
+            is_dup = not isinstance(u["candidate_score"], (int, float))
+            # SPEC.md 51.3.2 (v0.37): the visible reason column — the
+            # per-candidate gate verdict (accepted/score/overfit/ci/dup);
+            # a Stop-honored final step (51.2.1) shows `stopped` instead
+            # (candidate_reason covers scored candidates only)
+            reason = ("stopped" if u.get("reason") == "stopped"
+                      else candidate_reason(u["accepted"],
+                                            u["candidate_score"],
+                                            u["gen_gap"], best_before))
+            rows.append({
+                "#": u["index"],
+                "accepted": "yes" if u["accepted"] else "no",
+                "reason": reason,
+                "candidate": (f"{u['candidate_score']:.2f}"
+                              if isinstance(u["candidate_score"], (int, float)) else "dup"),
+                "gen gap": (f"{u['gen_gap']:.2f}"
+                            if isinstance(u["gen_gap"], (int, float)) else "—"),
+                "mutation": ", ".join(u["mutation"]) or (u["reason"] or "—"),
+                "best": f"{u['best_score']:.2f}",
+                "diff": (" · ".join(
+                    f"{d['field']}: {_spec_v(d['old'])} → {_spec_v(d['new'])}"
+                    for d in u.get("spec_diff") or []
+                ) or (u["reason"] or "—")),
+            })
+            best_series.append(round(u["best_score"], 2))
+            # the bar tracks the *budget*, not the stream-row count: spent =
+            # budget − experiments_left, so free duplicate rejections (R3) do
+            # not inflate the counter (SPEC.md 23.2)
+            frac = max(0.0, min(1.0, spent / max(1, budget)))
+            bar.progress(frac, text=(
+                f"experiment {spent} of {budget}"
+                + ("  ·  dup step (free, R3)" if is_dup else "")))
+            table.dataframe(pd.DataFrame(rows), width="stretch")
+            chart.line_chart(pd.DataFrame({"best score": best_series}))
+            # decision views, live (SPEC.md 26.5) — pure over the stream so far
+            stream.append(u)
+            if u.get("field_stats"):  # D1: per-field win-rate bars (SPEC.md 26.1)
+                vbars.bar_chart(
+                    pd.DataFrame.from_dict(u["field_stats"], orient="index")
+                    .sort_index())
+            if u.get("field_value_stats"):  # V2 (SPEC.md 30.2)
+                vmatrix.markdown(
+                    svg_field_value_matrix(u["field_value_stats"]),
+                    unsafe_allow_html=True)
+            vtimeline.markdown(  # D3: mutation timeline (SPEC.md 26.3)
+                svg_mutation_timeline(stream), unsafe_allow_html=True)
+            vstrip.markdown(svg_score_strip(stream), unsafe_allow_html=True)
+            vscatter.markdown(svg_score_gap_scatter(stream), unsafe_allow_html=True)
+            if vucb is not None and u.get("ucb"):  # D4: bandit UCB (SPEC.md 26.4)
+                trace = ucb_trace(stream, alpha=runner.policy.alpha)
+                vucb.line_chart(
+                    pd.DataFrame({f: trace[f] for f in sorted(trace)}
+                                 ).astype("float64"))
+            if narr is not None:
+                # SPEC.md 48.5.1: the plain-English line replaces the terse
+                # caption (the table + charts above still show every detail)
+                narr.caption(narrate_step(u))
+            else:
+                # per-step caption, including the final step (SPEC.md 23.2)
+                score_txt = (f"score {u['candidate_score']:.2f}"
+                             if isinstance(u["candidate_score"], (int, float))
+                             else "duplicate")
+                kindtxt = ("dup step (free, R3)" if is_dup
+                           else f"experiment {spent} of {budget}")
+                diff_txt = " · ".join(
+                    f"{d['field']}: {_spec_v(d['old'])} → {_spec_v(d['new'])}"
+                    for d in u.get("spec_diff") or []
+                ) or (", ".join(u["mutation"]) or "-")
+                note.caption(
+                    f"{kindtxt}: {'accepted +' if u['accepted'] else 'rejected '} "
+                    f"{score_txt} · {diff_txt}"
+                )
+            best_before = u["best_score"]  # the running best for the next row
+            continue
+
+        if kind == "result":
+            res = payload
+            # Persistence (SPEC.md 23.2): store the finished result so the
+            # Results/Experiments tabs (51.1.1) and any later re-render show
+            # it. The result view itself renders in the Results tab (51.1.2).
+            st.session_state["result"] = {
+                "info": info, "rows": rows, "best_series": best_series,
+                "res": res,
+            }
+            continue
+
+        if kind == "error":
+            st.error(str(payload))
+            continue
+
+        if kind == "end":
+            record["drained"] = True
+            break
+
+
 def _run(csv_path: str, label: str, target: float, policy: str, seed: int,
          experiments: int, max_train: float, runs_dir: str,
-         quality: str = "v04", narrate: bool = False) -> None:
-    """The live loop: one placeholder table + chart updated per step.
+         quality: str = "v04", narrate: bool = False,
+         initial_stop: bool = False) -> None:
+    """Start the live loop (SPEC.md 51.2.3): build the runner, launch the
+    daemon worker, then drain its messages synchronously into the live UI.
 
-    SPEC.md 48.5 (v0.34): ``narrate`` (default ``False``) swaps the terse
-    per-step caption for a plain-English line; off, the loop renders
-    byte-identically to pre-48.5 (48.5.3).
+    ``narrate`` (default ``False``) swaps the terse per-step caption for a
+    plain-English line (48.5.3). ``initial_stop`` (51.2.3) seeds the worker's
+    stop flag — a Stop pressed alongside Run aborts after the first step.
     """
     runner = DashboardRunner(
         csv_path=csv_path, label=label or None, target=target, policy=policy,
         seed=seed, experiments=experiments, max_train_seconds=max_train,
         runs_dir=runs_dir, search_quality=quality,
     )
-    try:
-        info = runner.start()
-    except ValueError as exc:
-        st.error(str(exc))
-        return
-
-    st.subheader("Task")
-    st.caption(
-        f"label **{info['label']}** · head **{info['head']}** · "
-        f"rows {info['rows']['train']}/{info['rows']['holdout']}/{info['rows']['gen']} "
-        f"· baseline **{info['baseline_score']:.2f}** vs target **{info['target']:.1f}** "
-        f"· {info['policy']}, seed {info['seed']}"
-    )
-    if narrate:  # SPEC.md 48.5.2: the friendly first line (off by default)
-        st.caption(narrate_baseline(info))
-
-    import pandas as pd  # a streamlit dependency, app-only
-
-    # all table cells are strings (st.dataframe → Arrow; mixed types break it)
-    rows = [{
-        "#": 0, "accepted": "—",
-        "candidate": f"{info['baseline_score']:.2f}", "gen gap": "—",
-        "mutation": "baseline", "best": f"{info['baseline_score']:.2f}",
-        "diff": "—",
-    }]
-    best_series = [round(info["baseline_score"], 2)]
-    table = st.empty()
-    chart = st.empty()
-    bar = st.progress(0.0, text="starting…")
-    note = st.empty()
-    narr = st.empty() if narrate else None  # SPEC.md 48.5.1 placeholder
-    # decision-view placeholders, live (SPEC.md 26.5): D1 win-rate bars,
-    # V2 field x value matrix, D3 mutation timeline, D4 UCB trace (bandit only)
-    vbars = st.empty()
-    vmatrix = st.empty()  # V2 (SPEC.md 30.2)
-    vtimeline = st.empty()
-    vucb = st.empty() if policy == "bandit" else None
-    # G1 + G2 gate views, live (SPEC.md 27.4): pure over the stream so far
-    vstrip = st.empty()
-    vscatter = st.empty()
-    stream: list[dict] = []          # updates so far: the views' only input
-
-    while not runner.done:  # runner state machine (SPEC.md 23.1)
-        u = runner.next()
-        rows.append({
-            "#": u["index"],
-            "accepted": "yes" if u["accepted"] else "no",
-            "candidate": (f"{u['candidate_score']:.2f}"
-                          if isinstance(u["candidate_score"], (int, float)) else "dup"),
-            "gen gap": (f"{u['gen_gap']:.2f}"
-                        if isinstance(u["gen_gap"], (int, float)) else "—"),
-            "mutation": ", ".join(u["mutation"]) or (u["reason"] or "—"),
-            "best": f"{u['best_score']:.2f}",
-            "diff": (" · ".join(
-                f"{d['field']}: {_spec_v(d['old'])} → {_spec_v(d['new'])}"
-                for d in u.get("spec_diff") or []
-            ) or (u["reason"] or "—")),
-        })
-        best_series.append(round(u["best_score"], 2))
-        # the bar tracks the *budget*, not the stream-row count: spent =
-        # budget − experiments_left, so free duplicate rejections (R3) do not
-        # inflate the counter (SPEC.md 23.2)
-        budget = info["budget_experiments"]
-        spent = budget - int(u["experiments_left"])
-        is_dup = not isinstance(u["candidate_score"], (int, float))
-        frac = max(0.0, min(1.0, spent / max(1, budget)))
-        bar.progress(frac, text=(
-            f"experiment {spent} of {budget}"
-            + ("  ·  dup step (free, R3)" if is_dup else "")))
-        table.dataframe(pd.DataFrame(rows), width="stretch")
-        chart.line_chart(pd.DataFrame({"best score": best_series}))
-        # decision views, live (SPEC.md 26.5) — pure over the stream so far
-        stream.append(u)
-        if u.get("field_stats"):  # D1: per-field win-rate bars (SPEC.md 26.1)
-            vbars.bar_chart(
-                pd.DataFrame.from_dict(u["field_stats"], orient="index")
-                .sort_index())
-        if u.get("field_value_stats"):  # V2: field x value matrix (SPEC.md 30.2)
-            vmatrix.markdown(
-                svg_field_value_matrix(u["field_value_stats"]),
-                unsafe_allow_html=True)
-        vtimeline.markdown(  # D3: mutation timeline (SPEC.md 26.3)
-            svg_mutation_timeline(stream), unsafe_allow_html=True)
-        # G1 candidate score strip + G2 score vs gen-gap scatter (SPEC.md 27)
-        vstrip.markdown(svg_score_strip(stream), unsafe_allow_html=True)
-        vscatter.markdown(svg_score_gap_scatter(stream), unsafe_allow_html=True)
-        if vucb is not None and u.get("ucb"):  # D4: bandit UCB (SPEC.md 26.4)
-            # the same pure function as the result view: aligned per-field
-            # series with None gaps for the steps before a field was credited
-            trace = ucb_trace(stream, alpha=runner.policy.alpha)
-            vucb.line_chart(
-                pd.DataFrame({f: trace[f] for f in sorted(trace)}
-                             ).astype("float64"))
-        if narr is not None:
-            # SPEC.md 48.5.1: the plain-English line replaces the terse
-            # caption (the table + charts above still show every detail)
-            narr.caption(narrate_step(u))
-        else:
-            # per-step caption, including the final step (SPEC.md 23.2) —
-            # rendered before the break so the last row is not skipped; D2
-            # spec-diff chips (SPEC.md 26.2) replace the plain field list
-            score_txt = (f"score {u['candidate_score']:.2f}"
-                         if isinstance(u["candidate_score"], (int, float)) else "duplicate")
-            kind = ("dup step (free, R3)" if is_dup
-                    else f"experiment {spent} of {budget}")
-            diff_txt = " · ".join(
-                f"{d['field']}: {_spec_v(d['old'])} → {_spec_v(d['new'])}"
-                for d in u.get("spec_diff") or []
-            ) or (", ".join(u["mutation"]) or "-")
-            note.caption(
-                f"{kind}: {'accepted +' if u['accepted'] else 'rejected '} "
-                f"{score_txt} · {diff_txt}"
-            )
-        if u["done"]:
-            break
-
-    res = runner.finish()
-    # Persistence (SPEC.md 23.2): a widget-triggered re-run (download click,
-    # sidebar change) must not lose the run — store the finished result so
-    # `main()` re-renders it on the next script run
-    st.session_state["result"] = {
-        "info": info, "rows": rows, "best_series": best_series, "res": res,
+    record = {
+        "thread": None,
+        "stop": {"flag": bool(initial_stop)},
+        "queue": _queue.Queue(),
+        "messages": [],
+        "drained": False,
+        "runner": runner,
     }
-    _render_result(res)
+    st.session_state["_worker"] = record
+    record["thread"] = threading.Thread(
+        target=_worker_loop, args=(runner, record), daemon=True)
+    record["thread"].start()
+    _drain_live(record, narrate)
 
 
 def _render_result(res: dict) -> None:
@@ -460,6 +604,14 @@ def _render_result(res: dict) -> None:
             f"{res['target']:.1f} — raise the budget (experiments / train "
             f"seconds) or extend the spec space (README 'Extending')"
         )
+    # SPEC.md 51.2.3 (v0.37): a Stop-honored run finishes early — a neutral
+    # note next to the honest verdict (a stopped run is not a cheating run,
+    # 51.2.4). Only present when the loop ended with `stopped`.
+    if res.get("finished_reason") == "stopped":
+        st.warning(
+            "Stopped by user — the run ended early, between experiments; the "
+            "verdict and artifacts reflect the partial run so far "
+            "(SPEC.md 51.2.3/51.2.4).")
     # SPEC.md 48.4 (v0.34): the plain-English "what happened" narrative —
     # always shown here (the live narrate toggle, 48.5, is separate); pure
     # over the stored result, so the restored view renders the same block.
@@ -536,7 +688,15 @@ def _render_result(res: dict) -> None:
     )
 
     st.subheader("Plots")
-    st.markdown(res["svg_score"], unsafe_allow_html=True)
+    # SPEC.md 51.4.4 (v0.37): the colorblind-safe re-render — when the Setup
+    # tab's `cb_palette` checkbox is on, the multi-series SVGs re-render from
+    # the stored data with `palette="okabe"` + the auto-detected dark mode;
+    # off (default) they render the stored pre-v0.37 SVGs byte-identically.
+    pal = _palette_kwargs()
+    st.markdown(
+        _pal_svg(pal, res["svg_score"],
+                 lambda: svg_score_curve(_load_entries(res["run_dir"]), **pal)),
+        unsafe_allow_html=True)
     st.markdown(res["svg_pareto"], unsafe_allow_html=True)
 
     # decision views, final state (SPEC.md 26.5) — pure over the stored
@@ -559,9 +719,15 @@ def _render_result(res: dict) -> None:
     # acceptance-gate views (SPEC.md 27): G1 + G2 always; G3 only when the
     # run has a ladder (finish() returns None otherwise, SPEC.md 27.3)
     if res.get("strip_svg"):  # G1: candidate score strip (SPEC.md 27.1)
-        st.markdown(res["strip_svg"], unsafe_allow_html=True)
+        st.markdown(
+            _pal_svg(pal, res["strip_svg"],
+                     lambda: svg_score_strip(res["updates"], **pal)),
+            unsafe_allow_html=True)
     if res.get("scatter_svg"):  # G2: score vs gen-gap (SPEC.md 27.2)
-        st.markdown(res["scatter_svg"], unsafe_allow_html=True)
+        st.markdown(
+            _pal_svg(pal, res["scatter_svg"],
+                     lambda: svg_score_gap_scatter(res["updates"], **pal)),
+            unsafe_allow_html=True)
     if res.get("ladder_svg"):  # G3: curriculum ladder (SPEC.md 27.3)
         st.markdown(res["ladder_svg"], unsafe_allow_html=True)
 
@@ -834,21 +1000,23 @@ def _render_gallery(items: list[dict]) -> None:
             st.caption(caption)
 
 
-def _render_restored(payload: dict) -> None:
-    """Re-show the last completed run after a widget re-run (download
-    click, sidebar change) — SPEC.md 23.2 persistence."""
+def _render_experiments(payload: dict) -> None:
+    """SPEC.md 51.1.1 (v0.37): the Experiments tab — the finished run's
+    per-candidate rows (including the 51.3.2 reason column, carried from
+    the live table by the stored rows) + the best-score curve. Renders the
+    live or the restored run (23.2 persistence); the verdict/plots/artifacts
+    live in the Results tab's `_render_result` (51.1.1)."""
     import pandas as pd  # a streamlit dependency, app-only
     info = payload["info"]
-    st.subheader("Task")
+    st.subheader("Experiments")
     st.caption(
         f"label **{info['label']}** · head **{info['head']}** · "
         f"rows {info['rows']['train']}/{info['rows']['holdout']}/{info['rows']['gen']} "
         f"· baseline **{info['baseline_score']:.2f}** vs target **{info['target']:.1f}** "
-        f"· {info['policy']}, seed {info['seed']} · last completed run"
+        f"· {info['policy']}, seed {info['seed']}"
     )
     st.dataframe(pd.DataFrame(payload["rows"]), width="stretch")
     st.line_chart(pd.DataFrame({"best score": payload["best_series"]}))
-    _render_result(payload["res"])
 
 
 def _render_optin_views(path, label: str, target: float, policy: str,
@@ -1017,6 +1185,7 @@ def main() -> None:
     path = _resolve_csv(upload, csv_path)
     result = st.session_state.get("result")
     if path is None and result is None:
+        # the idle screen (SPEC.md 23.2) — unchanged by the 51.1 tabs
         st.info("Upload a CSV (or give a path — a CSV file, or a directory "
                 "of labelled images/audio, v0.10) to begin. Labels are the "
                 "column (label/target/y/class, else last) or the subfolder "
@@ -1024,40 +1193,84 @@ def main() -> None:
                 "classes → accuracy, otherwise R² (SPEC.md 22.1/24.2).")
         st.stop()
 
-    if path is not None:
-        st.subheader("Data")
-        _preview(path)
+    # SPEC.md 51.1.1 (v0.37): the five-tab structure — the same functions in
+    # the same order per interaction as the pre-v0.37 scroll (51.1.2); every
+    # widget keeps its exact `key=` (the app tests are key-based).
+    t_setup, t_run, t_results, t_compare, t_exps = st.tabs(
+        ["Setup", "Run", "Results", "Compare", "Experiments"])
 
-    if st.button("Run the improvement loop", type="primary", key="run_button"):
-        if path is None:
-            st.error("Choose a CSV (upload or path) to start a new run.")
+    with t_setup:  # 51.1.1: the data preview, the settings summary, 51.4.4
+        if path is not None:
+            st.subheader("Data")
+            _preview(path)
+        st.caption(f"policy **{policy}** · seed **{seed}** · experiments "
+                   f"**{experiments}** · max train **{max_train:g}s** · "
+                   f"quality **{quality}** · target **{target:g}** "
+                   f"(SPEC.md 51.1.1)")
+        # 51.4.4: a view preference, not a run knob (the 48.1 knob
+        # invariant holds — `ALL_KNOBS` is untouched)
+        st.checkbox("Colorblind-safe palette (Okabe-Ito)", value=False,
+                    key="cb_palette",
+                    help="Re-renders the result plots colorblind-safe + "
+                         "dark-mode-aware (a view preference, not a run "
+                         "setting — SPEC.md 51.4.4).")
+
+    with t_run:  # 51.1.1: the Run button, the live loop, the Stop button
+        stop_pressed = st.button(
+            "Stop the run (abort after the current experiment)",
+            key="stop_button",
+            help="Honored between experiments, never inside one — a "
+                 "partial, honest run with full artifacts (SPEC.md 51.2.3).")
+        rec = st.session_state.get("_worker")
+        live = (rec is not None and not rec["drained"]
+                and rec.get("thread") is not None and rec["thread"].is_alive())
+        if live:  # 51.2.3 preemption-safe reattach: drain the surviving run
+            if stop_pressed:
+                rec["stop"]["flag"] = True
+            _drain_live(rec, narrate)
+        elif st.button("Run the improvement loop", type="primary",
+                       key="run_button"):
+            if path is None:
+                st.error("Choose a CSV (upload or path) to start a new run.")
+            else:
+                _run(path, label.strip() or None, float(target), policy,
+                     int(seed), int(experiments), float(max_train),
+                     runs_dir.strip() or "runs", quality,
+                     narrate=narrate, initial_stop=stop_pressed)
+        elif result is not None:
+            # widget-triggered re-run (download click, sidebar change) — the
+            # last completed result stays on screen (SPEC.md 23.2 persistence)
+            if st.button("New run (clear result)", key="clear_button"):
+                st.session_state.pop("result", None)
+                st.session_state.pop("_worker", None)
+                st.rerun()
         else:
-            _run(path, label.strip() or None, float(target), policy, int(seed),
-                 int(experiments), float(max_train), runs_dir.strip() or "runs",
-                 quality, narrate=narrate)
-    elif result is not None:
-        # widget-triggered re-run (download click, sidebar change) — the
-        # last completed result stays on screen (SPEC.md 23.2 persistence).
-        # The clear button is checked *before* rendering: when pressed, the
-        # stored result is dropped and the script re-runs into the idle view
-        # without ever rendering the stale result in that pass.
-        if st.button("New run (clear result)", key="clear_button"):
-            st.session_state.pop("result", None)
-            st.rerun()
-        _render_restored(result)
-    else:
-        st.caption("Press **Run** — every experiment is shown as it happens "
-                   "(live table + curve), then the verdict, plots, and "
-                   "downloads (SPEC.md 23.2).")
+            st.caption("Press **Run** — every experiment is shown as it "
+                       "happens (live table + curve), then the verdict, "
+                       "plots, and downloads (SPEC.md 23.2).")
 
-    # D1/D2 (SPEC.md 29): opt-in multi-run / policy views (inert until pressed)
-    _render_optin_views(path, label, float(target), policy, int(seed),
-                        int(experiments), float(max_train),
-                        runs_dir.strip() or "runs", quality)
+    with t_results:  # 51.1.1: the result view for the live or restored run
+        result = st.session_state.get("result")  # re-read fresh (51.1.2)
+        if result is not None:
+            _render_result(result["res"])
+        else:
+            st.caption("Finish a run first — the verdict, plots, and "
+                       "downloads appear here (SPEC.md 51.1.1).")
 
-    # SPEC.md 38.4 (v0.24, T1): the Past-runs view — registry table +
-    # two-run compare (inert rendering below the result views)
-    _render_past_runs(runs_dir.strip() or "runs")
+    with t_compare:  # 51.1.1: seed-sweep / RL views (29.1/29.2) + past runs
+        _render_optin_views(path, label, float(target), policy, int(seed),
+                            int(experiments), float(max_train),
+                            runs_dir.strip() or "runs", quality)
+        _render_past_runs(runs_dir.strip() or "runs")
+
+    with t_exps:  # 51.1.1: the per-candidate rows (51.3 reason column) + curve
+        result = st.session_state.get("result")
+        if result is not None:
+            _render_experiments(result)
+        else:
+            st.caption("Finish a run first — the per-candidate table (with "
+                       "the reason column) and the best-score curve appear "
+                       "here (SPEC.md 51.1.1).")
 
 
 main()

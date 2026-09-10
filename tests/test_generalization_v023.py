@@ -604,6 +604,6 @@ def test_variance_parser_exposes_gate(tmp_path):
 
 def test_version_round_v023():
     """A27 (SPEC.md 37, 33.1): the round assertion advanced in place with
-    each round (v0.23 ⇒ `0.23.0`; now v0.36 ⇒ `0.36.0`, M39, SPEC.md 49)."""
+    each round (v0.23 ⇒ `0.23.0`; now v0.37 ⇒ `0.37.0`, M40, SPEC.md 51)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.36.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.37.0"

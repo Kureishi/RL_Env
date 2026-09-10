@@ -57,6 +57,7 @@ numbers and carry none.)
 | M37 | v0.34   | 48     | A38 | tests/test_beginner_v034.py |
 | M38 | v0.35   | 49     | A39 | tests/test_advanced_v035.py |
 | M39 | v0.36   | 50     | A40 | tests/test_advanced_v036.py |
+| M40 | v0.37   | 51     | A41 | tests/test_advanced_v037.py |
 
 ---
 
@@ -5254,3 +5255,209 @@ the pinned two-run output unchanged — 50.1) and the one-click exports
 ("Download run_config.json" + "Build share bundle" over the new
 `sharing` core, the CLI `share` refactored byte-identically — 50.2)
 (A40).
+
+---
+
+## 51. App interactivity: tabs, stop/cancel, rejection reasons, accessibility (v0.37)
+
+The app is one long scroll (setup → preview → run → result → opt-in
+views → past runs), a mis-set budget burns its whole wall-time with no
+kill switch, the live table says "no" without saying *why*, and the
+SVGs are light-only with a palette that is not colorblind-safe. v0.37
+closes all four over **pure** core (23.1: the app stays a thin
+renderer; 3: no new dependencies):
+
+- **51.1** tabs — Setup / Run / Results / Compare / Experiments; the
+  sidebar (48.1) and every widget key unchanged;
+- **51.2** stop/cancel — `AutoRefineEnv(stop_check=…)` +
+  `DashboardRunner.request_stop()` + a worker thread with a Stop button
+  and a preemption-safe reattach;
+- **51.3** rejection reasons — `accounting.candidate_reason` + a visible
+  reason column in the live table;
+- **51.4** accessibility — the Okabe-Ito palette, dark-mode SVGs, ARIA
+  headers, the colorblind-safe checkbox, keyboard nav.
+
+### 51.1 Tabs (51.1.1–51.1.2)
+
+**The five tabs (51.1.1).** When the app is not idle-stopping (23.2),
+`main()` renders its content as five `st.tabs`: **Setup** — the data
+preview (23.2/32.1), a settings summary line, and the 51.4.4
+checkbox; **Run** — the Run button, the live loop (table, curve,
+decision views, progress), the Stop button (51.2.3), and the
+"New run (clear result)" button; **Results** — the result view
+(23.2: verdict, metrics, plots, decision views, learning views,
+advanced analysis, artifacts) for the live or the restored run, and a
+"finish a run first" caption while there is none; **Compare** — the
+seed-sweep / RL views (29.1/29.2) and the Past-runs section
+(38.4/50.1.5); **Experiments** — the finished run's per-candidate rows
+(including the 51.3 reason column) + the best-score curve, and the
+empty caption before a run. Every existing widget keeps its exact
+`key=` value (the app tests are key-based, and elements inside tabs are
+queriable), the sidebar (48.1, 48.3) is byte-identical, and the idle
+`st.info + st.stop()` screen (23.2) is unchanged.
+
+**Layout only (51.1.2).** Tab creation changes no behavior: the same
+functions run in the same order per interaction (Run press → live loop
+→ result; clear → stored drop), so the A1–A40 app assertions (verdict
+present, `md.count("<svg") >= 2`, `download_button >= 4`,
+`len(at.metric) == 4`, `dataframe >= 1`) keep holding inside the tabs.
+
+### 51.2 Stop/cancel (51.2.1–51.2.4)
+
+**Core — env (51.2.1).** `AutoRefineEnv(..., stop_check=None)`: an
+optional zero-arg callable consulted at the top of `step()` (after the
+done guard, before spec parsing). When it is truthy, the env finishes
+with `finished_reason == "stopped"` through the normal `_finish` path
+— the full artifact set: `summary.json`, `best_spec.json`,
+`best_model.npz`, registry entry (38.1) — and `step()` returns the done
+update `{"accepted": False, "reason": "stopped",
+"candidate_score": None}` (the R3/done early-return shape). A non-
+callable non-`None` value is a construction-time `ValueError`. Default
+`None` is bit-identical to pre-v0.37 (the check is a no-op), so the
+A1–A40 loop pins are untouched. `stop_check` is a driver hook, not a
+knob: it is absent from the KNOBS registry (33.2), from `RunConfig`
+(37.1), and from the CLI — exactly the `stall_patience`-style opt-in,
+except driver-supplied.
+
+**Core — runner (51.2.2).** `DashboardRunner.request_stop()` flips an
+internal flag; `start()` passes a bound `stop_check` reading that flag
+to the env. `next()` / `finish()` are unchanged — the summary's
+`finished_reason == "stopped"` flows through, and the verdict renders
+honestly (PASS/MISS by the §22.1 gate; a stopped run is not a
+cheating run).
+
+**App — worker + pump + reattach (51.2.3).** The live loop moves into a
+daemon worker thread that drives the runner and posts
+`info/update/result/error` messages on a queue; the script **synchronously
+drains** the queue and renders the existing live UI (table, curve,
+views, progress) on the main thread — a run still completes within one
+script run (the AppTest contract). The **Stop** button (key
+`stop_button`, Run tab) sets the shared flag; the worker honors it
+*between* experiments (it calls `request_stop()` before the next
+`next()`), never inside one. The live worker record is kept in
+`st.session_state`; if a script re-run **preempts** a live drain (a Stop
+click under Streamlit's preemptive execution), the new run detects the
+still-alive worker, sets the flag when the Stop button is what fired,
+and drains it to completion — the worker still writes the full artifact
+set. When `finished_reason == "stopped"`, the result view adds a neutral
+`st.warning("Stopped by user…")` note next to the honest verdict.
+
+**Honest semantics (51.2.4).** Streamlit's queued-execution model does
+not reliably interrupt an in-flight script from inside itself; the
+reattach path (51.2.3) is the mechanism that makes Stop work under
+preemptive semantics, and under pure-queued semantics a Stop click is
+honored on the next script run (the surviving worker drains to a
+`stopped` finish). A Stop press after the loop has already ended is a
+no-op. The contract is documented as "stop between experiments", not
+"instant".
+
+### 51.3 Rejection reasons (51.3.1–51.3.2)
+
+**Core (51.3.1).** `accounting.candidate_reason(accepted,
+candidate_score, gen_gap, best_before) -> str` — the per-candidate gate
+verdict: `"accepted"`, or for a rejection the first failing gate in the
+39.2.2 priority — `"score"` (score ≤ the running best before this
+step), else `"overfit"` (gen_gap > 0.05·score, the §18.5 tolerance),
+else `"ci"`; an unscored rejection (no `candidate_score`) is `"dup"`
+(the free duplicate/invalid rejections, 6 R3 / 25.4). Pure,
+deterministic (G2); the scored-rejection branching agrees with the
+`_rejections` buckets (39.2.2) row for row. Exported in
+`accounting.__all__` (35.1-style leaf module; no new import edges).
+
+**App (51.3.2).** The live table gains a visible **reason** column
+(`accepted` / `score` / `overfit` / `ci` / `dup`) — deliberately a
+column, not a hover: Streamlit dataframes have no per-row tooltip, and
+visible text is the accessibility win (51.4: no color-only signal). The
+running best is tracked in the loop (the baseline seeds it; each
+update's `best_score` succeeds it), so the column is correct for every
+row; the stored rows carry the column into the Experiments tab
+(51.1.1) and the restored view (23.2) for free.
+
+### 51.4 Accessibility (51.4.1–51.4.5)
+
+**The Okabe-Ito palette (51.4.1).** `plotting.OKABE_ITO` — the seven
+Okabe-Ito colorblind-safe hues — plus an opt-in
+`palette: str = "default"` parameter on the eight multi-series SVG
+functions (`svg_score_curve`, `svg_score_strip`,
+`svg_score_gap_scatter`, `svg_mutation_timeline`, `svg_seed_variance`,
+`svg_seed_curves`, `svg_frontier_overlay`, `svg_run_curves`):
+`palette="okabe"` renders the series/outcome colors from the Okabe-Ito
+set; an unknown value is a `ValueError`. `"default"` (the default) is
+**byte-identical** to the pre-v0.37 output — the pinned hexes stay
+pinned (the A16/A18/A19/A20/A39 pins are untouched).
+
+**Dark mode (51.4.2).** The same eight functions take
+`dark: bool = False`: the SVG background becomes `#0e1117`, the
+axis/text color `#c9d1d9`, the lane/panel backgrounds dark-tuned, and
+the data colors shift to the dark set — every element, not just the
+header. `dark=False` (the default) renders byte-identically to
+pre-v0.37.
+
+**ARIA (51.4.3).** Every SVG's root element carries `role="img"` +
+`aria-label="<title>"` — always (light or dark, default or Okabe-Ito),
+so a screen reader gets the chart's title. Purely additive attributes;
+no test pins the header string (the suite reads `startswith("<svg")`),
+so the A1–A40 SVG pins stay green.
+
+**App (51.4.4).** A "Colorblind-safe palette" checkbox (key
+`cb_palette`, default off) in the **Setup tab** — deliberately *not* in
+the sidebar (the 48.1 knob invariant: `ALL_KNOBS` unchanged; the
+checkbox is a view preference, not a run knob). When on, the
+multi-series SVGs of the result view re-render from the stored data
+(the run's `experiments.jsonl` artifacts + update stream) with
+`palette="okabe"`, and `dark` is auto-detected from
+`st.get_option("theme.base") == "dark"`. Default off (light theme)
+renders the stored pre-v0.37 SVGs byte-identically (G2: the re-render
+is a deterministic function of the same inputs).
+
+**Keyboard nav (51.4.5).** Streamlit-native: every control is a native
+labeled widget with `help=` text, so full keyboard operation and a
+sensible focus order come from the framework — no custom JS. This bullet
+documents the stance.
+
+### 51.5 Acceptance (A41)
+
+- **stop core (51.2.1)** — an env built with a flip-on `stop_check`
+  completes its first `step()` normally; once the flag flips, the next
+  `step()` returns `done=True` with `info["reason"] == "stopped"`, the
+  run dir carries `summary.json` with `finished_reason == "stopped"`
+  plus `best_spec.json` / `best_model.npz`, and a further `step()`
+  raises (the done guard); a non-callable `stop_check` is a
+  `ValueError`; the default (`None`) env steps without consulting.
+- **runner (51.2.2)** — `DashboardRunner.request_stop()` before a
+  `next()` ends the loop with `finish()["finished_reason"] ==
+  "stopped"` and an honest verdict line (PASS/MISS by the gate).
+- **candidate_reason (51.3.1)** — all five branches (accepted; unscored
+  → `dup`; score ≤ best → `score`; above-best + gap > 0.05·score →
+  `overfit`; above-best + small gap → `ci`), and row-for-row agreement
+  with the `_rejections` buckets over a synthetic log (the 39.2.2
+  priority).
+- **palette (51.4.1)** — for each of the eight functions: the
+  default call is byte-identical with `palette="default", dark=False`
+  explicit; `palette="okabe"` output uses the `OKABE_ITO` hexes (and
+  the default output does not); an unknown palette is a `ValueError`.
+- **dark (51.4.2)** — `dark=True` output contains the `#0e1117`
+  background and the `#c9d1d9` axis color, and the default output
+  contains neither.
+- **ARIA (51.4.3)** — every default-call SVG from the eight functions
+  carries `role="img"` and an `aria-label`.
+- **app (51.1.1 / 51.2.3 / 51.3.2 / 51.4.4)** — `AppTest`: the five tab
+  labels render; a run completes end-to-end (verdict, `download_button
+  >= 4`, metrics) with the live table carrying the reason column; a
+  Stop press honored by the worker yields `finished_reason ==
+  "stopped"` + the neutral warning; the `cb_palette` checkbox exists
+  and, when on, the result markdown carries the Okabe-Ito hexes; the
+  app source wires `st.tabs`, `candidate_reason`, `request_stop`, and
+  the `stop_check` hand-off.
+- **Regression** — A1–A40 stay green (every default path is
+  byte-identical: the loop, the summary keys, the SVG hexes); the A25
+  index advances (37 acceptance rows; `defined == set(range(1, 42))`);
+  the version stepped to `0.37.0` in both sources (33.1).
+
+### 51.6 Milestone (M40)
+
+**M40** — v0.37 app interactivity: the five-tab structure over the
+unchanged widget keys (51.1), stop/cancel between experiments with the
+preemption-safe reattach and honest `stopped` artifacts (51.2), the
+per-candidate reason column (51.3), and the Okabe-Ito / dark / ARIA /
+checkbox accessibility layer with byte-identical defaults (51.4) (A41).

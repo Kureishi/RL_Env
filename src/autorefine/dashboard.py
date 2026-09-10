@@ -94,11 +94,27 @@ class DashboardRunner:
         self._state: dict | None = None
         self._phase = "idle"  # idle -> running -> done
         self._updates: list[dict] = []
+        # SPEC.md 51.2.2 (v0.37): the app's stop request (request_stop)
+        # — the flag the env's stop_check reads between experiments
+        self._stop_requested = False
 
     @property
     def done(self) -> bool:
         """True once the loop has hit `done` and `finish()` is valid."""
         return self._phase == "done"
+
+    def request_stop(self) -> None:
+        """SPEC.md 51.2.2 (v0.37): ask the live loop to stop.
+
+        The env honors it at the *next* step() (between experiments,
+        never inside one): `finished_reason == "stopped"` with the full
+        artifact set (51.2.1). A call after `done` is a no-op — the env
+        already finished (the step() done guard)."""
+        self._stop_requested = True
+
+    def _stop_check(self) -> bool:
+        """The zero-arg callable handed to `AutoRefineEnv` (SPEC.md 51.2.2)."""
+        return self._stop_requested
 
     # --- lifecycle ----------------------------------------------------------
     def _resolve_task(self, data: Path) -> str:
@@ -156,6 +172,9 @@ class DashboardRunner:
             **({} if self.search_quality == "legacy" else search_quality_v04()),
             # v0.17 (SPEC.md 31.1): plateau early stop (None = off)
             stall_patience=self.stall_patience,
+            # v0.37 (SPEC.md 51.2.2): the app's stop hook (the bound
+            # method reads the request_stop flag; off until pressed)
+            stop_check=self._stop_check,
             # v0.23 (SPEC.md 37.1.3): driver metadata for the canonical recipe
             policy=self.policy_name, target=self.target, rl_episodes=None,
         )

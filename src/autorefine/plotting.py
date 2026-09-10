@@ -13,6 +13,7 @@ import base64
 import html
 import json
 import math
+from contextlib import contextmanager
 
 from .memory import KIND_BASELINE, KIND_CURRICULUM, KIND_EXPERIMENT  # 35.1 (C4)
 
@@ -32,6 +33,93 @@ _CLASS_PALETTE = (
     "#1a66c2", "#c2410c", "#15803d", "#7c3aed",
     "#b91c1c", "#0e7490", "#a16207", "#db2777",
 )
+# --- SPEC.md 51.4 (v0.37): accessibility palettes -----------------------------
+# 51.4.1: the Okabe-Ito colorblind-safe hues (the palette="okabe" data set)
+OKABE_ITO = (
+    "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00",
+    "#CC79A7",
+)
+# 51.4.2: the dark-mode surface colors (defaults = the pre-v0.37 light set)
+_BG = "white"  # the header background rect (byte-identical default)
+_LANE_BG = "#f6f8fa"  # score-strip lane panels (was inline hex)
+_NOSCORE_BG = "#e8edf3"  # the score-strip no-score zone (was inline hex)
+
+# 51.4.2: the dark set — background, axis/text, surfaces, and every data
+# color, dark-tuned (the light set above stays the byte-identical default)
+_DARK = {
+    "_BG": "#0e1117",
+    "_AXIS": "#c9d1d9",
+    "_LINE": "#4493f8",
+    "_BASELINE": "#f97316",
+    "_ACCEPTED": "#3fb950",
+    "_REJECTED": "#8b949e",
+    "_SCORED_REJ": "#f85149",
+    "_BAND": "#388bfd",
+    "_LADDER": "#a371f7",
+    "_LANE_BG": "#21262d",
+    "_NOSCORE_BG": "#30363d",
+    "_FRONTIER_PALETTE": ("#4493f8", "#f97316", "#3fb950", "#a371f7",
+                          "#f85149", "#39c5cf"),
+    "_CLASS_PALETTE": ("#4493f8", "#f97316", "#3fb950", "#a371f7",
+                       "#f85149", "#39c5cf", "#d29922", "#ff7b72"),
+}
+# 51.4.1: the Okabe-Ito data-color set (axis/surfaces keep the base theme —
+# the 51.4.1 set is about the *series* colors; the neutral grey is
+# colorblind-safe by construction)
+_OKABE = {
+    "_LINE": "#56B4E9",
+    "_BASELINE": "#E69F00",
+    "_ACCEPTED": "#009E73",
+    "_REJECTED": "#7f7f7f",
+    "_SCORED_REJ": "#D55E00",
+    "_BAND": "#56B4E9",
+    "_LADDER": "#CC79A7",
+    "_FRONTIER_PALETTE": ("#E69F00", "#56B4E9", "#009E73", "#F0E442",
+                          "#0072B2", "#D55E00"),
+    "_CLASS_PALETTE": ("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2",
+                       "#D55E00", "#CC79A7", "#E69F00"),
+}
+# every color global the two sets can swap (saved/restored by _styled)
+_STYLE_KEYS = (
+    "_BG", "_AXIS", "_LINE", "_BASELINE", "_ACCEPTED", "_REJECTED",
+    "_SCORED_REJ", "_BAND", "_LADDER", "_LANE_BG", "_NOSCORE_BG",
+    "_FRONTIER_PALETTE", "_CLASS_PALETTE",
+)
+
+
+@contextmanager
+def _styled(palette: str = "default", dark: bool = False):
+    """SPEC.md 51.4.1/51.4.2 (v0.37): scoped palette + dark-mode overrides.
+
+    Temporarily swaps the module's color globals — saved and restored in
+    `finally` (nesting-safe) — so every inline color reference in the
+    rendering functions picks up the active theme. The default
+    (``palette="default", dark=False``) leaves every global untouched, so
+    the output is byte-identical to pre-v0.37 (G2). Unknown palettes are a
+    `ValueError` (51.4.1).
+
+    Implementation contract (SPEC.md 51.4): the swap mutates module
+    globals, so rendering must be single-threaded — the app renders on the
+    main thread (51.2.3) and the core renderers never run concurrently.
+    """
+    if palette not in ("default", "okabe"):
+        raise ValueError(f"palette must be 'default' or 'okabe', got "
+                         f"{palette!r} (SPEC.md 51.4.1)")
+    if not isinstance(dark, bool):
+        raise ValueError(f"dark must be a bool, got {type(dark).__name__} "
+                         f"(SPEC.md 51.4.2)")
+    saved = {name: globals()[name] for name in _STYLE_KEYS}
+    try:
+        if dark:
+            for name, value in _DARK.items():
+                globals()[name] = value
+        if palette == "okabe":
+            for name, value in _OKABE.items():
+                globals()[name] = value
+        yield
+    finally:
+        for name, value in saved.items():
+            globals()[name] = value
 
 
 def _finite(v) -> bool:
@@ -98,12 +186,19 @@ def ascii_score_curve(rows, width: int = 48, height: int = 12) -> str:
 
 
 def _svg_header(width: int, height: int, title: str) -> list[str]:
+    # SPEC.md 51.4.3 (v0.37): ARIA on every SVG root — `role="img"` +
+    # `aria-label` (the escaped title), always, so a screen reader gets the
+    # chart's title; purely additive attributes (no test pins the header).
+    # `fill="{_BG}"` keeps the default byte-identical (`_BG == "white"`)
+    # while the dark set (51.4.2) re-colors the background.
+    label = html.escape(title)
     return [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
-        f'viewBox="0 0 {width} {height}" font-family="monospace">',
-        f'<rect x="0" y="0" width="{width}" height="{height}" fill="white"/>',
+        f'viewBox="0 0 {width} {height}" role="img" aria-label="{label}" '
+        f'font-family="monospace">',
+        f'<rect x="0" y="0" width="{width}" height="{height}" fill="{_BG}"/>',
         f'<text x="{width // 2}" y="16" text-anchor="middle" font-size="14" '
-        f'fill="{_AXIS}">{html.escape(title)}</text>',
+        f'fill="{_AXIS}">{label}</text>',
     ]
 
 
@@ -157,7 +252,16 @@ def _band_stds(rows) -> list[float]:
     return out
 
 
-def svg_score_curve(rows, width: int = 640, height: int = 360) -> str:
+def svg_score_curve(rows, width: int = 640, height: int = 360,
+                    palette: str = "default", dark: bool = False) -> str:
+    """SPEC.md 51.4 (v0.37): the palette (51.4.1) + dark (51.4.2) params
+    over `_svg_score_curve` (the pre-v0.37 body). The default call is
+    byte-identical to pre-v0.37 (G2); ARIA is always on (51.4.3)."""
+    with _styled(palette, dark):
+        return _svg_score_curve(rows, width=width, height=height)
+
+
+def _svg_score_curve(rows, width: int = 640, height: int = 360) -> str:
     """Score vs experiment index as a valid-XML SVG (SPEC.md 21.2).
 
     V4 (SPEC.md 30.4): each scored row with a positive logged `std` (the
@@ -399,7 +503,16 @@ def _strip_rows(rows) -> list[tuple[int, bool, float | None, str | None]]:
     return out
 
 
-def svg_score_strip(rows, width: int = 640) -> str:
+def svg_score_strip(rows, width: int = 640,
+                    palette: str = "default", dark: bool = False) -> str:
+    """SPEC.md 51.4 (v0.37): the palette (51.4.1) + dark (51.4.2) params
+    over `_svg_score_strip` (the pre-v0.37 body); default byte-identical
+    (G2); ARIA always on (51.4.3)."""
+    with _styled(palette, dark):
+        return _svg_score_strip(rows, width=width)
+
+
+def _svg_score_strip(rows, width: int = 640) -> str:
     """G1 (SPEC.md 27.1): candidate score strip — one lane per outcome class,
     one dot per update. Scored candidates sit at their exact score on a fixed
     0-100 axis; unscored rejections (duplicate / invalid_spec, SPEC.md 6 R3 /
@@ -440,13 +553,13 @@ def svg_score_strip(rows, width: int = 640) -> str:
     for label, fill in lanes:
         y = lane_top[label]
         parts.append(f'<rect x="{L:.1f}" y="{y:.1f}" width="{pw:.1f}" '
-                     f'height="{lane_h:.1f}" fill="#f6f8fa"/>')
+                     f'height="{lane_h:.1f}" fill="{_LANE_BG}"/>')  # 51.4.2
         parts.append(f'<text x="{L - 8:.1f}" y="{lane_cy[label] - 3:.1f}" '
                      f'text-anchor="end" font-size="11" fill="{fill}">{label}</text>')
     # the labelled no-score zone at the left edge (SPEC.md 27.1)
     ny = lane_top["unscored"]
     parts.append(f'<rect x="{L:.1f}" y="{ny:.1f}" width="72" height="{lane_h:.1f}" '
-                 f'fill="#e8edf3"/>')
+                 f'fill="{_NOSCORE_BG}"/>')  # 51.4.2
     parts.append(f'<text x="{L - 8:.1f}" y="{lane_cy["unscored"] + 11:.1f}" '
                  f'text-anchor="end" font-size="10" fill="{_REJECTED}">no score</text>')
     # one dot per update (SPEC.md 27.1)
@@ -510,7 +623,16 @@ def _gap_rows(rows) -> list[tuple[int, float, float, bool]]:
     return out
 
 
-def svg_score_gap_scatter(rows, width: int = 640, height: int = 360) -> str:
+def svg_score_gap_scatter(rows, width: int = 640, height: int = 360,
+                          palette: str = "default", dark: bool = False) -> str:
+    """SPEC.md 51.4 (v0.37): the palette (51.4.1) + dark (51.4.2) params
+    over `_svg_score_gap_scatter` (the pre-v0.37 body); default
+    byte-identical (G2); ARIA always on (51.4.3)."""
+    with _styled(palette, dark):
+        return _svg_score_gap_scatter(rows, width=width, height=height)
+
+
+def _svg_score_gap_scatter(rows, width: int = 640, height: int = 360) -> str:
     """G2 (SPEC.md 27.2): score vs gen-gap scatter, colored by outcome, with
     the 18.5 tolerance boundary `gen_gap = 0.05 * score` as a dashed line —
     the region above it is where the overfit penalty bites. Fixed 0-100
@@ -681,7 +803,16 @@ def _timeline_cells(rows) -> list[tuple[int, str, bool, bool]]:
     return cells
 
 
-def svg_mutation_timeline(rows, width: int = 640, row_h: int = 18) -> str:
+def svg_mutation_timeline(rows, width: int = 640, row_h: int = 18,
+                          palette: str = "default", dark: bool = False) -> str:
+    """SPEC.md 51.4 (v0.37): the palette (51.4.1) + dark (51.4.2) params
+    over `_svg_mutation_timeline` (the pre-v0.37 body); default
+    byte-identical (G2); ARIA always on (51.4.3)."""
+    with _styled(palette, dark):
+        return _svg_mutation_timeline(rows, width=width, row_h=row_h)
+
+
+def _svg_mutation_timeline(rows, width: int = 640, row_h: int = 18) -> str:
     """Mutation timeline: field x update-index strip (SPEC.md 26.3).
 
     One cell per (step, field) mutation — green accepted, red
@@ -773,7 +904,18 @@ def svg_pareto(points, width: int = 640, height: int = 360) -> str:
 
 
 def svg_frontier_overlay(named, target=None, width: int = 640,
-                         height: int = 360) -> str:
+                         height: int = 360, palette: str = "default",
+                         dark: bool = False) -> str:
+    """SPEC.md 51.4 (v0.37): the palette (51.4.1) + dark (51.4.2) params
+    over `_svg_frontier_overlay` (the pre-v0.37 body); default
+    byte-identical (G2); ARIA always on (51.4.3)."""
+    with _styled(palette, dark):
+        return _svg_frontier_overlay(named, target=target, width=width,
+                                     height=height)
+
+
+def _svg_frontier_overlay(named, target=None, width: int = 640,
+                          height: int = 360) -> str:
     """SPEC.md 49.3.3 (v0.35, policy A/B): two (or more) Pareto frontiers
     on one shared axis — the policy A/B overlay.
 
@@ -851,7 +993,17 @@ def svg_frontier_overlay(named, target=None, width: int = 640,
     return "\n".join(parts)
 
 
-def svg_run_curves(named, target=None, width: int = 640, height: int = 360):
+def svg_run_curves(named, target=None, width: int = 640, height: int = 360,
+                   palette: str = "default", dark: bool = False):
+    """SPEC.md 51.4 (v0.37): the palette (51.4.1) + dark (51.4.2) params
+    over `_svg_run_curves` (the pre-v0.37 body); default byte-identical
+    (G2); ARIA always on (51.4.3)."""
+    with _styled(palette, dark):
+        return _svg_run_curves(named, target=target, width=width,
+                               height=height)
+
+
+def _svg_run_curves(named, target=None, width: int = 640, height: int = 360):
     """SPEC.md 50.1.3 (v0.36): the N-run score-curve overlay — 2..N
     running-best score curves (50.1.2) on one shared experiment-index
     axis (0..max-1, so different-length runs align by position). The
@@ -1313,7 +1465,18 @@ def _quantile(sorted_vals, p: float) -> float:
 
 
 def svg_seed_variance(seeds, target=None, width: int = 640,
-                      height: int = 360) -> str:
+                      height: int = 360, palette: str = "default",
+                      dark: bool = False) -> str:
+    """SPEC.md 51.4 (v0.37): the palette (51.4.1) + dark (51.4.2) params
+    over `_svg_seed_variance` (the pre-v0.37 body); default byte-identical
+    (G2); ARIA always on (51.4.3)."""
+    with _styled(palette, dark):
+        return _svg_seed_variance(seeds, target=target, width=width,
+                                  height=height)
+
+
+def _svg_seed_variance(seeds, target=None, width: int = 640,
+                       height: int = 360) -> str:
     """D1 (SPEC.md 29.1): the final-score distribution across seeds — a
     box-and-whisker over the `final` scores (min/q1/median/q3/max, linear
     quantile) on a fixed 0-100 axis, one paired baseline->final marker per
@@ -1593,7 +1756,18 @@ def svg_task_returns(returns, width: int = 640, height: int = 360) -> str:
 
 # --- v0.16 comprehension visuals II (SPEC.md 30) -------------------------------
 
-def svg_seed_curves(seeds, target=None, width: int = 640, height: int = 360) -> str:
+def svg_seed_curves(seeds, target=None, width: int = 640, height: int = 360,
+                    palette: str = "default", dark: bool = False) -> str:
+    """SPEC.md 51.4 (v0.37): the palette (51.4.1) + dark (51.4.2) params
+    over `_svg_seed_curves` (the pre-v0.37 body); default byte-identical
+    (G2); ARIA always on (51.4.3)."""
+    with _styled(palette, dark):
+        return _svg_seed_curves(seeds, target=target, width=width,
+                                height=height)
+
+
+def _svg_seed_curves(seeds, target=None, width: int = 640,
+                     height: int = 360) -> str:
     """V1 (SPEC.md 30.1): the running best score of each seed over the
     sweep — one polyline per seed (input order) on a fixed 0-100 score
     axis, so the variance view (SPEC.md 29.1) answers *when* the seeds

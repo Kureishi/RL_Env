@@ -441,9 +441,9 @@ def test_bandit_search_views_are_consistent():
 # --- 36.3 (regression) -------------------------------------------------------
 
 def test_version_round_v022():
-    """A26 (SPEC.md 36.3, 33.1): the version stepped to `0.36.0` in both
-    sources with the round (v0.36 ⇒ `0.36.0`, both together — the round
+    """A26 (SPEC.md 36.3, 33.1): the version stepped to `0.37.0` in both
+    sources with the round (v0.37 ⇒ `0.37.0`, both together — the round
     assertion advanced in place per SPEC.md 33.1)."""
     py = tomllib.loads(
         (REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.36.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.37.0"

@@ -136,6 +136,31 @@ def _wall_time(summary: dict, entries: list[dict]) -> dict:
     }
 
 
+def candidate_reason(accepted, candidate_score, gen_gap, best_before) -> str:
+    """SPEC.md 51.3.1 (v0.37): the per-candidate gate verdict.
+
+    ``"accepted"`` for an accepted candidate; for a rejection the first
+    failing gate in the 39.2.2 priority — ``"score"`` (score <= the running
+    best before this step), else ``"overfit"`` (gen_gap > 0.05 * score,
+    the 18.5 tolerance), else ``"ci"``; an unscored rejection (no
+    ``candidate_score``) is ``"dup"`` (the free duplicate/invalid
+    rejections, 6 R3 / 25.4). Pure and deterministic (G2): the
+    scored-rejection branching agrees with the ``_rejections`` buckets
+    (39.2.2) row for row, so the app's reason column (51.3.2) and the
+    report's accounting cannot drift."""
+    if accepted:
+        return "accepted"
+    score = _num(candidate_score)
+    if score is None:  # dup / invalid-spec: rejected without a score (R3)
+        return "dup"
+    if best_before is not None and score <= best_before:
+        return "score"
+    gap = _num(gen_gap)
+    if gap is not None and gap > GEN_GAP_TOL * score:  # the 18.5 tolerance
+        return "overfit"
+    return "ci"
+
+
 def account_run(summary: dict, entries: list[dict]) -> dict:
     """SPEC.md 39.2.3: the "what happened" block.
 
@@ -152,4 +177,4 @@ def account_run(summary: dict, entries: list[dict]) -> dict:
     }
 
 
-__all__ = ["account_run"]
+__all__ = ["account_run", "candidate_reason"]
