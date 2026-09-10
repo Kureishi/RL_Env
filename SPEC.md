@@ -54,6 +54,9 @@ numbers and carry none.)
 | M34 | v0.31   | 45     | A35 | tests/test_adapt_v031.py |
 | M35 | v0.32   | 46     | A36 | tests/test_v032.py |
 | M36 | v0.33   | 47     | A37 | tests/test_ergonomics_v033.py |
+| M37 | v0.34   | 48     | A38 | tests/test_beginner_v034.py |
+| M38 | v0.35   | 49     | A39 | tests/test_advanced_v035.py |
+| M39 | v0.36   | 50     | A40 | tests/test_advanced_v036.py |
 
 ---
 
@@ -4703,3 +4706,551 @@ set(range(1, 38))`); the version stepped to `0.33.0` in both sources
 polish — `--version`, per-command examples, the exit-code table
 (47.2), `--quiet` on `run`/`fit` (47.3), and `autorefine share`
 (47.4) (A37).
+
+---
+
+## 48. Beginner onboarding (v0.34)
+
+The Streamlit app (23.2) is the only visual surface, and its sidebar was
+a flat list of nine knobs that assumes the reader already knows what a
+bandit, a seed, or `search_quality` means. v0.34 makes the first screen
+answer "what do I do?" before "what can I tune?" — the guided two-step
+setup (48.1), a glossary with a completeness invariant (48.2), one-click
+presets (48.3), an always-on plain-English result narrative (48.4), and
+an opt-in narrate-the-loop toggle (48.5). All new logic is pure and
+lives in the core (`onboarding.py`, `narrate.py`) so it is testable
+without streamlit (23.1); the app stays a thin renderer. Defaults are
+unchanged: presets unselected and the narrate toggle off render exactly
+the pre-48 loop (A1–A37 stay green).
+
+### 48.1 Guided two-step setup (48.1.1–48.1.3)
+
+**Beginner knob set (48.1.1).** `onboarding.BEGINNER_KNOBS = ("data",
+"label", "target")` — the data, what to predict, and the bar to clear —
+rendered top-level in the sidebar.
+
+**Advanced knob set (48.1.2).** `onboarding.ADVANCED_KNOBS =
+("policy", "seed", "experiments", "max_train", "quality", "runs_dir")`
+— the same six widgets as before 48.1, same keys, same defaults, now
+collapsed under a closed "Advanced" expander. Grouping only: a run that
+used to work does.
+
+**Vocabulary (48.1.3).** `onboarding.ALL_KNOBS` is the full knob
+vocabulary in sidebar display order; the two sets are disjoint and their
+union is exactly `ALL_KNOBS` (the 48.2.2 invariant), so the app renders
+the sidebar from one source of truth instead of re-declaring its shape.
+
+### 48.2 The knob glossary (48.2.1–48.2.2)
+
+**One friendly line per knob (48.2.1).** `onboarding.KNOB_GLOSSARY`
+maps every knob in `ALL_KNOBS` to a plain-English description written
+for a first-time user (technical names only in parentheses). The app
+doubles the glossary as each widget's `help=` text — the glossary is
+the single source of truth for what a setting does.
+
+**Completeness invariant (48.2.2).** The glossary's keys are exactly
+`ALL_KNOBS` — a knob added to the sidebar without a glossary line (or a
+glossary line for a knob that does not exist) is a suite failure, not a
+silent "?" in the UI. `onboarding.knob_groups()` returns the knob →
+group map and asserts it covers `ALL_KNOBS` exactly.
+
+### 48.3 Presets (48.3.1–48.3.3)
+
+**The bundles (48.3.1).** `onboarding.PRESETS` defines three one-click
+bundles over the GUI's own knob vocabulary only — a preset may never
+reference a knob the sidebar does not expose (no CLI-only setting
+smuggled in): *Quick smoke test* (`experiments=5`, `max_train=10`),
+*Classify my labels* (`target=90`, `experiments=40`, `max_train=30`,
+`policy=bandit`), and *Thorough search* (`target=95`,
+`experiments=120`, `max_train=60`, `policy=bandit`, `quality=v04`).
+
+**Presentation (48.3.2).** `preset_choices()` is the stable
+`(name, label)` pair list for the sidebar selectbox (a `"(none)"`
+sentinel at index 0 applies nothing); `preset_summary(name)` is the
+one-line description shown under the selection; `preset_flags(name)`
+returns a *copy* of the flag overrides (`KeyError` on an unknown name).
+
+**Merge semantics (48.3.3).** `apply_preset(name, current)` merges the
+preset's flags over the current values — the preset touches only the
+knobs it defines, every other knob keeps its current value, and
+`current` is not mutated. The app applies the bundle when the
+*selection changes*: when the selectbox value moves to a preset name, its
+flags are written to the matching widget session-state keys (before that
+run's widget instantiation, which Streamlit allows) — so the bundle fills
+in the knobs it defines, **including the Advanced ones**, and re-selecting
+the same preset does not clobber the user's subsequent manual edits (a
+preset is a starting point, not a lock).
+
+### 48.4 The "what happened" narrative (48.4.1–48.4.3)
+
+**The block (48.4.1).** `narrate.narrate_run(res)` renders the
+finished-run plain-English summary in four paragraphs: the
+**headline** (verdict, target, final score, baseline, experiment
+count), **what it tried** (the `field_stats` rollup — how many knobs,
+which most often, how often improving), **how it improved** (the
+accepted chain: baseline → each accepted candidate, or an honest
+"never beat its baseline"), and the **winning recipe** (`best_spec`
+as `key=value` chips).
+
+**Derivation (48.4.2).** The input is exactly the runner's `finish()`
+result (23.2): `verdict`, `target`, `final_best_score`,
+`baseline_score`, `experiments_run`, `best_spec`, and the `updates`
+stream (the per-field rollup reuses `dashboard.field_stats` — the same
+single source of truth as the D1 view and `cli._explain_blocks`
+(42.3)). Missing pieces degrade gracefully to an honest "no …" line
+(28.5 style).
+
+**Rendering (48.4.3).** The app shows the block at the top of the
+result section — always (it is a comprehension aid, independent of the
+48.5 live-narrate toggle) — in both the live run and the restored view
+(23.2), because it is pure over the stored result.
+
+### 48.5 Narrate the loop (48.5.1–48.5.3)
+
+**Per step (48.5.1).** `narrate.narrate_step(u)` turns one `next()`
+update (23.2) into a friendly line: an accepted step reports the new
+best, a rejected step reports the miss, and a duplicate (no numeric
+candidate score) is named as such — the app form of the terminal
+narration `simulate.trace_lines` already produces for `report --trace`
+/ `run --demo` (41.2/41.3).
+
+**First line (48.5.2).** `narrate.narrate_baseline(info)` renders the
+`start()` info's baseline and target as the "Started the search …" line
+before the loop.
+
+**The toggle (48.5.3).** The app's "Narrate the loop" checkbox
+defaults **off**: off, `_run` renders byte-identically to pre-48.5
+(the terse per-step caption, no narration elements). On, the friendly
+lines replace the terse caption (table + charts unchanged). `narrate.py`
+is pure and deterministic (G2), imports no streamlit, and its rendered
+lines are console-safe (cp1252-printable).
+
+### 48.6 Acceptance (A38)
+
+- **guided setup (48.1)** — `BEGINNER_KNOBS` is exactly
+  `("data", "label", "target")`, `ADVANCED_KNOBS` the other six; the
+  two sets are disjoint, their union is `ALL_KNOBS`, and
+  `knob_groups()` covers `ALL_KNOBS` exactly (48.1.1–48.1.3).
+- **glossary (48.2)** — `KNOB_GLOSSARY`'s keys are exactly
+  `ALL_KNOBS` (the 48.2.2 invariant) with a non-empty prose entry per
+  knob; the app's widget `help=` texts read the same dict (checked by
+  scanning the app source) (48.2.1–48.2.2).
+- **presets (48.3)** — every preset's flag keys are GUI knobs (in
+  `ALL_KNOBS`); `preset_flags` returns a copy (mutating it leaves
+  `PRESETS` untouched); `apply_preset` overrides exactly the preset's
+  knobs, keeps the rest, and does not mutate its input
+  (48.3.1–48.3.3).
+- **narrate_run (48.4)** — a synthesized `finish()` result renders all
+  four paragraphs (headline with verdict/target/final/baseline/count,
+  the field-trial rollup, the accepted chain, the recipe chips), and
+  missing pieces degrade to the honest "no …" lines (48.4.1–48.4.3).
+- **narrate_step (48.5)** — accepted, rejected, and duplicate update
+  dicts render three distinct forms; `narrate_baseline` carries the
+  baseline and target (48.5.1–48.5.2); every rendered line is
+  cp1252-printable (console-safe on Windows).
+- **Regression** — A1–A37 stay green (defaults byte-identical: presets
+  unselected, narrate off, sidebar keys and defaults unchanged); the
+  A25 index advances (33 → 34 acceptance rows; `defined ==
+  set(range(1, 39))`); the version stepped to `0.34.0` in both sources
+  (33.1) with the round assertions advanced (v0.34 ⇒ `0.34.0`, M37,
+  SPEC.md 48).
+
+### 48.7 Milestone
+
+**M37** — v0.34 beginner onboarding: the guided two-step sidebar
+(48.1), the knob glossary with its completeness invariant (48.2), the
+one-click presets with setdefault merge semantics (48.3), the
+always-on plain-English "what happened" result narrative (48.4), and
+the opt-in narrate-the-loop toggle (48.5) (A38).
+
+---
+
+## 49. Advanced analysis (v0.35)
+
+The result view ends at the artifacts — yet the three most useful
+advanced questions had no surface at all: "drag to 97, do you still
+pass?" (it existed only as `report --what-if`, 40.2), "what if
+hidden_dim were 256?" (it existed nowhere), and "would the other
+policy have won?" (it existed nowhere either). v0.35 adds one
+"Advanced analysis" section to the result view — three interactive
+panels, each inert until its button is pressed — over new **pure**
+core in `simulate.py`, `advanced.py`, and `plotting.py` (23.1: the app
+stays a thin renderer):
+
+- **49.1** interactive what-if re-gating — `simulate.what_if_block`,
+  the honest union of the two existing CLI gate surfaces (40.2 + 37.2);
+- **49.2** editable best-spec re-scoring — `advanced.retrain_spec`, one
+  extra training pass against the run's reconstructed task;
+- **49.3** policy A/B — `advanced.opposite_policy` + the run's own
+  `run_config` (37.1), overlaid with `plotting.svg_frontier_overlay`.
+
+No behavior change under the defaults: the section renders inert
+captions until a button is pressed, and the A1–A38 suite stays green
+(additive only; the two CLI gate surfaces are unchanged).
+
+### 49.1 Interactive what-if re-gating (49.1.1–49.1.4)
+
+**The block (49.1.1).** `simulate.what_if_block(entries, objectives,
+model_actual=None)` splits the objective set into a non-model half
+(`score`/`train`) and a model half. The non-model half is evaluated by
+the existing `what_if` (40.2) — the logged candidate pool, the
+counterfactual final, zero training. The model half is evaluated by the
+existing `gate.evaluate` (37.2) against `model_actual`. The result is
+the JSON-safe dict `{"pass", "what_if", "model"}` — `"what_if"` is
+`None` when no non-model objective was selected, `"model"` `None` when
+no model objective was selected, and the combined `"pass"` is the AND
+of the two halves (a half with no objectives is vacuously true).
+
+**The model objective (49.1.2).** Per-candidate model sizes are **not**
+logged in `experiments.jsonl` (40.2.3), so the model objective is
+evaluated against the **final best model's artifact** — the `fit
+--gate` (37.2) semantics, `gate.model_size(run_dir/best_model.npz)` —
+while `score`/`train` re-gate the logged pool (the `report --what-if`
+surface). One combined verdict is the honest union of the two CLI
+surfaces, not a second size calculator. A missing artifact (`model`
+`None`) fails the model objective honestly (the 37.2 rule: a missing
+actual fails its objective) — never guessed.
+
+**The verdict (49.1.3).** An empty objective set is a MISS:
+`{"pass": False, "what_if": None, "model": None}`. `what_if_block` is
+pure and deterministic (G2): same inputs, same dict; no training, no
+writes. It raises no new errors — a non-model `model`-objective mix is
+valid here (unlike `what_if` alone, which rejects it, 40.2.3), and the
+halves carry their own documented behavior.
+
+**The panel (49.1.4).** The app's what-if expander (49.4) offers a
+target input, a max-train-seconds input, and a max-model-size input,
+plus one checkbox per objective (`score` and `train` default on,
+`model` default off) and a **Re-score** button. Pressing it loads the
+run's `experiments.jsonl`, builds the `Objective` set from the checked
+boxes, reads the artifact size when `model` is checked (failure to read
+→ `model_actual=None`, 49.1.2), calls `what_if_block`, and renders the
+combined verdict, the pool/passing/counterfactual-final block
+(`what_if` half), and the per-objective model row (`model` half).
+Zero training; `report --what-if` and `fit --gate` are byte-identical
+(unchanged).
+
+### 49.2 Editable best-spec re-scoring (49.2.1–49.2.4)
+
+**The core (49.2.1).** `advanced.retrain_spec(run_dir, spec,
+max_train_seconds=None)` reconstructs the run's task from
+`summary.json` (the same `_task_from_summary` reconstruction `eval` /
+`report` use — 22.1/28.4, including the curriculum-level fallback,
+20.1), trains the given spec (a dict **or** a `ModelSpec` — a bad dict
+is a `SpecError`, a loud typed error, not a crash) with the run's own
+seed via `train_from_task`, evaluates with `evaluate_full`, and returns
+the JSON-safe dict `{"spec", "score", "gen_score", "gen_gap",
+"train_seconds", "final_loss", "time_capped"}`. The run directory is
+**read-only** — `retrain_spec` writes nothing (23.1 style: the app
+never mutates finished runs).
+
+**The run's seed (49.2.2).** Training uses the run's `summary["seed"]`,
+not a fresh one — a deterministic re-score: the same spec re-evaluated
+against the same run reproduces the same score, so "nudge
+hidden_dim, compare" is a controlled experiment with exactly one
+variable. An unknown task name (the reconstruction returns `None`)
+is a `ValueError` naming the run dir.
+
+**The panel (49.2.3).** The app's spec expander (49.4) preloads
+`best_spec.json` into a code editor; the **Re-evaluate** button parses
+the edited JSON (a parse error is a friendly caption, the run is
+untouched), calls `retrain_spec`, and renders the
+score/gen-score/gen-gap/train-seconds/final-loss table plus a
+`+delta` caption against this run's final score. One training pass per
+press — the only panel of the three that trains (and only when asked).
+
+**No CLI change (49.2.4).** App-only: there is no CLI flag for a
+one-off re-score of an arbitrary edited spec (the CLI's `eval` path
+still evaluates a saved model, 25.5). The core function is importable
+and testable without streamlit (23.1).
+
+### 49.3 Policy A/B (49.3.1–49.3.4)
+
+**The core (49.3.1).** `advanced.opposite_policy(name)` maps
+`bandit ↔ search`; anything else (`rl`, an unknown name, a non-string)
+raises `ValueError` — `rl` stays CLI-only by design (23.1), so A/B is
+the two policies the app can actually run.
+
+**The re-run (49.3.2).** The app rebuilds the run from the run's **own
+`run_config`** (37.1): `task_config.path`/`label`/`split_frac`, `seed`,
+`target`, the budget (`max_experiments`, `max_wall_seconds`,
+`max_train_seconds`), and the quality preset (`ci_blocks > 0` ⇒
+`v04`, else `legacy` — the 37.1.5 quality rule) — with the opposite
+policy, and runs a **normal** `DashboardRunner` (23.1) into the same
+runs dir: its own timestamped run dir, its own artifacts, its own
+registry entry (38.1). A missing data path or a non-bandit/search
+policy in the config is a `ValueError` (the panel shows a friendly
+caption; `rl` runs render the "not available" line instead, 49.3.1).
+
+**The overlay (49.3.3).** `plotting.svg_frontier_overlay(named,
+target=None, width=640, height=360)` draws two (or more) Pareto
+frontiers on **one shared axis**: `x` is the *actual* train seconds
+(not per-frontier index positions, so different-length frontiers align
+truthfully), `y` is score. One colored polyline + point circles (with
+`<title>`) per frontier from a fixed palette, an optional horizontal
+target line (only when inside the y-range), and a legend naming each
+frontier. Series are `(name, points)` pairs whose points carry the
+`summary["pareto_frontier"]` shape (`score` + `train_seconds`/
+`seconds`); empty/invalid series are skipped and all-invalid renders
+the standard empty header + message (the `svg_pareto` convention,
+21.2). Pure, valid XML, deterministic (G2) — the same hand-rolled
+SVG family as every other chart (no new dependency, SPEC.md 3).
+
+**The panel (49.3.4).** The app's A/B expander (49.4) shows which
+policy the run used, a warning that the button costs a **full budget**
+of training in this tab, and the **Re-run with the other policy**
+button; on success it renders the two-frontier overlay with the run's
+target line, a verdict caption naming the winner by final score,
+and the second run's run dir. The original run is never touched (49.2.1
+style).
+
+### 49.4 The app section (49.4.1–49.4.3)
+
+**Placement (49.4.1).** One `Advanced analysis` subheader in the
+result view — after the learning views (28) and before the artifacts
+(23.2) — with the three expanders (49.1.4, 49.2.3, 49.3.4). The
+restored view (23.2) renders the same section from the stored result:
+every panel derives from `res["run_dir"]` + the stored `res` dict, so
+no live state is needed.
+
+**Inert defaults (49.4.2).** Every action is behind a `st.button` with
+a unique `key=`; until pressed, the section is captions + inputs only
+— no training, no file reads beyond the run's own artifacts, no
+registry writes. The pre-49 result view renders unchanged (A1–A38 stay
+green), and the live loop (48.5) is untouched.
+
+**Errors (49.4.3).** Each panel fails locally and friendly: a bad
+objective, an invalid spec, a JSON parse error, or a missing run dir is
+an `st.error`/caption in that expander only — the other panels and the
+stored result are unaffected. No exception escapes to the page
+footer.
+
+### 49.5 Acceptance (A39)
+
+- **what_if_block (49.1)** — score/train-only objectives reproduce the
+  `what_if` (40.2) verdict and pool; a model objective evaluates
+  `model_actual` against the threshold (a missing actual fails it,
+  49.1.2); the combined verdict is the AND of the halves (one half
+  passing, the other failing ⇒ MISS); an empty objective set is a MISS
+  with both halves `None`; the dict is JSON-safe and the function is
+  deterministic (G2) (49.1.1–49.1.3).
+- **retrain_spec (49.2)** — against a tiny live run's dir, a valid
+  dict spec returns a finite, non-negative task score (bounded by the
+  task's own metric — accuracy tasks in [0, 100], cartpole-v1
+  mean_steps in [0, max_steps]) with gen_score/gen_gap/
+  train_seconds/final_loss and the run dir unmodified (no new files,
+  49.2.1); a bad dict raises `SpecError` (a `ValueError` subclass) and
+  an unknown task dir raises `ValueError` (49.2.1–49.2.2).
+- **opposite_policy (49.3.1)** — `bandit ↔ search`; `rl` and unknown
+  names raise `ValueError`.
+- **svg_frontier_overlay (49.3.3)** — two named frontiers render both
+  legends, one polyline per series, circles, and a valid-XML `<svg>`
+  block; the target line appears only when inside the y-range; an
+  all-invalid input renders the empty header + message; the output is
+  byte-identical across calls (G2).
+- **app (49.4)** — the result view contains the `Advanced analysis`
+  section with the three panels: the `what_if_block`/`retrain_spec`/
+  `opposite_policy`/`svg_frontier_overlay` calls wired in, the three
+  buttons with unique `key=` values, and the panel actions inert until
+  pressed (checked by scanning the app source; the live-loop tests of
+  A1–A38 are untouched).
+- **Regression** — A1–A38 stay green (the three panels are inert until
+  pressed; the `report --what-if` / `fit --gate` CLIs are unchanged);
+  the A25 index advances (34 → 35 acceptance rows; `defined ==
+  set(range(1, 40))`); the version stepped to `0.35.0` in both sources
+  (33.1) with the round assertions advanced (v0.35 ⇒ `0.35.0`, M38,
+  SPEC.md 49).
+
+### 49.6 Milestone
+
+**M38** — v0.35 advanced analysis: the interactive what-if re-gating
+over the two existing gate surfaces (49.1), the editable best-spec
+re-scoring with one controlled training pass (49.2), and the policy
+A/B re-run with the two-frontier overlay (49.3) — one inert-until-pressed
+"Advanced analysis" section in the result view (49.4) (A39).
+
+---
+
+## 50. Advanced: N-run comparison + one-click exports (v0.36)
+
+The loop's two remaining exploration gaps: comparing *more than two*
+runs (`compare`, 42.2, stops at exactly two — yet the app's Past-runs
+table, 38.4, grows without bound), and the GUI-for-exploration →
+CLI-for-CI bridge (the recipe is copy-paste text, 37.1.4; the `share`
+bundle, 47.4, exists only as a command). v0.36 closes both over
+**pure** core — `dashboard.py`, `plotting.py`, and a new `sharing.py`
+(23.1: the app stays a thin renderer; 3: no new dependencies):
+
+- **50.1** N-run comparison — `dashboard.diff_n_summaries` +
+  `dashboard.running_best_curve` + `plotting.svg_run_curves`;
+  `compare` accepts 2–3 runs; a Past-runs expander overlays the score
+  curves, recipes, and gate rows side by side;
+- **50.2** one-click exports — `sharing.py` (the 47.4 content contract
+  as pure functions; the CLI `share` is refactored onto it
+  byte-identically), and "Download run_config.json" + "Build share
+  bundle" buttons next to the copy-paste recipe.
+
+### 50.1 N-run comparison (50.1.1–50.1.5)
+
+**The N-diff (50.1.1).** `dashboard.diff_n_summaries(summaries)` — the
+N ≥ 2 generalisation of `diff_two_summaries` (38.4/42.2.2): per-run
+gate rows in input order (`run_id`, task, seed, policy, final score,
+target, met_target, experiments, wall seconds), the `best_spec` union
+table (only fields with ≥ 2 distinct values across the set; a field
+absent on one run is `None`; values compared by canonical JSON form so
+lists compare by content), plus `best_run_id` (highest finite final
+score, first on ties) and `score_span` (max − min, rounded to 4
+decimals; `None` with fewer than two finite scores). Fewer than two
+summaries, or a non-list input, is a `ValueError` (50.1.1). JSON-safe,
+pure, deterministic (G2): the same input list → the same dict.
+
+**The curve (50.1.2).** `dashboard.running_best_curve(rows)` — the
+running-best `holdout_score` over a run's scored log rows (the
+`plotting._score_rows` semantics: `kind` baseline/experiment with a
+finite `holdout_score`, in log order; point 0 = the scored baseline).
+`[]` when no row is scored. Pure, deterministic (G2).
+
+**The overlay (50.1.3).** `plotting.svg_run_curves(named, target=None,
+width=640, height=360)` — 2–N running-best score curves on one shared
+experiment-index axis (0..max−1, so different-length runs align by
+position). The score axis is *adaptive* (min..max across the set —
+cartpole-v1's `mean_steps` is [0, 500] and cross-task runs may be
+compared; unlike `svg_seed_curves`' fixed 0–100, 30.1). One
+`_FRONTIER_PALETTE` (49.3.3) polyline + point circles (with `<title>`)
++ a named legend entry per run, in input order; an optional horizontal
+target line (only when inside the y-range); empty/all-invalid input
+renders the standard empty header + message (the 21.2 convention).
+Valid XML, pure, deterministic (G2).
+
+**The CLI (50.1.4).** `compare` accepts **two or three** run dirs
+(`--run A --run B [--run C]`); one or ≥ 4 is rc 1 (the 42.2.3 error
+semantics — the pinned single-run error stays rc 1). The **two-run
+output is byte-identical to 42.2.3** (the A32 pin: the human lines and
+`--json` = the `diff_two_summaries` dict, both unchanged). Three runs
+prints the `diff_n_summaries` gate rows (one line per run: dir, score,
+target, gate PASS/MISS/—, experiments, wall seconds) + the spec-field
+table (or `best_spec: identical`), and `--json` prints the
+diff_n_summaries dict with each summary tagged with its run dir's name
+as `run_id` (the loaded summaries are copied first — never mutated).
+
+**The app (50.1.5).** The Past-runs section (38.4) gains a second
+expander, "Compare 2–3 runs — curves, recipes, gates", next to the
+existing two-run compare: a multiselect of registry run ids (pick ≥ 2;
+a pick of > 3 compares the first 3 with a caption), then — all
+derived, zero training — the score-curve overlay (50.1.3) via
+`st.markdown` (a run without scored rows is skipped in the overlay,
+50.1.3), the gate rows side by side (run, final, target, gate,
+experiments, wall s) as a dataframe, the recipes side by side (each
+run's `run_config.json` rendered with `fit_recipe`, 37.1.4; a missing
+or unparseable one shows an "n/a" caption), and the spec-field table
+(field × run columns from 50.1.1; the identical-specs caption, 38.4,
+when empty). A missing `summary.json` is a local warning (the other
+panels are skipped). Unique widget keys; the app never writes (23.1
+/ 49.2.1).
+
+### 50.2 One-click exports (50.2.1–50.2.3)
+
+**The share core (50.2.1).** New module `sharing.py` (stdlib only,
+import-cycle-free — it never imports `cli`):
+`share_payload(run_dir, report_html=None)` builds the 47.4.2 content
+contract as a name-sorted dict of bytes — the caller-injected
+`report_html` (47.4.2: always regenerated, never read from the run
+dir), `summary.json` (**required** — a missing one is a `ValueError`,
+47.4.4), `run_config.json` (37.1) and `best_spec.json` when present,
+and every flat `*.svg` (nested dirs excluded); `zip_bundle_bytes(payload)`
+writes the deterministic in-memory zip (47.4.3: fixed 1980-01-01
+`ZipInfo`, `ZIP_DEFLATED`, sorted entries); `write_share_zip(payload,
+out)` writes the same bytes to a file (creating parent dirs).
+`cli._cmd_share` is refactored onto these three — its contract is
+**unchanged** (47.4, A37: the entry listing, the `share   : <path>`
+line, the default `<run_dir>-share.zip`, the missing-summary rc 1 with
+the 47.4 stderr message, byte-identical zips), and the CLI's
+`report.html` is still produced by `_share_report_html` (47.4.2) and
+injected by the caller — the core stays renderer-free.
+
+**Download the recipe (50.2.2).** The result view, next to the
+copy-paste recipe (37.1.4), gains a "Download run_config.json"
+`st.download_button` serving the run dir's `run_config.json` bytes (the
+G3 canonical artifact, 37.1) — the `fit --from-run` (37.1) / `--config`
+(47.1) input as one click. A pre-v0.23 run without the artifact shows
+an "n/a" caption instead (never a dead button).
+
+**Build the share bundle (50.2.3).** Next to it, a "Build share
+bundle" button (unique `key=`, inert until pressed — 49.4.2 style):
+on press it builds the 50.2.1 bundle **in memory** (`report.html` via
+the CLI's `_share_report_html`, 47.4.2), stores the `(zip bytes,
+entry listing)` in `st.session_state` keyed by the run dir, and
+renders the entry table + a "Download share bundle (.zip)" download
+button (default name `<run_id>-share.zip`, 47.4.2). Errors stay local
+to the block (49.4.3); the app writes **nothing** into the runs tree
+(23.1 / 49.2.1) — the bundle is download bytes; the CLI `share`
+(47.4) remains the file-producing surface.
+
+### 50.3 House rules (50.3.1–50.3.4)
+
+- **50.3.1** No new dependencies (3): `zipfile`/`io` are stdlib; the
+  app reuses existing streamlit elements (`multiselect`,
+  `download_button`).
+- **50.3.2** Core is streamlit-free (23.1): `sharing.py`, the two
+  `dashboard` additions, and `svg_run_curves` all import and test
+  without streamlit / an app session.
+- **50.3.3** Pins preserved: the A32 two-run `compare` output (50.1.4),
+  the A37 `share` contract (50.2.1), and `diff_two_summaries` (38.4)
+  are all unchanged; A1–A39 stay green.
+- **50.3.4** Determinism (G2): same inputs → same dicts / bytes / SVG;
+  the app panels derive from finished-run artifacts only (zero
+  training).
+
+### 50.4 Acceptance (A40)
+
+- **diff_n_summaries (50.1.1)** — three summaries (distinct scores,
+  targets, and specs carrying a shared-identical field, a two-sided
+different field, and a single-sided field) return the gate rows in
+input order, the spec-field union (only the ≥ 2-distinct fields; the
+single-sided field is `None` on the other runs), `best_run_id` = the
+highest scorer, and `score_span` = max − min; fewer than two
+summaries (and a non-list input) raise `ValueError`; the dict is
+JSON-safe and deterministic. Against the same two summaries it agrees
+with `diff_two_summaries` on the differing-field set and the score
+pair (50.1.1).
+- **running_best_curve (50.1.2)** — baseline + accepted + rejected +
+  non-scored rows yield the running max in log order (a rejected dip
+does not lower the curve); no scored rows yield `[]`.
+- **svg_run_curves (50.1.3)** — three named curves render one
+  `<polyline>` + one named legend entry per run and parse as XML; the
+target line appears when the target is inside the score range and not
+when it is far outside; the empty input renders the empty header +
+message; the SVG is byte-deterministic (G2).
+- **compare 2–3 (50.1.4)** — three fake run dirs give rc 0 with one
+  gate row per run dir, the spec-field table (or the identical caption),
+and `--json` equal to the `diff_n_summaries` dict (run dirs tagged as
+`run_id`); the pinned two-run output (A32: `delta   : 4.5 (B - A)`,
+`64 -> 128`) is unchanged; one and four run dirs are rc 1.
+- **sharing core (50.2.1)** — a fake run dir (summary + run_config +
+  best_spec + two flat SVGs + a nested-svg dir) yields the name-sorted
+payload (the nested dir excluded, the injected `report.html`
+included, a missing optional omitted); a missing `summary.json`
+raises `ValueError`; `zip_bundle_bytes` is byte-deterministic, opens
+as a zip with the sorted namelist, and `write_share_zip` writes the
+identical bytes; the CLI `share` zip of the same dir equals
+`zip_bundle_bytes(share_payload(dir, _share_report_html(dir)))` (the
+A37 surfaces unchanged, 47.4).
+- **app (50.1.5 / 50.2.2 / 50.2.3)** — after a finished app run, the
+  result view offers "Download run_config.json" and "Build share
+bundle"; pressing the latter (no exception) reveals the entry table
+(including `report.html`) + the zip download button; with ≥ 2
+registered runs the Past-runs expander renders the run-curve overlay
+(one named series per selected run), the gate-row table, and the
+per-run recipes; the app source wires `diff_n_summaries` /
+`running_best_curve` / `svg_run_curves` (50.1.5), and the export
+block sits between the copy-paste recipe and the spec-space caption
+(50.2.2 / 50.2.3).
+
+### 50.5 Milestone (M39)
+
+**M39** — v0.36 advanced: the N-run comparison over 2–3 runs (curve
+overlay + recipes + gate rows side by side, `compare` generalised with
+the pinned two-run output unchanged — 50.1) and the one-click exports
+("Download run_config.json" + "Build share bundle" over the new
+`sharing` core, the CLI `share` refactored byte-identically — 50.2)
+(A40).

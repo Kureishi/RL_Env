@@ -16,7 +16,29 @@ from pathlib import Path
 import streamlit as st
 
 from autorefine import __version__
-from autorefine.dashboard import DashboardRunner, diff_two_summaries, ucb_trace
+from autorefine.dashboard import (
+    DashboardRunner,
+    diff_n_summaries,  # N-run compare (SPEC.md 50.1.1, v0.36)
+    diff_two_summaries,
+    running_best_curve,  # N-run curves (SPEC.md 50.1.2, v0.36)
+    ucb_trace,
+)
+# SPEC.md 48 (v0.34): the beginner onboarding core (48.1-48.3) and the
+# plain-English narration core (48.4/48.5) — the app is a thin renderer.
+from autorefine.onboarding import (
+    ALL_KNOBS,
+    KNOB_GLOSSARY,
+    preset_choices,
+    preset_flags,
+    preset_summary,
+)
+# SPEC.md 49 (v0.35): the advanced analysis core — the app is a thin
+# renderer over these pure functions (49.4).
+from autorefine.advanced import opposite_policy, retrain_spec
+from autorefine.gate import Objective, model_size
+from autorefine.runconfig import RunConfig, fit_recipe  # 50.1.5/50.2 (v0.36)
+from autorefine.narrate import narrate_baseline, narrate_run, narrate_step
+from autorefine.simulate import what_if_block
 # SPEC.md 42.2.2 (v0.28): `diff_two_summaries` moved to core (the
 # `autorefine compare` CLI prints it); the app keeps the name importable
 # (SPEC.md 38.4 unchanged) — this *is* `dashboard.diff_two_summaries`.
@@ -24,8 +46,10 @@ from autorefine.plotting import (
     svg_action_probabilities,  # noqa: F401 (D2 view, SPEC.md 29.2)
     svg_audio_waveform,
     svg_field_value_matrix,  # V2 view (SPEC.md 30.2)
+    svg_frontier_overlay,  # A/B view (SPEC.md 49.3.3)
     svg_loss_curves,
     svg_mutation_timeline,
+    svg_run_curves,  # N-run overlay (SPEC.md 50.1.3, v0.36)
     svg_score_gap_scatter,
     svg_score_strip,
     svg_seed_curves,  # V1 view (SPEC.md 30.1)
@@ -88,6 +112,71 @@ def _render_past_runs(runs_dir: str) -> None:
             st.caption("`best_spec` is identical — the runs differ only in "
                        "non-spec settings (compare the recipes: each run's "
                        "`run_config.json`).")
+
+    # SPEC.md 50.1.5 (v0.36): the N-run compare — generalises the two-run
+    # diff above (38.4) to 2-3 runs: overlaid running-best curves (50.1.3),
+    # the per-run gate rows + canonical recipes (50.1.1/37.1), and the
+    # best_spec union table. Inert data rendering (50.3.1).
+    with st.expander("Compare 2–3 runs — curves, recipes, gates (SPEC.md 50.1)"):
+        sel = st.multiselect("Runs (pick 2–3)", ids, key="nrun_sel")
+        if len(sel) > 3:
+            st.caption("Comparing the first three selected runs (at most "
+                       "three, SPEC.md 50.1.5).")
+            sel = sel[:3]
+        if len(sel) < 2:
+            st.caption("Pick two or three runs to compare (SPEC.md 50.1.5).")
+            return
+        tagged = []
+        for rid in sel:  # 50.1.4 pattern: tag run_id = dir name (summaries
+            p = Path(runs_dir) / rid / "summary.json"  # don't carry it, 50.1.1)
+            if not p.is_file():
+                st.warning(f"run {rid!r} has no summary.json — nothing to "
+                           f"compare (SPEC.md 50.1.5).")
+                return
+            s = json.loads(p.read_text(encoding="utf-8"))
+            s["run_id"] = rid
+            tagged.append(s)
+        d = diff_n_summaries(tagged)
+        # curves (50.1.2): each run's scored log rows; a missing
+        # experiments.jsonl yields [] (the run drops out of the overlay)
+        named = []
+        for rid in sel:
+            ep = Path(runs_dir) / rid / "experiments.jsonl"
+            rows = ([json.loads(l) for l in
+                     ep.read_text(encoding="utf-8").splitlines()
+                     if l.strip()] if ep.is_file() else [])
+            named.append((rid, running_best_curve(rows)))
+        st.markdown(svg_run_curves(named), unsafe_allow_html=True)
+        st.dataframe([
+            {"run": r["run_id"], "final": r["final_score"],
+             "target": r["target"],
+             "gate": {True: "PASS", False: "MISS"}.get(r["met_target"], "—"),
+             "exps": r["experiments_run"], "wall_s": r["wall_seconds"]}
+            for r in d["runs"]
+        ], width="stretch")
+        if d["best_run_id"] is not None:
+            st.caption(f"best: {d['best_run_id']} "
+                       f"(score span {d['score_span']}) (SPEC.md 50.1.1)")
+        for rid in sel:  # the canonical recipe per run (37.1.4)
+            cp = Path(runs_dir) / rid / "run_config.json"
+            try:
+                cfg = RunConfig.from_dict(
+                    json.loads(cp.read_text(encoding="utf-8")))
+                recipe = " ".join(fit_recipe(cfg))
+            except Exception:
+                recipe = "n/a (no run_config.json — pre-v0.23 run)"
+            st.caption(f"recipe — {rid}")
+            st.code(recipe)
+        if d["spec_fields"]:
+            st.dataframe([
+                {"field": f["field"],
+                 **{f"run {i + 1}": _spec_v(v)
+                    for i, v in enumerate(f["values"])}}
+                for f in d["spec_fields"]
+            ], width="stretch")
+        else:
+            st.caption("`best_spec` is identical across the runs — the runs "
+                       "differ only in non-spec settings (see the recipes).")
 
 
 def _launcher_runs_dir() -> str:
@@ -216,8 +305,13 @@ def _preview(csv_path: str) -> None:
 
 def _run(csv_path: str, label: str, target: float, policy: str, seed: int,
          experiments: int, max_train: float, runs_dir: str,
-         quality: str = "v04") -> None:
-    """The live loop: one placeholder table + chart updated per step."""
+         quality: str = "v04", narrate: bool = False) -> None:
+    """The live loop: one placeholder table + chart updated per step.
+
+    SPEC.md 48.5 (v0.34): ``narrate`` (default ``False``) swaps the terse
+    per-step caption for a plain-English line; off, the loop renders
+    byte-identically to pre-48.5 (48.5.3).
+    """
     runner = DashboardRunner(
         csv_path=csv_path, label=label or None, target=target, policy=policy,
         seed=seed, experiments=experiments, max_train_seconds=max_train,
@@ -236,6 +330,8 @@ def _run(csv_path: str, label: str, target: float, policy: str, seed: int,
         f"· baseline **{info['baseline_score']:.2f}** vs target **{info['target']:.1f}** "
         f"· {info['policy']}, seed {info['seed']}"
     )
+    if narrate:  # SPEC.md 48.5.2: the friendly first line (off by default)
+        st.caption(narrate_baseline(info))
 
     import pandas as pd  # a streamlit dependency, app-only
 
@@ -251,6 +347,7 @@ def _run(csv_path: str, label: str, target: float, policy: str, seed: int,
     chart = st.empty()
     bar = st.progress(0.0, text="starting…")
     note = st.empty()
+    narr = st.empty() if narrate else None  # SPEC.md 48.5.1 placeholder
     # decision-view placeholders, live (SPEC.md 26.5): D1 win-rate bars,
     # V2 field x value matrix, D3 mutation timeline, D4 UCB trace (bandit only)
     vbars = st.empty()
@@ -313,21 +410,26 @@ def _run(csv_path: str, label: str, target: float, policy: str, seed: int,
             vucb.line_chart(
                 pd.DataFrame({f: trace[f] for f in sorted(trace)}
                              ).astype("float64"))
-        # per-step caption, including the final step (SPEC.md 23.2) — rendered
-        # before the break so the last row is not skipped; D2 spec-diff chips
-        # (SPEC.md 26.2) replace the plain field list
-        score_txt = (f"score {u['candidate_score']:.2f}"
-                     if isinstance(u["candidate_score"], (int, float)) else "duplicate")
-        kind = ("dup step (free, R3)" if is_dup
-                else f"experiment {spent} of {budget}")
-        diff_txt = " · ".join(
-            f"{d['field']}: {_spec_v(d['old'])} → {_spec_v(d['new'])}"
-            for d in u.get("spec_diff") or []
-        ) or (", ".join(u["mutation"]) or "-")
-        note.caption(
-            f"{kind}: {'accepted +' if u['accepted'] else 'rejected '} "
-            f"{score_txt} · {diff_txt}"
-        )
+        if narr is not None:
+            # SPEC.md 48.5.1: the plain-English line replaces the terse
+            # caption (the table + charts above still show every detail)
+            narr.caption(narrate_step(u))
+        else:
+            # per-step caption, including the final step (SPEC.md 23.2) —
+            # rendered before the break so the last row is not skipped; D2
+            # spec-diff chips (SPEC.md 26.2) replace the plain field list
+            score_txt = (f"score {u['candidate_score']:.2f}"
+                         if isinstance(u["candidate_score"], (int, float)) else "duplicate")
+            kind = ("dup step (free, R3)" if is_dup
+                    else f"experiment {spent} of {budget}")
+            diff_txt = " · ".join(
+                f"{d['field']}: {_spec_v(d['old'])} → {_spec_v(d['new'])}"
+                for d in u.get("spec_diff") or []
+            ) or (", ".join(u["mutation"]) or "-")
+            note.caption(
+                f"{kind}: {'accepted +' if u['accepted'] else 'rejected '} "
+                f"{score_txt} · {diff_txt}"
+            )
         if u["done"]:
             break
 
@@ -358,6 +460,10 @@ def _render_result(res: dict) -> None:
             f"{res['target']:.1f} — raise the budget (experiments / train "
             f"seconds) or extend the spec space (README 'Extending')"
         )
+    # SPEC.md 48.4 (v0.34): the plain-English "what happened" narrative —
+    # always shown here (the live narrate toggle, 48.5, is separate); pure
+    # over the stored result, so the restored view renders the same block.
+    st.markdown(narrate_run(res))
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("baseline → final",
               f"{res['baseline_score']:.2f}",
@@ -385,6 +491,41 @@ def _render_result(res: dict) -> None:
             "actual": ("n/a" if r["actual"] is None else round(r["actual"], 6)),
             "result": "PASS" if r["pass"] else "MISS",
         } for r in gate["objectives"]], width="stretch")
+
+    # SPEC.md 50.2 (v0.36): one-click exports — the GUI-for-exploration ->
+    # CLI-for-CI bridge, next to the copy-paste recipe above. The app writes
+    # nothing into the runs tree (23.1/49.2.1): the share bundle is
+    # in-memory + a download button; `autorefine share` stays the
+    # file-producing surface (47.4).
+    rd = Path(res["run_dir"])
+    rc_path = rd / "run_config.json"
+    if rc_path.is_file():
+        st.download_button("Download run_config.json",
+                           data=rc_path.read_bytes(),  # 50.2.2
+                           file_name="run_config.json",
+                           mime="application/json", key="dl_runconfig")
+    else:
+        st.caption("no run_config.json in this run dir — nothing to "
+                   "download (pre-v0.23 run, SPEC.md 50.2.2)")
+    if st.button("Build share bundle", key="build_share"):  # 50.2.3
+        try:
+            from autorefine.cli import _share_report_html  # 47.4.2: cli
+            from autorefine.sharing import (  # owns the HTML regeneration
+                share_payload, zip_bundle_bytes)
+            payload = share_payload(rd, _share_report_html(rd))
+            bundle = zip_bundle_bytes(payload)
+            st.session_state["share_bundle_" + str(rd)] = (
+                bundle, [[n, len(payload[n])] for n in sorted(payload)])
+        except Exception as exc:  # local, friendly (50.2.3)
+            st.error(f"share bundle failed: {exc} (SPEC.md 50.2.3)")
+    stored = st.session_state.get("share_bundle_" + str(rd))
+    if stored:
+        bundle, listing = stored
+        st.dataframe({"entry": [r[0] for r in listing],
+                      "bytes": [r[1] for r in listing]}, width="stretch")
+        st.download_button("Download share bundle (.zip)", data=bundle,
+                           file_name=f"{rd.name}-share.zip",
+                           mime="application/zip", key="dl_share")
 
     # SPEC.md 36.2 (v0.22, G2): the app's spec surface reads the field
     # registry — one table for the field list, not a per-surface literal
@@ -448,6 +589,11 @@ def _render_result(res: dict) -> None:
         if res.get("arch_svg"):  # C4 (SPEC.md 28.4): what we ended up building
             st.markdown(res["arch_svg"], unsafe_allow_html=True)
 
+    # SPEC.md 49 (v0.35): the advanced analysis section — three panels,
+    # every action behind a button (inert until pressed, 49.4.2); shared
+    # by the live and restored views (49.4.1).
+    _render_advanced(res)
+
     st.subheader("Artifacts")
     c1, c2, c3, c4 = st.columns(4)
     c1.download_button("report.html", res["report_html"], mime="text/html",
@@ -462,6 +608,202 @@ def _render_result(res: dict) -> None:
         f"run dir: `{res['run_dir']}` — or CLI: "
         f"`python -m autorefine report --run {res['run_dir']} --html`"
     )
+
+
+def _load_entries(run_dir: str) -> list:
+    """SPEC.md 49.1.4 (v0.35): the run's experiments.jsonl rows — the
+    what-if pool (40.2). A missing file is a friendly error, not a page
+    crash (49.4.3)."""
+    p = Path(run_dir) / "experiments.jsonl"
+    if not p.is_file():
+        raise ValueError(f"no experiments.jsonl in {run_dir} — not a finished run")
+    return [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines()
+            if l.strip()]
+
+
+def _ab_rerun(res: dict) -> dict:
+    """SPEC.md 49.3.2 (v0.35): the policy A/B re-run — the run's own
+    run_config (37.1: task path/label/split, seed, target, budget, the
+    ci_blocks > 0 ⇒ v04 quality rule) with the opposite policy. The
+    second run is a *normal* run (23.1): its own timestamped run dir,
+    artifacts, and registry entry (38.1), in the same runs dir.
+    A missing data path or a non-bandit/search policy is a ValueError
+    (49.3.1/49.3.2)."""
+    cfg = (res.get("summary") or {}).get("run_config") or {}
+    tc = cfg.get("task_config") or {}
+    path = tc.get("path")
+    if not path:
+        raise ValueError("the run's data path is not in its run_config — "
+                         "cannot re-run (SPEC.md 49.3.2)")
+    policy = opposite_policy(cfg.get("policy"))  # ValueError: rl/unknown
+    runner = DashboardRunner(
+        csv_path=path,
+        label=tc.get("label"),
+        split_frac=float(tc.get("split_frac", 0.2)),
+        target=float(cfg.get("target", res.get("target", 95.0))),
+        policy=policy,
+        seed=int(cfg.get("seed", 7)),
+        experiments=int(cfg.get("max_experiments", 30)),
+        max_seconds=float(cfg.get("max_wall_seconds", 900.0)),
+        max_train_seconds=float(cfg.get("max_train_seconds", 30.0)),
+        runs_dir=str(Path(res["run_dir"]).parent),
+        search_quality="v04" if int(cfg.get("ci_blocks", 0)) > 0 else "legacy",
+    )
+    runner.start()
+    return runner.run_all()
+
+
+def _render_advanced(res: dict) -> None:
+    """SPEC.md 49.4 (v0.35): the "Advanced analysis" section of the result
+    view — the three interactive panels (49.1.4 what-if re-gating,
+    49.2.3 editable best-spec re-scoring, 49.3.4 policy A/B). Every
+    action is behind a button with a unique key= (49.4.2); until pressed,
+    the section is captions + inputs only. Each panel fails locally and
+    friendly (49.4.3). Shared by the live and restored views (49.4.1).
+    """
+    st.subheader("Advanced analysis")
+    run_dir = res.get("run_dir")
+
+    # --- 49.1.4: interactive what-if re-gating (zero training) -------------
+    with st.expander("What-if re-gating — move the bars, zero training (49.1)"):
+        st.caption(
+            "Re-score this run's logged history against a new objective set — "
+            "the app form of `report --what-if` (SPEC.md 40.2). The `model` "
+            "objective is evaluated on the final best model's artifact "
+            "(SPEC.md 49.1.2). Nothing is trained or written.")
+        c1, c2 = st.columns(2)
+        wi_target = c1.number_input(
+            "score >= target", value=float(res.get("target", 95.0)),
+            min_value=0.0, step=1.0, key="wi_target")
+        wi_train = c2.number_input(
+            "train <= seconds", value=30.0, min_value=0.1, step=5.0,
+            key="wi_train")
+        wi_model = st.number_input(
+            "model <= values", value=100000, min_value=1, step=10000,
+            key="wi_model")
+        cb_score = st.checkbox("score >= target", value=True, key="wi_cb_score")
+        cb_train = st.checkbox("train <= seconds", value=True, key="wi_cb_train")
+        cb_model = st.checkbox(
+            "model <= values (final artifact)", value=False, key="wi_cb_model")
+        if st.button("Re-score the logged history", key="wi_button",
+                     type="primary"):
+            objectives = []
+            if cb_score:
+                objectives.append(Objective("score", ">=", float(wi_target)))
+            if cb_train:
+                objectives.append(Objective("train", "<=", float(wi_train)))
+            if cb_model:
+                objectives.append(Objective("model", "<=", float(wi_model)))
+            try:
+                entries = _load_entries(run_dir)
+            except (ValueError, OSError) as exc:
+                st.error(str(exc))
+                entries = None
+            if entries is not None:
+                model_actual = None
+                if cb_model:
+                    try:  # 49.1.2: the artifact size; failure -> honest MISS
+                        model_actual = int(model_size(Path(run_dir) / "best_model.npz"))
+                    except Exception:
+                        model_actual = None
+                block = what_if_block(entries, objectives, model_actual)
+                if block["pass"]:
+                    st.success(
+                        "PASS — under this bar the run's logged history still "
+                        "contains a passing candidate (SPEC.md 49.1.1).")
+                else:
+                    st.error(
+                        "MISS — no logged candidate meets every selected "
+                        "objective (SPEC.md 49.1.3).")
+                wf = block.get("what_if")
+                if wf:
+                    final = wf.get("final") or {}
+                    st.dataframe([{
+                        "scored pool": wf["pool"],
+                        "passing": wf["passing"],
+                        "counterfactual final": final.get("cand", "—"),
+                        "final score": final.get("score", "—"),
+                        "final spec": (str(final.get("spec_hash") or "")[:8] or "—"),
+                    }])
+                mr = block.get("model")
+                if mr:
+                    st.dataframe([{
+                        "objective": r["name"],
+                        "op": r["op"],
+                        "threshold": r["threshold"],
+                        "actual": "n/a" if r["actual"] is None else r["actual"],
+                        "result": "PASS" if r["pass"] else "MISS",
+                    } for r in mr["objectives"]])
+
+    # --- 49.2.3: editable best-spec re-scoring (one training pass) ---------
+    with st.expander("Edit the best spec — one extra training pass (49.2)"):
+        st.caption(
+            "Nudge a field (hidden width, optimizer, knn_k, …) and re-evaluate "
+            "with this run's own seed — a controlled comparison with exactly "
+            "one variable (SPEC.md 49.2.2). One training pass per press; "
+            "the run dir is never written (49.2.1).")
+        spec_text = st.text_area(
+            "best spec", json.dumps(res.get("best_spec") or {}, indent=2),
+            height=240, key="spec_editor")
+        if st.button("Re-evaluate this spec", key="spec_button", type="primary"):
+            try:
+                spec = json.loads(spec_text)
+            except json.JSONDecodeError as exc:
+                st.error(f"not valid JSON: {exc} (SPEC.md 49.2.3)")
+            else:
+                try:
+                    out = retrain_spec(run_dir, spec)
+                except ValueError as exc:  # SpecError is a ValueError
+                    st.error(str(exc))
+                else:
+                    st.dataframe([{
+                        "score": round(out["score"], 4),
+                        "gen score": round(out["gen_score"], 4),
+                        "gen gap": round(out["gen_gap"], 4),
+                        "train s": round(out["train_seconds"], 3),
+                        "final loss": round(out["final_loss"], 6),
+                        "time capped": out["time_capped"],
+                    }])
+                    final = res.get("final_best_score")
+                    if isinstance(final, (int, float)):
+                        st.caption(
+                            f"vs this run's final {float(final):.2f}: "
+                            f"{out['score'] - float(final):+.2f} (SPEC.md 49.2.3)")
+
+    # --- 49.3.4: policy A/B (one full budget of the other policy) ----------
+    with st.expander("Policy A/B — re-run with the other policy (49.3)"):
+        cur = ((res.get("summary") or {}).get("run_config") or {}).get("policy")
+        if cur not in ("bandit", "search"):
+            st.caption(
+                "A/B is available for bandit and search runs only — `rl` "
+                "stays CLI-only (SPEC.md 23.1/49.3.1).")
+        else:
+            other = opposite_policy(cur)
+            st.caption(
+                f"This run used **{cur}**. Pressing the button re-runs the "
+                f"run's *exact* budget (its own run_config, SPEC.md 49.3.2) "
+                f"with **{other}** — one full training budget, in this tab; "
+                f"the second run gets its own run dir + registry entry.")
+            if st.button(f"Re-run with {other}", key="ab_button", type="primary"):
+                with st.spinner(f"running the {other} policy… (a full budget)"):
+                    try:
+                        res2 = _ab_rerun(res)
+                    except ValueError as exc:
+                        st.error(str(exc))
+                        res2 = None
+                if res2 is not None:
+                    a_pts = (res.get("summary") or {}).get("pareto_frontier") or []
+                    b_pts = (res2.get("summary") or {}).get("pareto_frontier") or []
+                    st.markdown(svg_frontier_overlay(
+                        [(cur, a_pts), (other, b_pts)], target=res.get("target")),
+                        unsafe_allow_html=True)
+                    fa, fb = res.get("final_best_score"), res2.get("final_best_score")
+                    if isinstance(fa, (int, float)) and isinstance(fb, (int, float)):
+                        winner = cur if fa >= fb else other
+                        st.caption(
+                            f"final scores — {cur}: {fa:.2f} vs {other}: {fb:.2f} "
+                            f"→ **{winner}** wins by {abs(fa - fb):.2f}")
+                    st.caption(f"the {other} run: `{res2['run_dir']}` (SPEC.md 49.3.4)")
 
 
 def _render_gallery(items: list[dict]) -> None:
@@ -604,30 +946,73 @@ def main() -> None:
     )
 
     side = st.sidebar
+    # SPEC.md 48 (v0.34): the guided two-step setup (48.1) — presets (48.3),
+    # the glossary (48.2), the beginner knobs (data/label/target) top-level,
+    # the advanced knobs under a closed "Advanced" expander (48.1.2), and the
+    # opt-in narrate toggle (48.5). Defaults are unchanged: no preset
+    # selected renders the pre-v0.34 sidebar byte-identically, and narrate
+    # off renders the pre-48.5 loop byte-identically (48.5.3). A preset is
+    # applied when the selection CHANGES (48.3.3): it fills the knobs it
+    # defines — including the Advanced ones — and a later re-selection of
+    # the same preset does not clobber the user's manual edits.
+    preset_pairs = preset_choices()  # 48.3.2: stable (name, label) order
+    preset_labels = ["(none)"] + [lab for _name, lab in preset_pairs]
+    label_to_name = {lab: name for name, lab in preset_pairs}
+    pi = side.selectbox("Preset (optional)", preset_labels, index=0,
+                        key="preset",
+                        help="A one-click bundle: picking it fills in the "
+                             "settings it defines — feel free to override "
+                             "any of them afterwards (SPEC.md 48.3).")
+    if pi != "(none)":  # "(none)" applies nothing; selectbox returns the label
+        preset_name = label_to_name[pi]
+        if st.session_state.get("_preset_applied") != preset_name:  # 48.3.3
+            # Apply on selection change (before this run's widgets are
+            # instantiated, which Streamlit allows); re-selecting the same
+            # preset keeps the user's manual edits.
+            for knob, value in preset_flags(preset_name).items():
+                st.session_state[knob] = value
+            st.session_state["_preset_applied"] = preset_name
+        st.caption(preset_summary(preset_name))
+
+    with side.expander("What each setting does", expanded=False):  # 48.2
+        for knob in ALL_KNOBS:
+            st.markdown(f"**{knob}** — {KNOB_GLOSSARY[knob]}")
+
     side.header("Data")
-    upload = side.file_uploader("CSV file (header + rows)", type=["csv"], key="csv_upload")
+    upload = side.file_uploader("CSV file (header + rows)", type=["csv"],
+                                key="csv_upload", help=KNOB_GLOSSARY["data"])
     csv_path = side.text_input("…or a CSV path / a directory of labelled "
-                               "images or audio (v0.10)", value="", key="csv_path")
-    label = side.text_input("Label column (blank = auto-detect)", value="", key="label")
+                               "images or audio (v0.10)", value="", key="csv_path",
+                               help=KNOB_GLOSSARY["data"])
+    label = side.text_input("Label column (blank = auto-detect)", value="",
+                            key="label", help=KNOB_GLOSSARY["label"])
     target = side.number_input("Target score (0–100)", min_value=0.0, max_value=100.0,
-                               value=95.0, step=0.5, key="target")
-    side.header("Search")
-    policy = side.selectbox("Policy (improver)", ("bandit", "search"),
-                            index=0, key="policy",
-                            help="UCB field-bandit (default) or v1 search; "
-                                 "rl is CLI-only (SPEC.md 23.1)")
-    seed = side.number_input("Seed", min_value=0, max_value=1_000_000, value=7,
-                             key="seed")
-    experiments = side.number_input("Experiments (budget)", min_value=1,
-                                    max_value=500, value=30, step=1, key="experiments")
-    max_train = side.number_input("Max train seconds per spec", min_value=1.0,
-                                  max_value=600.0, value=30.0, step=5.0,
-                                  key="max_train")
-    quality = side.selectbox("Search quality", ("v04", "legacy"), index=0,
-                             key="quality",
-                             help="v0.4 CI/efficiency acceptance (default, the"
-                                 " CLI rule) or the legacy v0.3 strict-score rule")
-    runs_dir = side.text_input("Runs dir", value=_launcher_runs_dir(), key="runs_dir")
+                               value=95.0, step=0.5, key="target",
+                               help=KNOB_GLOSSARY["target"])
+
+    with side.expander("Advanced", expanded=False):  # 48.1.2
+        policy = side.selectbox("Policy (improver)", ("bandit", "search"),
+                                index=0, key="policy",
+                                help=KNOB_GLOSSARY["policy"])
+        seed = side.number_input("Seed", min_value=0, max_value=1_000_000, value=7,
+                                 key="seed", help=KNOB_GLOSSARY["seed"])
+        experiments = side.number_input("Experiments (budget)", min_value=1,
+                                        max_value=500, value=30, step=1,
+                                        key="experiments",
+                                        help=KNOB_GLOSSARY["experiments"])
+        max_train = side.number_input("Max train seconds per spec", min_value=1.0,
+                                      max_value=600.0, value=30.0, step=5.0,
+                                      key="max_train",
+                                      help=KNOB_GLOSSARY["max_train"])
+        quality = side.selectbox("Search quality", ("v04", "legacy"), index=0,
+                                 key="quality", help=KNOB_GLOSSARY["quality"])
+        runs_dir = side.text_input("Runs dir", value=_launcher_runs_dir(),
+                                   key="runs_dir", help=KNOB_GLOSSARY["runs_dir"])
+
+    narrate = side.checkbox("Narrate the loop (plain English)", value=False,
+                            key="narrate",
+                            help="A friendly line per experiment instead of the "
+                                 "terse caption (off by default, SPEC.md 48.5).")
 
     path = _resolve_csv(upload, csv_path)
     result = st.session_state.get("result")
@@ -649,7 +1034,7 @@ def main() -> None:
         else:
             _run(path, label.strip() or None, float(target), policy, int(seed),
                  int(experiments), float(max_train), runs_dir.strip() or "runs",
-                 quality)
+                 quality, narrate=narrate)
     elif result is not None:
         # widget-triggered re-run (download click, sidebar change) — the
         # last completed result stays on screen (SPEC.md 23.2 persistence).

@@ -22,6 +22,9 @@ _BASELINE = "#c2410c"
 _ACCEPTED = "#15803d"
 _REJECTED = "#6b7280"
 _SCORED_REJ = "#b91c1c"  # timeline: rejected with a score (SPEC.md 26.3)
+_FRONTIER_PALETTE = (  # 49.3.3: the fixed A/B overlay palette (cycling)
+    "#1a66c2", "#c2410c", "#15803d", "#7c3aed", "#b91c1c", "#0e7490",
+)
 _LADDER = "#7c3aed"  # curriculum step-up marker (SPEC.md 27.3)
 _BAND = "#93c5fd"  # CI band on the score curve (SPEC.md 30.4)
 # V3 (SPEC.md 30.3): the 8-color class palette (cycling for k > 8)
@@ -765,6 +768,163 @@ def svg_pareto(points, width: int = 640, height: int = 360) -> str:
     parts = _svg_header(width, height, "pareto frontier")
     parts += _svg_axes(L, T, pw, ph, lo, hi, tlo, thi, "training seconds")
     _svg_plot(parts, xs, ys, colors, titles)
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def svg_frontier_overlay(named, target=None, width: int = 640,
+                         height: int = 360) -> str:
+    """SPEC.md 49.3.3 (v0.35, policy A/B): two (or more) Pareto frontiers
+    on one shared axis — the policy A/B overlay.
+
+    ``named`` is a list of ``(name, points)`` pairs whose points carry
+    the ``summary["pareto_frontier"]`` shape (``score`` +
+    ``train_seconds``/``seconds``). ``x`` is the *actual* train seconds
+    (not per-frontier index positions, so different-length frontiers
+    align truthfully); ``y`` is score. One colored polyline + point
+    circles (with ``<title>``) per frontier from ``_FRONTIER_PALETTE``;
+    an optional horizontal target line (only when inside the y-range);
+    a legend naming each frontier. Empty/invalid series are skipped and
+    all-invalid renders the standard empty header + message (the
+    ``svg_pareto`` convention, 21.2). Pure, valid XML, deterministic
+    (G2).
+    """
+    series: list[tuple[str, list[tuple[float, float]]]] = []
+    for item in named or []:
+        try:
+            name, pts = item[0], item[1]
+        except (TypeError, IndexError, KeyError):
+            continue  # not a (name, points) pair — skip (49.3.3)
+        pts = _pareto_points(pts)
+        if pts:
+            series.append((str(name), pts))
+    if not series:
+        parts = _svg_header(width, height, "frontier overlay (empty)")
+        parts.append(f'<text x="{width // 2}" y="{height // 2}" text-anchor="middle" '
+                     f'font-size="13" fill="{_AXIS}">no frontier points to overlay</text>')
+        parts.append("</svg>")
+        return "\n".join(parts)
+    allpts = [p for _name, pts in series for p in pts]
+    lo, hi = min(p[0] for p in allpts), max(p[0] for p in allpts)
+    if hi - lo < 1e-9:
+        hi = lo + 1.0
+    tlo, thi = min(p[1] for p in allpts), max(p[1] for p in allpts)
+    if thi - tlo < 1e-9:
+        thi = tlo + 1e-3
+    L, T, R, B = 72.0, 28.0, 24.0, 44.0
+    pw, ph = width - L - R, height - T - B
+
+    def x(t: float) -> float:
+        return L + pw * (t - tlo) / (thi - tlo)
+
+    def y(s: float) -> float:
+        return T + ph * (1.0 - (s - lo) / (hi - lo))
+
+    parts = _svg_header(width, height, "pareto frontier overlay (policy A/B)")
+    parts += _svg_axes(L, T, pw, ph, lo, hi, tlo, thi, "training seconds")
+    if target is not None and _finite(target):  # 49.3.3: inside the y-range only
+        ty = y(float(target))
+        if lo - 1e-9 <= float(target) <= hi + 1e-9:
+            parts.append(f'<line x1="{L:.1f}" y1="{ty:.1f}" x2="{L + pw:.1f}" '
+                         f'y2="{ty:.1f}" stroke="{_REJECTED}" stroke-width="1" '
+                         f'stroke-dasharray="5 4"/>'
+                         f'<title>target {float(target):g}</title>')
+            parts.append(f'<text x="{L + pw:.1f}" y="{ty - 5:.1f}" text-anchor="end" '
+                         f'font-size="11" fill="{_REJECTED}">'
+                         f'target {float(target):.2f}</text>')
+    for i, (name, pts) in enumerate(series):
+        color = _FRONTIER_PALETTE[i % len(_FRONTIER_PALETTE)]
+        parts.append(f'<polyline fill="none" stroke="{color}" stroke-width="2" '
+                     f'points="{" ".join(f"{x(t):.1f},{y(s):.1f}" for s, t in pts)}"/>')
+        for s, t in pts:
+            parts.append(f'<circle cx="{x(t):.1f}" cy="{y(s):.1f}" r="4" fill="{color}">'
+                         f'<title>{html.escape(name)}: score {s:.2f} @ {t:.3f}s</title>'
+                         f'</circle>')
+        # the legend: a swatch line + the frontier name, stacked top-right
+        ly = T + 10 + i * 16
+        parts.append(f'<line x1="{L + pw - 110:.1f}" y1="{ly:.1f}" '
+                     f'x2="{L + pw - 90:.1f}" y2="{ly:.1f}" '
+                     f'stroke="{color}" stroke-width="3"/>')
+        parts.append(f'<text x="{L + pw - 84:.1f}" y="{ly + 4:.1f}" font-size="11" '
+                     f'fill="{_AXIS}">{html.escape(name)}</text>')
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def svg_run_curves(named, target=None, width: int = 640, height: int = 360):
+    """SPEC.md 50.1.3 (v0.36): the N-run score-curve overlay — 2..N
+    running-best score curves (50.1.2) on one shared experiment-index
+    axis (0..max-1, so different-length runs align by position). The
+    score axis is *adaptive* (min..max across the set — cartpole-v1's
+    `mean_steps` is [0, 500] and cross-task runs may be compared;
+    unlike `svg_seed_curves`' fixed 0-100, 30.1). One
+    `_FRONTIER_PALETTE` (49.3.3) polyline + point circles (with
+    `<title>`) + a named legend entry per run, in input order; an
+    optional horizontal target line (only when inside the y-range);
+    empty/all-invalid input renders the empty header + message (the
+    21.2 convention). `named` is a list of `(name, curve)` pairs whose
+    curves carry >= 1 finite float. Valid XML, pure, deterministic (G2).
+    ASCII-only text."""
+    series: list[tuple[str, list[float]]] = []
+    for item in named or []:
+        try:
+            name, curve = item[0], item[1]
+        except (TypeError, IndexError, KeyError):
+            continue  # not a (name, curve) pair — skip (50.1.3)
+        pts = [float(v) for v in (curve or []) if _finite(v)]
+        if pts:
+            series.append((str(name), pts))
+    if not series:
+        parts = _svg_header(width, height, "run curves (empty)")
+        parts.append(f'<text x="{width // 2}" y="{height // 2}" text-anchor="middle" '
+                     f'font-size="13" fill="{_AXIS}">no run curves to overlay</text>')
+        parts.append("</svg>")
+        return "\n".join(parts)
+    m = max(len(pts) for _name, pts in series)
+    lo = min(min(pts) for _name, pts in series)
+    hi = max(max(pts) for _name, pts in series)
+    if hi - lo < 1e-9:
+        hi = lo + 1e-3
+    L, T, R, B = 72.0, 28.0, 24.0, 44.0
+    pw, ph = width - L - R, height - T - B
+
+    def x(i: int) -> float:
+        return L + pw * (i / (m - 1) if m > 1 else 0.5)
+
+    def y(s: float) -> float:
+        return T + ph * (1.0 - (float(s) - lo) / (hi - lo))
+
+    parts = _svg_header(width, height, "best score per run (N-run compare)")
+    parts += _svg_axes(L, T, pw, ph, lo, hi, 0.0, float(m - 1) if m > 1 else 1.0,
+                       "experiment index")
+    if target is not None and _finite(target):  # 50.1.3: inside the y-range only
+        t = float(target)
+        if lo - 1e-9 <= t <= hi + 1e-9:
+            ty = y(t)
+            parts.append(f'<line x1="{L:.1f}" y1="{ty:.1f}" x2="{L + pw:.1f}" '
+                         f'y2="{ty:.1f}" stroke="{_REJECTED}" stroke-width="1" '
+                         f'stroke-dasharray="5 4"/>'
+                         f'<title>target {t:g}</title>')
+            parts.append(f'<text x="{L + pw:.1f}" y="{ty - 5:.1f}" text-anchor="end" '
+                         f'font-size="11" fill="{_REJECTED}">'
+                         f'target {t:.2f}</text>')
+    for i, (name, pts) in enumerate(series):
+        color = _FRONTIER_PALETTE[i % len(_FRONTIER_PALETTE)]
+        xs = [x(j) for j in range(len(pts))]
+        parts.append(f'<polyline fill="none" stroke="{color}" stroke-width="2" '
+                     f'points="{" ".join(f"{xx:.1f},{y(v):.1f}" for xx, v in zip(xs, pts))}"/>'
+                     f'<title>{html.escape(name)}</title>')
+        for xx, v in zip(xs, pts):
+            parts.append(f'<circle cx="{xx:.1f}" cy="{y(v):.1f}" r="4" fill="{color}">'
+                         f'<title>{html.escape(name)}: {v:.2f}</title>'
+                         f'</circle>')
+        # the legend: a swatch line + the run name, stacked top-right (49.3.3)
+        ly = T + 10 + i * 16
+        parts.append(f'<line x1="{L + pw - 110:.1f}" y1="{ly:.1f}" '
+                     f'x2="{L + pw - 90:.1f}" y2="{ly:.1f}" '
+                     f'stroke="{color}" stroke-width="3"/>')
+        parts.append(f'<text x="{L + pw - 84:.1f}" y="{ly + 4:.1f}" font-size="11" '
+                     f'fill="{_AXIS}">{html.escape(name)}</text>')
     parts.append("</svg>")
     return "\n".join(parts)
 

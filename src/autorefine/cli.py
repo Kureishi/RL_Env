@@ -34,7 +34,8 @@ from .runconfig import (
     format_recipe,
     runconfig_to_flags,
 )
-from .dashboard import diff_two_summaries, field_stats  # 42.2/42.3 (v0.28)
+from .dashboard import diff_n_summaries, diff_two_summaries, field_stats  # 42.2/42.3 (v0.28) + 50.1.4 (v0.36)
+from .sharing import share_payload, write_share_zip  # 47.4/50.2 (v0.36)
 from .improver.meta_env import AutoRefineEnv, search_quality_v04
 from .improver.bandit import BanditPolicy
 from .improver.curriculum import (  # 46.2 (v0.32): the three ladders
@@ -1522,12 +1523,14 @@ def _cmd_predict(args: argparse.Namespace) -> int:
 
 
 def _cmd_compare(args: argparse.Namespace) -> int:
-    """`compare` (SPEC.md 42.2, v0.28): the app's Past-runs compare widget
-    (38.4) in the terminal — `diff_two_summaries` (core `dashboard`,
-    42.2.2) over two run dirs' summaries."""
-    if len(args.runs) != 2:
-        print("compare needs exactly two run dirs: --run A --run B "
-              "(SPEC.md 42.2.1)", file=sys.stderr)
+    """`compare` (SPEC.md 42.2, v0.28; 50.1.4, v0.36): the app's
+    Past-runs compare widget (38.4) in the terminal — two runs via
+    `diff_two_summaries` (core `dashboard`, 42.2.2), three runs via
+    `diff_n_summaries` (50.1.1). The two-run output is byte-identical
+    to 42.2.3 (the A32 pin); one or ≥ 4 run dirs is rc 1."""
+    if len(args.runs) not in (2, 3):
+        print("compare needs two or three run dirs: --run A --run B [--run C] "
+              "(SPEC.md 42.2.1, 50.1.4)", file=sys.stderr)
         return 1
     summaries = []
     for d in args.runs:
@@ -1536,21 +1539,49 @@ def _cmd_compare(args: argparse.Namespace) -> int:
             print(f"no summary.json in run dir {d!r}", file=sys.stderr)
             return 1
         summaries.append(json.loads(p.read_text(encoding="utf-8")))
-    diff = diff_two_summaries(summaries[0], summaries[1])
+    if len(args.runs) == 2:
+        # --- the pinned 42.2.3 surface (A32): byte-identical, unchanged ---
+        diff = diff_two_summaries(summaries[0], summaries[1])
+        if args.json:
+            print(json.dumps(diff, indent=2, sort_keys=True))
+            return 0
+        print(f"run A : {args.runs[0]}")
+        print(f"  score : {summaries[0].get('final_best_score')}")
+        print(f"run B : {args.runs[1]}")
+        print(f"  score : {summaries[1].get('final_best_score')}")
+        print(f"delta   : {diff['score_delta']} (B - A)")
+        if diff["spec_diff"]:
+            print(f"best_spec diff ({diff['n_diff_fields']} field(s)):")
+            for row in diff["spec_diff"]:
+                print(f"  {row['field']:<24s} {row['a']} -> {row['b']}")
+        else:
+            print("best_spec: identical")
+        return 0
+    # --- three runs (50.1.4): the diff_n_summaries gate rows + spec table ---
+    tagged = [dict(s) for s in summaries]  # 50.1.4: never mutate the loaded dicts
+    for i, s in enumerate(tagged):
+        s["run_id"] = Path(args.runs[i]).name
+    diff = diff_n_summaries(tagged)
     if args.json:
         print(json.dumps(diff, indent=2, sort_keys=True))
         return 0
-    print(f"run A : {args.runs[0]}")
-    print(f"  score : {summaries[0].get('final_best_score')}")
-    print(f"run B : {args.runs[1]}")
-    print(f"  score : {summaries[1].get('final_best_score')}")
-    print(f"delta   : {diff['score_delta']} (B - A)")
-    if diff["spec_diff"]:
-        print(f"best_spec diff ({diff['n_diff_fields']} field(s)):")
-        for row in diff["spec_diff"]:
-            print(f"  {row['field']:<24s} {row['a']} -> {row['b']}")
+    for i, row in enumerate(diff["runs"]):
+        gate = {True: "PASS", False: "MISS"}.get(row["met_target"], "—")
+        print(f"run {i + 1} : {args.runs[i]}")
+        print(f"  score : {row['final_score']} | target : {row['target']} "
+              f"| gate : {gate}")
+        print(f"  exps  : {row['experiments_run']} | wall   : "
+              f"{row['wall_seconds']}s | policy : {row['policy']}")
+    if diff["spec_fields"]:
+        print(f"best_spec diff ({len(diff['spec_fields'])} field(s)):")
+        for row in diff["spec_fields"]:
+            vals = " | ".join("—" if v is None else str(v) for v in row["values"])
+            print(f"  {row['field']:<24s} {vals}")
     else:
         print("best_spec: identical")
+    if diff["best_run_id"] is not None:
+        print(f"best    : {diff['best_run_id']} "
+              f"(span {diff['score_span']})")
     return 0
 
 
@@ -1815,6 +1846,10 @@ def _cmd_share(args: argparse.Namespace) -> int:
     rc 0 with the entry listing (name + byte size) and the output path;
     rc 1 when the run dir is missing or has no `summary.json` (47.4.4).
     Stdlib `zipfile` only — no new dependency (SPEC.md 3).
+
+    v0.36 (50.2.1): the payload/zip machinery moved to the `sharing`
+    core (the app's "Build share bundle" panel, 50.2.3, shares it) —
+    this command's contract is byte-identical (47.4.3).
     """
     run_dir = Path(args.run)
     if not (run_dir / "summary.json").is_file():
@@ -1823,22 +1858,8 @@ def _cmd_share(args: argparse.Namespace) -> int:
         return 1
     out = (Path(args.out) if args.out is not None
            else run_dir.parent / f"{run_dir.name}-share.zip")
-    out.parent.mkdir(parents=True, exist_ok=True)
-    payload: dict[str, bytes] = {}
-    html = _share_report_html(run_dir)  # 47.4.2: always regenerated
-    if html is not None:
-        payload["report.html"] = html.encode("utf-8")
-    for name in ("summary.json", "run_config.json", "best_spec.json"):
-        p = run_dir / name
-        if p.is_file():
-            payload[name] = p.read_bytes()
-    for p in sorted(run_dir.glob("*.svg")):  # flat SVGs only (47.4.2)
-        payload[p.name] = p.read_bytes()
-    with zipfile.ZipFile(out, "w") as zf:
-        for name in sorted(payload):  # 47.4.3: sorted entry order
-            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
-            info.compress_type = zipfile.ZIP_DEFLATED
-            zf.writestr(info, payload[name])
+    payload = share_payload(run_dir, _share_report_html(run_dir))  # 47.4.2/50.2.1
+    write_share_zip(payload, out)
     for name in sorted(payload):
         print(f"  {name:24s} {len(payload[name]):8d} bytes")
     print(f"share   : {out}")
@@ -1906,6 +1927,7 @@ _EP_PREDICT = """examples:
 """
 _EP_COMPARE = """examples:
   autorefine compare --run runs/<run_id_A> --run runs/<run_id_B>
+  autorefine compare --run A --run B --run C   # v0.36 (SPEC.md 50.1.4)
 """
 _EP_EXPLAIN = """examples:
   autorefine explain --run runs/<run_id>
@@ -2239,15 +2261,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_pred.set_defaults(func=_cmd_predict)
 
     p_cmp = sub.add_parser(
-        "compare", help="v0.28 (SPEC.md 42.2): the app's run-diff (38.4) in "
-                        "the terminal — score delta + best_spec field diff",
+        "compare", help="v0.28 (SPEC.md 42.2; 50.1.4 v0.36): the app's "
+                        "run-diff (38.4) in the terminal — 2-run score delta + "
+                        "best_spec diff, or 3-run gate rows + spec table",
         epilog=_EP_COMPARE,  # 47.2.2
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p_cmp.add_argument("--run", dest="runs", action="append", required=True,
                        metavar="DIR",
-                       help="two run dirs, in order A then B (repeat --run)")
+                       help="two or three run dirs, in order (repeat --run)")
     p_cmp.add_argument("--json", action="store_true",
-                       help="print the diff_two_summaries dict (pure JSON)")
+                       help="print the diff dict (diff_two_summaries for two "
+                            "runs, diff_n_summaries for three — pure JSON)")
     _add_config_flag(p_cmp)  # 47.1.2
     p_cmp.set_defaults(func=_cmd_compare)
 

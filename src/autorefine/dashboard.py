@@ -515,6 +515,101 @@ def diff_two_summaries(sa: dict, sb: dict) -> dict:
     }
 
 
+# --- N-run comparison (SPEC.md 50.1, v0.36) -----------------------------------
+
+def _finite_num(v) -> bool:
+    """A finite real number (bools excluded) — the score test shared by
+    38.4 and 50.1.1."""
+    return (isinstance(v, (int, float)) and not isinstance(v, bool)
+            and math.isfinite(v))
+
+
+def diff_n_summaries(summaries: list[dict]) -> dict:
+    """SPEC.md 50.1.1 (v0.36): the N >= 2 generalisation of
+    `diff_two_summaries` (38.4/42.2.2) — the `compare` CLI's 3-run
+    branch (50.1.4) and the app's Past-runs N-compare expander (50.1.5)
+    share this one derivation. Per-run gate rows in input order
+    (`run_id`, task, seed, policy, final score, target, met_target,
+    experiments, wall seconds); the `best_spec` union table — only
+    fields with >= 2 distinct values across the set, a field absent on
+    a run is `None`, values compared by canonical JSON form so lists
+    compare by content; plus `best_run_id` (highest finite final score,
+    first on ties) and `score_span` (max - min rounded to 4 decimals;
+    `None` with fewer than two finite scores).
+    Fewer than two summaries, or a non-list input, is a `ValueError`
+    (50.1.1). JSON-safe, pure, deterministic (G2)."""
+    if not isinstance(summaries, (list, tuple)) or len(summaries) < 2:
+        raise ValueError(
+            "diff_n_summaries needs at least two run summaries "
+            "(SPEC.md 50.1.1)")
+    runs = []
+    for s in summaries:
+        s = s if isinstance(s, dict) else {}
+        runs.append({
+            "run_id": s.get("run_id"),
+            "task": s.get("task"),
+            "seed": s.get("seed"),
+            "policy": s.get("policy"),
+            "final_score": s.get("final_best_score"),
+            "target": s.get("target"),
+            "met_target": s.get("met_target"),
+            "experiments_run": s.get("experiments_run"),
+            "wall_seconds": s.get("wall_seconds"),
+        })
+    specs = [((s if isinstance(s, dict) else {}).get("best_spec") or {})
+             for s in summaries]
+
+    def _canon(v):
+        return json.dumps(v, sort_keys=True, default=str)
+
+    fields = []
+    for f in sorted(set().union(*(set(sp) for sp in specs))):
+        vals = [sp.get(f) for sp in specs]
+        n_distinct = len({_canon(v) for v in vals})
+        if n_distinct >= 2:  # identical fields are not a diff (38.4)
+            fields.append({"field": f, "values": vals,
+                           "n_distinct": n_distinct})
+    best_id = None
+    best_score = None
+    for r in runs:  # first on ties (50.1.1)
+        fs = r["final_score"]
+        if _finite_num(fs) and (best_score is None or fs > best_score):
+            best_score = float(fs)
+            best_id = r["run_id"]
+    scores = [float(r["final_score"]) for r in runs
+              if _finite_num(r["final_score"])]
+    span = round(max(scores) - min(scores), 4) if len(scores) >= 2 else None
+    return {
+        "n_runs": len(runs),
+        "runs": runs,
+        "spec_fields": fields,
+        "best_run_id": best_id,
+        "score_span": span,
+    }
+
+
+def running_best_curve(rows) -> list[float]:
+    """SPEC.md 50.1.2 (v0.36): the running-best `holdout_score` of a
+    run's scored log rows — the `plotting._score_rows` semantics (`kind`
+    baseline/experiment with a finite `holdout_score`, in log order;
+    point 0 = the scored baseline). `[]` when no row is scored (the
+    run is then skipped in the `svg_run_curves` overlay, 50.1.3).
+    Pure, deterministic (G2)."""
+    scores = []
+    for r in rows or []:
+        if not isinstance(r, dict):
+            continue
+        if (r.get("kind") in (KIND_BASELINE, KIND_EXPERIMENT)
+                and _finite_num(r.get("holdout_score"))):
+            scores.append(float(r["holdout_score"]))
+    out = []
+    best = None
+    for s in scores:  # a rejected dip never lowers the curve
+        best = s if best is None else max(best, s)
+        out.append(best)
+    return out
+
+
 def field_stats(updates) -> dict[str, dict]:
     """D1 (SPEC.md 26.1): per-field {trials, wins, win_rate}, crediting each
     update's `mutation` fields with its `accepted` outcome — the exact

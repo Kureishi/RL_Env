@@ -21,6 +21,12 @@ from ``.improver.meta_env`` — the same one home ``accounting`` uses). The
 §37.2 ``fit --gate`` path still evaluates ``model`` on the saved artifact;
 ``what_if`` refuses to guess at ``model`` size (40.2.3), so it rejects a
 ``model`` objective rather than invent a second size calculator.
+
+SPEC.md 49.1 (v0.35, advanced analysis): ``what_if_block`` — the
+app's what-if half — is the honest union of the two existing CLI gate
+surfaces: the score/train objectives re-gate the logged pool via
+``what_if`` (40.2) while a model objective is evaluated against the
+final best model's artifact via ``gate.evaluate`` (37.2).
 """
 from __future__ import annotations
 
@@ -40,6 +46,7 @@ from .memory import (
 
 __all__ = [
     "what_if",
+    "what_if_block",
     "estimate_wall",
     "project_budget",
     "projection_points",
@@ -107,6 +114,36 @@ def what_if(entries, objectives) -> dict:
         "final": final,
         "candidates": candidates,
     }
+
+
+def what_if_block(entries, objectives, model_actual: float | None = None) -> dict:
+    """SPEC.md 49.1.1–49.1.3 (v0.35): the combined what-if verdict.
+
+    Splits the objective set into a non-model half (``score``/``train``)
+    and a model half. The non-model half is the existing ``what_if``
+    (40.2) — the logged candidate pool, the counterfactual final, zero
+    training; the model half is ``gate.evaluate`` (37.2) against
+    ``model_actual`` (the final best model's artifact size, 49.1.2 —
+    per-candidate sizes are not logged, 40.2.3). The result is the
+    JSON-safe dict ``{"pass", "what_if", "model"}``: a half with no
+    objectives is ``None`` (vacuously true), and ``pass`` is the AND of
+    the two halves. An empty objective set is a MISS: ``{"pass":
+    False, "what_if": None, "model": None}``.
+
+    A missing ``model_actual`` fails the model objective honestly (the
+    37.2 rule: a missing actual fails its objective) — never guessed.
+    Pure and deterministic (G2): same inputs, same dict; no training,
+    no writes.
+    """
+    objs = tuple(objectives or ())
+    if not objs:
+        return {"pass": False, "what_if": None, "model": None}
+    non_model = [o for o in objs if o.name != "model"]
+    model = [o for o in objs if o.name == "model"]
+    wf = what_if(entries, non_model) if non_model else None
+    mr = evaluate(tuple(model), {"model": model_actual}) if model else None
+    ok = (wf is None or bool(wf["pass"])) and (mr is None or bool(mr["pass"]))
+    return {"pass": bool(ok), "what_if": wf, "model": mr}
 
 
 def estimate_wall(registry_entries, task_name, max_experiments) -> dict:

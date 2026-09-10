@@ -26,7 +26,7 @@ parity and that the bandit offers the family (no re-add, no new knobs).
 
 45.4/45.5 regression — A1–A34 stay green (covered by the rest of the
 suite); the A25 index advances (defined == set(range(1, 36))) and reads
-this file's A35 citation; the version stepped to `0.33.0` in both
+this file's A35 citation; the version stepped to `0.36.0` in both
 sources (33.1).
 
 House rules: no cross-test imports (fixtures duplicated per file);
@@ -436,10 +436,10 @@ def test_boosting_ensemble_trains_scores_finite_on_parity():
 # --- 45.4/45.5 regression -----------------------------------------------------------
 
 def test_version_round_v031():
-    """A35 (SPEC.md 45.4, 33.1): the version stepped to `0.33.0` in
-    both sources (v0.33 ⇒ `0.33.0`, M36)."""
+    """A35 (SPEC.md 45.4, 33.1): the version stepped to `0.36.0` in
+    both sources (v0.36 ⇒ `0.36.0`, M39)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.33.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.36.0"
 
 
 def test_spec_cites_a35_and_round():

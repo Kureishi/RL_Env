@@ -162,10 +162,10 @@ def test_version_single_source():
     import autorefine
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
     assert py["project"]["version"] == autorefine.__version__
-    # round label == package version (v0.33 ⇒ 0.33.0, M36 — the round
+    # round label == package version (v0.36 ⇒ 0.36.0, M39 — the round
     # advanced per SPEC.md 33.1 with the v0.31 adapt-to-use-cases batch,
     # SPEC.md 45)
-    assert autorefine.__version__ == "0.33.0"
+    assert autorefine.__version__ == "0.36.0"
     # the app caption is `v{__version__}` — the same number, no third copy
     app_src = (REPO / "src" / "autorefine" / "dashboard_app.py"
                ).read_text(encoding="utf-8")
