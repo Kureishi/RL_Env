@@ -16,7 +16,7 @@
 - 38.4 the app — `diff_two_summaries` (score delta + per-field spec
   diff, streamlit-free) and the Past-runs section (empty state and
   populated).
-- Regression — version stepped to `0.37.0` in both sources (33.1,
+- Regression — version stepped to `0.39.0` in both sources (33.1,
   advanced again with v0.32, SPEC.md 45).
 
 House rules: no cross-test imports (fakes duplicated from
@@ -462,7 +462,7 @@ def test_app_past_runs_section_renders(tmp_path):
 # --- regression (A28) -----------------------------------------------------------
 
 def test_version_round_v024():
-    """A28 (SPEC.md 38.5, 33.1): the version stepped to `0.37.0` in both
-    sources (advanced again with v0.37 ⇒ `0.37.0`, M40, SPEC.md 51)."""
+    """A28 (SPEC.md 38.5, 33.1): the version stepped to `0.39.0` in both
+    sources (advanced again with v0.39 ⇒ `0.39.0`, M42, SPEC.md 53)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.37.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.41.0"

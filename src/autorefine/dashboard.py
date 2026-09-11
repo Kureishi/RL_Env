@@ -18,7 +18,11 @@ from .config import Budget
 from .diagnostics import holdout_diagnostics
 from .gate import actuals_from_run, default_objectives, evaluate
 from .improver.bandit import BanditPolicy
-from .improver.meta_env import AutoRefineEnv, search_quality_v04
+from .improver.meta_env import (  # GEN_GAP_TOL: 52.1.1 (v0.38)
+    AutoRefineEnv,
+    GEN_GAP_TOL,
+    search_quality_v04,
+)
 from .improver.policy import SearchPolicy
 from .runconfig import fit_recipe
 from .memory import KIND_BASELINE, KIND_CURRICULUM, KIND_EXPERIMENT  # 35.1 (C4)
@@ -37,6 +41,7 @@ from .plotting import (
     svg_score_curve,
     svg_score_gap_scatter,
     svg_score_strip,
+    svg_time_strip,  # B2 (SPEC.md 54.2) the wall-time cost strip
 )
 from .tasks import TASKS, detect_modality
 from .tasks.media import class_label_str  # V3 class labels (SPEC.md 30.3)
@@ -193,6 +198,9 @@ class DashboardRunner:
                 "gen": int(len(probe._x_ge)),
             },
             "baseline_score": self._state["baseline_score"],
+            # 54.2 (v0.40): the baseline's train time for the wall-time strip
+            "baseline_train_seconds": self._baseline_train_seconds(
+                self.env.memory.load_experiments()),
             "target": self.target,
             "policy": self.policy_name,
             "seed": self.seed,
@@ -233,6 +241,10 @@ class DashboardRunner:
             # C1 (SPEC.md 28.1): the candidate's bounded loss history, for the
             # live learning-curve view (empty for dup/invalid rejections)
             "loss_history": info.get("loss_history") or [],
+            # SPEC.md 52.1.1 (v0.38): the CI-gate inputs (18.3/18.6) for the
+            # drill-down gate math — additive keys, same-seed identical
+            "effective_score": info.get("effective_score"),
+            "se": info.get("se"),
             "best_score": self.env.best_score,
             "reward": reward,
             "done": bool(done),
@@ -354,6 +366,8 @@ deterministic run, so per-seed results are bit-identical to the serial
         fvs = field_value_stats(self._updates)  # V2 (SPEC.md 30.2)
         fams = family_stats(entries)  # V5 (SPEC.md 30.5): over the scored entries
         boundary = decision_boundary(self.env.task, self.env.best_model)  # V3
+        # 54.2 (v0.40): the baseline's train time for the wall-time strip
+        baseline_ts = self._baseline_train_seconds(entries)
         return {
             "verdict": "PASS" if pass_ else "MISS",
             "target": self.target,
@@ -398,6 +412,11 @@ deterministic run, so per-seed results are bit-identical to the serial
             "ladder_svg": (svg_ladder_curve(
                 entries, summary.get("curriculum", {}).get("levels"))
                 if summary.get("curriculum") else None),
+            # B2 (SPEC.md 54.2): the wall-time cost strip — the baseline's
+            # train time (the first baseline log row) + one segment per
+            # update with a finite train time
+            "baseline_train_seconds": baseline_ts,
+            "time_strip_svg": svg_time_strip(self._updates, baseline_ts),
             # learning views (SPEC.md 28): C1 curves, C2 diagnostics +
             # per-class/confusion SVGs, C3 error gallery, C4 architecture SVG
             "loss_curves": self._loss_curves(entries),
@@ -444,6 +463,21 @@ deterministic run, so per-seed results are bit-identical to the serial
     def updates_json(self) -> str:
         """The full update stream as JSON (machine-readable live feed)."""
         return json.dumps(self._updates, indent=2, sort_keys=True)
+
+    @staticmethod
+    def _baseline_train_seconds(entries) -> float | None:
+        """54.2 (v0.40): the reset baseline's `train_seconds` (the first
+        baseline log row, the first experiments.jsonl entry) — the first
+        segment of the wall-time cost strip. `None` when absent or not a
+        finite non-negative number (additive over the update stream, G2)."""
+        for e in entries or []:
+            if e.get("kind") == KIND_BASELINE:  # 35.1 (C4): the kind registry
+                ts = e.get("train_seconds")
+                if isinstance(ts, (int, float)) and not isinstance(ts, bool) \
+                        and math.isfinite(ts) and ts >= 0.0:
+                    return float(ts)
+                return None
+        return None
 
 
 # --- v0.17 sweep worker (SPEC.md 31.2) ----------------------------------------
@@ -771,6 +805,97 @@ def ucb_trace(updates, alpha: float = 1.0) -> dict[str, list]:
                 None if t == 0
                 else wins[f] / t + math.sqrt(alpha * math.log(total) / t))
     return trace
+
+
+# --- live interaction (SPEC.md 52, v0.38) -------------------------------------
+
+# 52.3.1: the display-only stall-sentinel threshold — the 31.1 patience
+# semantics (scored rejections extend, a scored acceptance resets) rendered
+# as a live hint, never a gate. Default display value; the env's own
+# `stall_patience` (31.1) stays opt-in and unchanged.
+PLATEAU_HINT = 5
+
+
+def fields_seen(updates) -> list[str]:
+    """52.2.1 (v0.38): the sorted unique mutation fields across the update
+    stream so far — the focus-field options for the app's cross-view
+    filter (SPEC.md 52.2.2). Pure over the stream (G2)."""
+    out = set()
+    for u in updates or []:
+        if not isinstance(u, dict):
+            continue
+        for f in (u.get("mutation") or []):
+            if isinstance(f, str):
+                out.add(f)
+    return sorted(out)
+
+
+def eta_seconds(updates, experiments_left) -> float | None:
+    """52.3.1 (v0.38): the live remaining-time estimate — the mean
+    `train_seconds` over the updates with a finite non-negative train time,
+    times the budget remaining (`experiments_left`), rounded to 0.1 s.
+    `None` when nothing is left to spend or no update has a finite train
+    time yet. Pure (G2); unscored (dup) steps carry no `train_seconds`
+    (R3) and never skew the mean."""
+    if not _finite_num(experiments_left) or float(experiments_left) <= 0:
+        return None
+    secs = [float(u.get("train_seconds")) for u in (updates or [])
+            if isinstance(u, dict) and _finite_num(u.get("train_seconds"))]
+    if not secs:
+        return None
+    return round(sum(secs) / len(secs) * float(experiments_left), 1)
+
+
+def plateau_streak(updates) -> int:
+    """52.3.1 (v0.38): the trailing run of *scored* non-accepted candidates
+    (the 31.1 stall semantics, display-only): a scored acceptance resets to
+    0, a scored rejection extends the streak, and unscored steps (free
+    duplicate/invalid rejections, R3) are ignored — they never spend a
+    budget experiment. Pure (G2)."""
+    streak = 0
+    for u in updates or []:
+        if not isinstance(u, dict) or not _finite_num(u.get("candidate_score")):
+            continue
+        streak = 0 if u.get("accepted") else streak + 1
+    return streak
+
+
+def gate_math(update, best_before, z_accept: float = 0.0) -> dict:
+    """52.1.1 (v0.38): the per-candidate acceptance-gate numbers — the
+    drill-down data (SPEC.md 52.1.2). Inputs: the update dict (SPEC.md
+    23.1), the running best *before* the step, and the env's `z` (18.6).
+    Every output is `None` whenever its input is not a finite number, so
+    an unscored (dup) candidate renders "—" across the board.
+
+    - `candidate` / `best_before` / `delta` — the score gate (the 39.2.2
+      priority-1 comparison: score vs the running best);
+    - `gen_gap` / `gen_tol` — the overfit gate: the gap vs the §18.5
+      tolerance (`GEN_GAP_TOL * score`);
+    - `se` / `z` / `z_se` — the CI gate (18.6): accept ⟺
+      eff − eff_best > max(0, z·SE); `z_se` is that threshold.
+
+    Pure, deterministic, JSON-safe (G2)."""
+    u = update if isinstance(update, dict) else {}
+    score = u.get("candidate_score")
+    out = {
+        "candidate": float(score) if _finite_num(score) else None,
+        "best_before": float(best_before) if _finite_num(best_before) else None,
+        "delta": None,
+        "gen_gap": (float(u["gen_gap"])
+                    if _finite_num(u.get("gen_gap")) else None),
+        "gen_tol": None,
+        "se": float(u["se"]) if _finite_num(u.get("se")) else None,
+        "z": float(z_accept) if _finite_num(z_accept) else 0.0,
+        "z_se": None,
+        "accepted": bool(u.get("accepted", False)),
+    }
+    if out["candidate"] is not None and out["best_before"] is not None:
+        out["delta"] = round(out["candidate"] - out["best_before"], 6)
+    if out["candidate"] is not None:
+        out["gen_tol"] = round(GEN_GAP_TOL * out["candidate"], 6)
+    if out["se"] is not None:
+        out["z_se"] = round(out["z"] * out["se"], 6)
+    return out
 
 
 def decision_boundary(task, model, n_grid: int = 24, n_points: int = 200) -> dict | None:

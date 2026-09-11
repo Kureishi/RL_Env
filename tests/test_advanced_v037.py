@@ -35,7 +35,7 @@ Covers:
   the result markdown carries the Okabe-Ito hexes; the app source
   wires `st.tabs`, `candidate_reason`, `request_stop`, and the
   `stop_check` hand-off;
-- the A41 round regression — the version stepped to `0.37.0` in both
+- the A41 round regression — the version stepped to `0.39.0` in both
   sources (33.1) and SPEC carries the A41 block + M40 row.
 
 House rules: no cross-test imports (all fixtures synthesized here);
@@ -498,10 +498,10 @@ def test_app_source_wiring():
 # --- A41 round regression ---------------------------------------------------------
 
 def test_version_round_v037():
-    """A41 (SPEC.md 51.5, 33.1): the version stepped to `0.37.0` in
-    both sources (v0.37 ⇒ `0.37.0`, M40, SPEC.md 51)."""
+    """A41 (SPEC.md 51.5, 33.1): the version stepped to `0.39.0` in
+    both sources (v0.39 ⇒ `0.39.0`, M42, SPEC.md 53)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.37.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.41.0"
 
 
 def test_spec_cites_a41_and_round():

@@ -58,6 +58,10 @@ numbers and carry none.)
 | M38 | v0.35   | 49     | A39 | tests/test_advanced_v035.py |
 | M39 | v0.36   | 50     | A40 | tests/test_advanced_v036.py |
 | M40 | v0.37   | 51     | A41 | tests/test_advanced_v037.py |
+| M41 | v0.38   | 52     | A42 | tests/test_interact_v038.py |
+| M42 | v0.39   | 53     | A43 | tests/test_decisions_v039.py |
+| M43 | v0.40   | 54     | A44 | tests/test_progress_v040.py |
+| M44 | v0.41   | 55     | A45 | tests/test_live_v041.py |
 
 ---
 
@@ -5461,3 +5465,499 @@ unchanged widget keys (51.1), stop/cancel between experiments with the
 preemption-safe reattach and honest `stopped` artifacts (51.2), the
 per-candidate reason column (51.3), and the Okabe-Ito / dark / ARIA /
 checkbox accessibility layer with byte-identical defaults (51.4) (A41).
+
+---
+
+## 52. Interact with the run while it's alive (v0.38)
+
+The live loop shows *what* happened per experiment (the 51.3.2 reason
+column) but not *why* a candidate was rejected in numbers, the view is
+ever everything-at-once, the remaining time is a guess, and Run/Stop
+are mouse-only. v0.38 adds four interaction surfaces over **pure** core
+helpers (23.1: the app stays a thin renderer; 3: no new dependencies) —
+all additive, all display-only (no gate, budget, or search change):
+
+- **52.1** row drill-down — the per-candidate gate math (the score gate
+  39.2.2, the overfit gate 18.5, the CI gate 18.6) + the spec diff
+  (26.2) + the candidate's train/holdout loss curves (28.1);
+- **52.2** cross-view field filtering — focus one mutation field; the
+  live table and the mutation timeline (26.3) both filter to it (one
+  widget, two views);
+- **52.3** live ETA + stall sentinel — "≈ N s left" from the mean train
+  seconds × budget remaining, and a display-only "plateauing — Stop
+  would be honest" chip from the 31.1 patience semantics;
+- **52.4** keyboard — `S` = Stop, `R` = Run (a zero-height same-origin
+  iframe whose JS DOM-clicks the existing 51.2.3 buttons; no new
+  buttons, no new state).
+
+**Gate math (52.1.1).** `dashboard.gate_math(update, best_before,
+z_accept)` is the drill-down's data: `candidate` / `best_before` /
+`delta` (the 39.2.2 priority-1 score gate), `gen_gap` / `gen_tol`
+(the 18.5 overfit tolerance, `GEN_GAP_TOL * candidate`), and `se` / `z`
+/ `z_se` (the 18.6 CI gate: accept ⟺ `eff − eff_best > max(0, z·SE)`).
+Every output is `None` whenever its input is not a finite number, so an
+unscored (dup) candidate renders "—" across the board. Pure,
+deterministic, JSON-safe (G2). The runner's update dict gains the two
+CI-gate inputs the drill-down needs — `se` and `effective_score`
+(18.3) — carried from the env's step `info` (additive keys; same-seed
+identical; a legacy `z_accept = 0` run renders the CI columns as 0).
+
+**Drill-down views (52.1.2).** Live: one `st.empty()` placeholder
+re-rendered per step shows the *latest* candidate's expander — the
+gate-math table, the spec-diff line (26.2), and `svg_loss_curves`
+over its `loss_history` (28.1; empty for dup steps, which render the
+honest "unscored (free duplicate, R3)" caption instead of the numbers).
+Finished: the Experiments tab (51.1.1) renders one expander per
+candidate over the stored stream (the result persists `stream` + the
+env's `z`), replaying the running best exactly as the live loop does
+(the baseline seeds it; each update's `best_score` succeeds it), so the
+gate math is row-correct.
+
+**Focus field (52.2.1/52.2.2/52.2.3).** `dashboard.fields_seen(updates)`
+is the sorted unique mutation-field set across the stream — the
+selectbox options (52.2.1). The Run tab (51.1.1) renders a
+`key="focus_field"` selectbox exactly once per script run, at the first
+update that introduces any field (a second instance mid-drain would
+raise on the duplicate key; the position is deterministic for a given
+message set — 52.2.2). When a field is focused, the live table keeps
+only the rows whose update mutated that field (the baseline row,
+which mutated nothing, drops out) and the mutation timeline re-renders
+through the new `svg_mutation_timeline(..., field=)` filter — the
+plot's `_timeline_cells` keeps only that field's cells; `field=None`
+(the default) is byte-identical (G2), and the empty case names the
+field. The Experiments tab's table (52.2.3) honors the same
+`focus_field` session value — one widget, two views.
+
+**ETA + stall sentinel (52.3.1).** `dashboard.eta_seconds(updates,
+experiments_left)` is the mean `train_seconds` over the updates with a
+finite train time, times the budget remaining — `None` when nothing is
+left to spend or no train time is known yet (the unscored dup steps
+carry no `train_seconds` (R3) and never skew the mean).
+`dashboard.plateau_streak(updates)` is the trailing run of *scored*
+non-accepted candidates under the 31.1 semantics (a scored acceptance
+resets, a scored rejection extends, unscored steps are ignored). The
+live caption shows "ETA ≈ N s · K experiment(s) left"; at
+`PLATEAU_HINT` (5) non-improving scored experiments in a row it appends
+"plateau: … — Stop would be honest (SPEC.md 31.1)". Both are
+**display-only**: the env's opt-in `stall_patience` gate (31.1) is
+untouched, and the 51.2.3 Stop button is the only way a run ends early.
+
+**Keyboard (52.4).** A zero-height same-origin (`srcdoc`) iframe in the
+Run tab (51.1.1) carries a keydown listener on the parent document:
+`S` DOM-clicks the "Stop the run" button, `R` the "Run the improvement
+loop" button (the existing 51.2.3 / run widgets — no new buttons, no
+new state, so the 51.1.2 key invariants hold). Guards: skipped while
+typing in an input/textarea/select and while meta/ctrl/alt are held
+(browser shortcuts stay intact). Inert while idle (the 23.2 idle
+screen `st.stop()`s before the tabs).
+
+### 52.5 Acceptance (A42)
+
+- **gate math (52.1.1)** — `gate_math` is hand-computed over a scored
+  update: `delta = candidate − best_before`, `gen_tol = GEN_GAP_TOL ·
+  candidate`, `z_se = z · se`; every output is `None` for an unscored
+  (dup) update; the runner's update dict carries `se` +
+  `effective_score` (JSON-safe) for a v04 run.
+- **focus field (52.2)** — `fields_seen` is the sorted unique mutation
+  fields over the stream; `svg_mutation_timeline(..., field=...)`
+  keeps only that field's cells (the default call is byte-identical,
+  G2) and the empty case names the field.
+- **ETA / stall (52.3.1)** — `eta_seconds` is hand-computed (mean train
+  seconds × remaining budget; `None` when nothing is left / no train
+  time yet) and `plateau_streak` is hand-computed under the 31.1
+  semantics (acceptance resets, rejection extends, dup steps ignored).
+- **app (52.1.2/52.2.2/52.3.1/52.4)** — a finished run renders the
+  per-candidate drill-down expanders (the gate-math table + the loss
+  curves); the `focus_field` selectbox exists and, when set, the
+  Experiments table drops the non-matching rows; the live ETA caption
+  renders ("ETA … · N experiment(s) left"); the Run tab's zero-height
+  iframe carries the `keydown` JS naming both button labels (S = Stop,
+  R = Run); the app source wires `gate_math`, `fields_seen`,
+  `plateau_streak`, `eta_seconds`, `PLATEAU_HINT`, and
+  `components.html(_KEYBOARD_HTML`.
+- **Regression** — A1–A41 stay green (no default-path behavior change:
+  the loop, the summary keys, the SVG hexes, the pinned jsonl
+  projections); the A25 index advances (38 acceptance rows;
+  `defined == set(range(1, 43))`); the version stepped to `0.38.0` in
+  both sources (33.1).
+
+### 52.6 Milestone (M41)
+
+**M41** — v0.38 live interaction: the per-candidate drill-down with
+its gate math + loss curves (52.1), the cross-view focus-field filter
+with the timeline's `field=` parameter (52.2), the live ETA +
+display-only stall sentinel (52.3), and the S/R keyboard shortcuts over
+the existing buttons (52.4) (A42).
+
+---
+
+## 53. Show each decision, not just the running best (v0.39)
+
+The live drill-down (52.1) shows the *latest* candidate's numbers, but
+the acceptance verdict itself is still a word in the reason column
+(51.3.2), and the "current best" is only the running number on the
+bar. This milestone turns every decision into a picture and the
+champion spec into a live artifact — all from data that is already in
+every update (23.1) and every finished result: no new knobs, no new
+data capture, no default-path behavior change (the 51.4
+palette/dark contract applies; G2 byte-identical defaults; ARIA always
+on, 51.4.3).
+
+- **53.1** per-candidate gate number-line — one small SVG per
+  candidate: the 0–100 axis with the running best, the target, the CI
+  band, and the candidate's dot, annotated with the margin (the reason
+  column's "no" becomes a picture);
+- **53.2** live Pareto frontier — the score-vs-train-time scatter that
+  grows each step; the new candidate drawn as a flash, dominated ones
+  greyed;
+- **53.3** live champion spec card — the C4 (28.4) architecture
+diagram re-rendered on every acceptance, with the just-mutated field
+highlighted;
+- **53.4** app integration — the number-line leads every drill-down
+  body (live + Experiments, shared, 52.1.2), and the frontier +
+  champion card are live placeholders in the drain loop plus finished
+  views in the Experiments tab.
+
+**Gate number-line (53.1.1).** `plotting.svg_gate_line(candidate,
+best_before, target, z_se, accepted, reason, palette="default",
+dark=False, width=520)` renders: a fixed 0–100 axis (the 27.1 strip's
+tick pattern); a vertical marker for the running best and a dashed
+one for the target (either omitted when absent); the CI band
+`[best, best + z·SE]` shaded when `z·SE > 0` (the 18.6 gate —
+`z_se` is the 52.1.1 `gate_math` threshold); the candidate's dot
+(accepted green, rejected red); and a one-line margin annotation built
+from the 52.1.1 numbers plus the 51.3.2 reason word — "accepted: +3.10
+over best …", "missed by 4.20 (score … vs best …)", "above best by
+…, over gen-gap tolerance (18.5)", "above best by …, inside CI band
+(z*SE …)", "stopped — final step (… vs best …)". An unscored (dup)
+candidate renders the best/target markers plus the honest
+"unscored (… ) — no candidate dot (R3)" caption and no dot (52.1.1:
+the gate math is undefined when its input is not finite). The `reason`
+word is caller-supplied (51.3.1) so the core stays free of the
+accounting import. Pure, valid XML, ASCII-only text, deterministic
+(G2); the `palette`/`dark` defaults are byte-identical (G2); ARIA
+always on (51.4.3).
+
+**Live Pareto frontier (53.2.1/53.2.2).**
+`plotting.svg_live_frontier(updates, palette="default", dark=False,
+width=560, height=340)` plots the scored updates that carry a finite
+`train_seconds` (the G2 scatter's data contract; unscored dup steps
+contribute no points) as a score-vs-train-time scatter. Dominance:
+A dominates B iff `A.score >= B.score` and `A.train <= B.train` and A
+is strict in at least one coordinate — dominated candidates are greyed,
+frontier candidates are drawn in the accent color. The **latest**
+candidate is drawn as a flash (a larger dot plus a halo ring) —
+53.2.2. The empty case (no scored candidate with a train time) renders
+header + message, like the other empty cases. Pure, valid XML,
+ASCII-only text, deterministic (G2); palette/dark/ARIA per the 53.1.1
+contract.
+
+**Champion spec card (53.3.1/53.3.2).** `plotting.svg_architecture`
+gains a `highlight: str | None = None` parameter (53.3.1): naming a
+ModelSpec field marks it on the diagram — the body block(s) the field
+drives get an amber ring (per family: mlp `architecture` /
+`activation` / `hidden_dim`; convnet `architecture`; tree/boost
+`architecture` / `train_steps`; knn `knn_k`; `model_family` rings the
+body in every family), while a field that drives no body block (the
+annotation-row fields — optimizer / lr schedule / early stopping /
+gradient clipping / label smoothing — or an unknown field) gets a
+`highlight: <field>` line under the annotations (53.3.2: the just-
+mutated field is the mutation's first field). The `highlight=None`
+call is byte-identical to the pre-v0.39 output (G2).
+
+**App integration (53.4.1/53.4.2/53.4.3).** (53.4.1) the shared
+drill-down body (52.1.2) now leads with the gate number-line, fed by
+the same `gate_math` numbers + the 51.3.2 reason + the target (the
+live drill passes the run's target; the Experiments tab replays it per
+candidate). (53.4.2) the drain loop gains two live placeholders:
+`vfrontier` re-renders `svg_live_frontier` over the stream every
+step, and `vchamp` re-renders the champion card from the env's running
+`best_spec` **only on acceptance**, highlighting the just-mutated
+field. (53.4.3) the Experiments tab renders both finished views over
+the stored stream (the frontier over all candidates; the champion card
+from `res["best_spec"]` with the last acceptance's first mutated field
+highlighted; the saved result gains `state_dim`/`n_out` for the
+re-render). The 23.2 persistence/restore flow is unchanged apart from
+the two additive keys.
+
+### 53.5 Acceptance (A43)
+
+- **gate number-line (53.1.1)** — hand-computed over a scored
+  candidate: the best/target marker positions, the CI band present
+  only when `z·SE > 0`, the candidate dot, and the margin annotation
+  ("accepted: …", "missed by …", "over gen-gap tolerance", "inside
+  CI band (z*SE …)", "stopped") for each reason; the unscored (dup)
+case renders no dot + the honest caption; the `palette="default",
+  dark=False` call is byte-identical to an explicit call (G2); ARIA on
+  the SVG root (51.4.3).
+- **live frontier (53.2)** — the dominated set is hand-computed under
+  the 53.2.1 rule (a strictly-better candidate dominates; equal
+  pairs dominate nothing); the latest candidate is drawn as the
+  flash (larger dot + halo) and is excluded from the normal pass;
+  the empty case (no updates / no finite train time) renders the
+  header + message; ARIA on the SVG root.
+- **champion card (53.3)** — a body-field highlight (e.g.
+  `activation` on an mlp, `knn_k` on a knn) adds the amber ring and
+  changes the output; an annotation-row field (e.g.
+  `lr_schedule`) adds the `highlight: …` line; a family-irrelevant
+  field (e.g. `activation` on a knn) falls back to the label line;
+  the `highlight=None` call is byte-identical to the pre-v0.39 output
+  (G2).
+- **app (53.4)** — a finished 2-experiment run renders, in the
+  Experiments tab, the per-candidate gate number-line inside each
+  drill-down, the live-Pareto-frontier SVG, and the champion spec
+  card; the app source wires `svg_gate_line`, `svg_live_frontier`,
+  and `svg_architecture(..., highlight=...)`.
+- **Regression** — A1–A42 stay green (no default-path behavior
+  change: the loop, the summary keys, the pinned jsonl projections,
+  the pre-v0.39 `svg_architecture` output byte-identical); the A25
+  index advances (39 acceptance rows; `defined == set(range(1, 44))`);
+  the version stepped to `0.39.0` in both sources (33.1).
+
+### 53.6 Milestone (M42)
+
+**M42** — v0.39 decision views: the per-candidate gate number-line
+(53.1), the live Pareto frontier with its flash + dominance greying
+(53.2), and the live champion spec card with the just-mutated field
+highlighted (53.3), wired into the live drill, the drain loop, and
+the Experiments tab (53.4) (A43).
+
+## 54. v0.40 — hover tooltips on the zero-hover views + the wall-time cost strip
+
+The four hand-rolled SVG views (the score strip, the score-vs-gap
+scatter, the mutation timeline, and the confusion matrix) carried no
+hover detail: a dot or cell said *what* but not *why*. The wall-time
+budget was likewise invisible — the progress bar shows *how many
+experiments* remain, not *where the wall clock went*. This round adds
+hover `<title>`s to every dot/cell/segment (zero deps, stdlib SVG)
+and a live wall-time cost strip that is the flip side of the budget
+bar.
+
+### 54.1 Hover tooltips on the four zero-hover views
+
+Every scored dot and cell gains a stdlib SVG `<title>` so hovering an
+element names the reason (score / CI / overfit / dup), the gen-gap,
+and the field — the data is already in every update (23.1). No new
+view; the four pre-v0.40 renderers grow a title.
+
+**54.1.1 strip / scatter / timeline.** (54.1.1.1)
+`svg_score_strip`: a scored dot's title gains a ` (reason)` suffix
+when the update carries a truthy `reason` (byte-stable — no suffix —
+when it is falsy, so the pre-v0.40 title is unchanged); the unscored
+dot keeps its existing ` (reason)` text. (54.1.1.2)
+`svg_score_gap_scatter`: the same ` (reason)` suffix rule on each
+finite dot. (54.1.1.3) `svg_mutation_timeline`: a cell's title gains
+` @ <score>` when scored and ` (reason)` when a reason is present;
+an unscored cell carries only the reason (no score). All three keep
+their existing geometry, palette (51.4), ARIA (51.4.3), and
+byte-identical default (G2).
+
+**54.1.2 confusion matrix.** Every cell gains a
+`true X → predicted Y: N (P% of row)` title — the row-normalised
+share (`N / row_total`, `0.0%` for a zero row, never a divide
+error). The empty case (no diagnostics) still renders the header +
+message with no cell titles. The diagonal highlight and counts are
+unchanged (28.2).
+
+### 54.2 The wall-time cost strip
+
+`_time_segments(updates, baseline_seconds)` yields the ordered
+segments — the baseline first, then one per update with a finite,
+non-negative `train_seconds`; a `None` / non-finite / negative /
+bool train time (the free duplicate rejections, R3) and any non-dict
+entry is dropped, and a `None` baseline is omitted. `svg_time_strip`
+renders them as a single horizontal stacked bar (width 640, L = R =
+24 → pw = 592), each segment a rect of proportional width carrying a
+hover `<title>` (`<label>: <s>s (<pct>%)`) and a `total <T> s`
+caption. The empty case (no finite segments) renders a header +
+`no train-time data` message with no segment titles; a zero total
+renders equal-width segments whose titles read `0.00 s`. Palette
+(51.4: `_BASELINE` for the baseline, `_LINE` for experiments), dark
+(51.4.2), and ARIA (51.4.3) all apply; the default call is
+byte-identical (G2).
+
+### 54.3 The runner carries the strip
+
+`DashboardRunner.start()`'s info dict and `finish()`'s result dict
+both carry `baseline_train_seconds` — the reset baseline's
+`train_seconds` (the first `KIND_BASELINE` log row, 35.1), a finite
+`>= 0` number, or `None` when absent. `finish()`'s result carries
+`time_strip_svg` = `svg_time_strip(updates, baseline_train_seconds)`.
+Additive over the update stream; the loop and the 23.2 persistence
+keys are unchanged.
+
+### 54.4 The app
+
+The drain loop gains a live `vtime = st.empty()` placeholder that
+re-renders `svg_time_strip(stream, info.get("baseline_train_seconds"))`
+each step. The Results tab renders the finished `res.get("time_strip_svg")`
+(restored-view-safe). The Experiments tab gains a
+`Wall-time cost strip (SPEC.md 54.2)` subheader that renders the strip
+over the stored stream (`res["updates"]`,
+`res.get("baseline_train_seconds")`). A finished run renders a valid
+`time_strip_svg`.
+
+### 54.5 Acceptance (A44)
+
+- **strip / scatter / timeline titles (54.1.1)** — the scored dots / 
+cells gain ` (reason)` when a reason is present and stay byte-stable
+(no suffix) when it is falsy; the timeline cell gains ` @ <score>`
+when scored; the unscored branches are unchanged (27.1).
+- **matrix titles (54.1.2)** — every cell carries a
+`true X → predicted Y: N (P% of row)` title (a zero row reads 0.0%);
+the empty case renders the header + message with no cell titles.
+- **wall-time strip (54.2.1)** — `_time_segments` is hand-computed
+(baseline first, one per finite-train-second update, dup / non-finite
+/ negative / bool dropped, `None` baseline omitted, non-dict skipped);
+`svg_time_strip` geometry (width 640, L = R = 24 → pw = 592),
+per-segment hover titles, the `total` caption, the empty and
+zero-total edges, the palette/dark byte-identity + Okabe swap, ARIA,
+and valid XML.
+- **runner (54.3)** — `start()` info + `finish()` result both carry a
+finite `>= 0` `baseline_train_seconds`; the result carries a valid
+`time_strip_svg`.
+- **app (54.4)** — the source wires the live `vtime` placeholder +
+render, the Results-tab `time_strip_svg` guard, and the Experiments-tab
+subheader; a finished run renders the strip and a valid
+`time_strip_svg`.
+- **Regression** — A1–A43 stay green (no default-path behavior change;
+the pre-v0.40 four-view SVGs byte-identical); the A25 index advances
+(40 acceptance rows; `defined == set(range(1, 45))`); the version
+stepped to `0.40.0` in both sources (33.1).
+
+### 54.6 Milestone (M43)
+
+**M43** — v0.40 comprehension views: hover `<title>`s on the four
+zero-hover SVG views (54.1) and the live wall-time cost strip, the
+flip side of the budget bar, in the runner and the app (54.2–54.4)
+(A44).
+
+---
+
+## 55. Make it feel live (v0.41)
+
+The drain (51.2.3) is a synchronous block: the page renders only as
+messages arrive and goes silent between ticks. v0.41 adds three opt-in /
+default-no-op views that make a live run *feel* live, in the app (23.1) and
+the pure core (`live.py`, `plotting.py`); the run semantics in
+`dashboard.DashboardRunner` are unchanged. Every default stays
+byte-identical (55.4) and the A-pins stay green (G2).
+
+### 55.1 The opt-in stream mode
+
+A sidebar **`live_mode`** checkbox (the `live_mode` key, default off) is a
+view preference, not a run knob (`ALL_KNOBS` is untouched — the 48.1
+invariant). When on, `_drain_live` runs its **non-blocking** path (the
+`stream_mode` argument, `False` by default): on a drained-catch-up it
+`break`s instead of blocking on `queue.get`, and the app `st.rerun()`s and
+re-drains from the accumulated messages (51.2.3 reattach), so the page
+*ticks*.
+
+Two pure helpers in `live.py` drive the live UI (the app is a thin
+renderer):
+
+- **`freshness_caption(n_updates, elapsed_s, done=False)`** — the
+  `live · N experiment(s) in · updated <when>` line; `done` flips the state
+  word; `<when>` is `just now` under 5 s, `<n>s ago` (`.0f`) after, and `?`
+  for a non-finite elapsed; a non-finite / missing count reads `0`. Pure,
+  deterministic (G2).
+- **`stream_tick_due(record)`** — `True` when the worker thread is still
+  alive and the record is not `drained` (tick the page); a dead / absent
+  thread or a drained record reads `False` (finish the synchronous drain).
+  Pure over the record dict (G2).
+
+**55.1.2 the pulsing sparkline.** `plotting.svg_live_sparkline(best_series,
+target=None, live=True, palette="default", dark=False)` renders the
+running-best curve with the last point as a *pulse* — a soft halo
+(`r="7"`, `opacity 0.28`) around the dot when `live=True`, only the plain
+dot when `live=False` (the `current best <v>` title, + ` (live)` when
+live); an optional horizontal target line (inside the y-range only); the
+empty case renders the header + `no experiments yet` (21.2). Palette
+(51.4), dark (51.4.2), and ARIA (51.4.3) apply; the default call is
+byte-identical (G2); valid XML.
+
+The drain renders the caption + sparkline once in the `info` branch (when
+`stream_mode`) and re-renders both each `update` (elapsed from the worker's
+`last_msg_at`, set by `_worker_loop.post`). The `live_mode` flag is named
+`stream_mode` in the drain / `_run` signatures to avoid shadowing the drain's
+local `stream` (the update list).
+
+### 55.2 The mid-run status snapshot
+
+A **`copy_status`** button (the `copy_status` key, distinct from
+`download_button`) — gated on a run existing (`result is not None or
+live`; a no-op before that) — renders `status_snapshot(...)` as a
+self-contained text card: the `LIVE` / `FINAL` header, the task + head, the
+rows, the baseline + target, the running best, the budget spent (with the
+remaining + ETA when one can be estimated), and the **last 3 decisions**
+(scored or dup, in stream order). `live.snapshot_inputs(rec, result)`
+resolves the `(info, stream, best_series, done)` tuple from the finished
+`result` (done=`True`) or a live `record` (done=`False`); a missing /
+non-finite field degrades to an omitted line (never a crash).
+
+### 55.3 The reference-run overlay
+
+A **`ref_run`** selectbox (the `ref_run` key, default `(none)`), gated on a
+run existing, lists `live.list_reference_runs(runs_dir)` — the runs dir's
+scored runs as `[(run_id, best_series)]`, sorted, empty-safe — and renders
+`plotting.svg_reference_curve(current, reference, target=None)`: the current
+run's best curve solid (`_ACCEPTED`) on top, a past run's curve
+(`live.reference_curve`, its `experiments.jsonl` through
+`running_best_curve`) dashed + faint (`_REJECTED`, `opacity 0.75`) beneath,
+on one shared experiment-index axis with an adaptive y-range over both (plus
+the target when given). This is the live-curve analogue of `svg_run_curves`
+(50.1.3) with one borrowed curve. An empty `current` renders the header +
+message (21.2); an empty `reference` (with a non-empty `current`) renders
+only the current curve. Palette / dark / ARIA apply; the default call is
+byte-identical (G2); valid XML.
+
+### 55.4 Default byte-identity and the A-pins
+
+Every feature is opt-in / default-no-op: `live_mode` off, `stream_mode`
+`False`, `copy_status` unpressed, `ref_run` `(none)` — so the synchronous
+drain and the pre-v0.41 app surface are byte-identical, and every existing
+AppTest (key-based, no total-widget counts) stays green. The new widget keys
+(`live_mode`, `copy_status`, `ref_run`) are distinct from the existing
+ones. Core (`live.py`, `plotting.py`) is pure and deterministic (G2); the
+app is a thin renderer (23.1).
+
+### 55.5 Acceptance (A45)
+
+- **freshness / tick (55.1)** — `freshness_caption` is hand-computed
+  (state word, count, `just now` / `<n>s ago` / `?`, `done` flip, non-finite
+  count → 0); `stream_tick_due` is hand-computed (alive + not drained →
+  tick; dead / absent thread, drained, or non-dict → finish).
+- **sparkline (55.1.2)** — `svg_live_sparkline` live-vs-static (the `r="7"`
+  halo present only when live, the dot in both, the `current best` title,
+  ARIA), the target line (in-range only), the empty case, the
+  palette/dark byte-identity + Okabe swap, and valid XML.
+- **status snapshot (55.2)** — `snapshot_inputs` (core) is hand-computed
+  (live record → done `False`; finished result → done `True` + its stream;
+  nothing → the empty defaults); `status_snapshot` renders the card (the
+  LIVE/FINAL header, task/head/rows, baseline/target/best, the budget line,
+  the last 3 decisions scored + dup), the `done` header flip, and the
+  graceful degradation over missing / non-finite fields.
+- **reference overlay (55.3)** — `reference_curve` is hand-computed (the
+  running-best from a written `experiments.jsonl`; `[]` on a missing run /
+  dir); `list_reference_runs` (sorted scored runs, skipping a non-dir / no
+  scored run; `[]` on a missing dir); `svg_reference_curve` current-solid +
+  reference-dashed-faint, the legend, the empty and reference-only edges,
+  the palette/dark byte-identity, ARIA, and valid XML.
+- **app (55.4)** — the source wires the `live_mode` checkbox, the
+  `stream_mode=` drain / tick + `st.rerun`, the `copy_status` button +
+  `status_snapshot` render, and the `ref_run` selectbox +
+  `svg_reference_curve` render (all distinct keys, all default no-op); the
+  *default* path runs end-to-end (a finished run persists its result, the
+  two new widgets are present, and pressing `copy_status` renders the
+  snapshot).
+- **Regression** — A1–A44 stay green (no default-path behavior change;
+  the pre-v0.41 SVGs byte-identical); the A25 index advances (41
+  acceptance rows; `defined == set(range(1, 46))`); the version stepped to
+  `0.41.0` in both sources (33.1).
+
+### 55.6 Milestone (M44)
+
+**M44** — v0.41 "make it feel live": the opt-in stream mode (the live
+freshness caption + the pulsing best-score sparkline, 55.1), the mid-run
+status snapshot (55.2), and the reference-run overlay (55.3) — all opt-in /
+default-no-op, byte-identical under defaults (55.4) (A45).

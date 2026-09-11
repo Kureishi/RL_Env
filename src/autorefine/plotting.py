@@ -43,6 +43,7 @@ OKABE_ITO = (
 _BG = "white"  # the header background rect (byte-identical default)
 _LANE_BG = "#f6f8fa"  # score-strip lane panels (was inline hex)
 _NOSCORE_BG = "#e8edf3"  # the score-strip no-score zone (was inline hex)
+_HIGHLIGHT = "#b45309"  # 53.3 (v0.39): the champion-card highlight color (fixed —
 
 # 51.4.2: the dark set — background, axis/text, surfaces, and every data
 # color, dark-tuned (the light set above stays the byte-identical default)
@@ -575,6 +576,8 @@ def _svg_score_strip(rows, width: int = 640) -> str:
         if s is not None:
             cx = L + pw * (min(max(s, 0.0), 100.0) / 100.0)
             title = f"step {step}: {label} @ {s:.2f}"
+            if reason:  # 54.1 (v0.40): the reason, when present (byte-stable
+                title += f" ({html.escape(str(reason))})"  # when falsy)
         else:
             cx = L + 14 + 18 * no_score_k  # stacked at the left edge
             no_score_k += 1
@@ -608,8 +611,9 @@ def _svg_score_strip(rows, width: int = 640) -> str:
     return "\n".join(parts)
 
 
-def _gap_rows(rows) -> list[tuple[int, float, float, bool]]:
-    """(step, score, gen_gap, accepted) for scored updates (SPEC.md 27.2).
+def _gap_rows(rows) -> list[tuple[int, float, float, bool, str | None]]:
+    """(step, score, gen_gap, accepted, reason) for scored updates
+    (SPEC.md 27.2; the `reason` hover, SPEC.md 54.1).
 
     Unscored updates (duplicate / invalid_spec rejections) carry no
     `candidate_score` and contribute no dots (SPEC.md 27.2).
@@ -619,7 +623,8 @@ def _gap_rows(rows) -> list[tuple[int, float, float, bool]]:
         s = r.get("candidate_score")
         g = r.get("gen_gap")
         if _finite(s) and _finite(g):
-            out.append((i, float(s), float(g), bool(r.get("accepted"))))
+            out.append((i, float(s), float(g), bool(r.get("accepted")),
+                        r.get("reason")))
     return out
 
 
@@ -648,9 +653,9 @@ def _svg_score_gap_scatter(rows, width: int = 640, height: int = 360) -> str:
         return "\n".join(parts)
     L, T, R, B = 72.0, 28.0, 24.0, 44.0
     pw, ph = width - L - R, height - T - B
-    gaps = [g for _i, _s, g, _a in pts]
+    gaps = [g for _i, _s, g, _a, _r in pts]
     y_lo = min(0.0, min(gaps))
-    y_hi = max(0.05 * max(s for _i, s, _g, _a in pts), max(gaps)) * 1.15
+    y_hi = max(0.05 * max(s for _i, s, _g, _a, _r in pts), max(gaps)) * 1.15
     if y_hi - y_lo < 1e-9:  # degenerate guard, like the other charts
         y_hi = y_lo + 1.0
 
@@ -673,12 +678,13 @@ def _svg_score_gap_scatter(rows, width: int = 640, height: int = 360) -> str:
     parts.append(f'<text x="{(a[0] + b[0]) / 2:.1f}" y="{(a[1] + b[1]) / 2 - 8:.1f}" '
                  f'text-anchor="middle" font-size="11" fill="{_REJECTED}">'
                  f'gen_gap = 0.05 * score (18.5 tolerance)</text>')
-    for step, s, g, accepted in pts:
+    for step, s, g, accepted, reason in pts:
         fill = _ACCEPTED if accepted else _SCORED_REJ
         label = "accepted" if accepted else "scored-rejected"
+        why = f" ({html.escape(str(reason))})" if reason else ""  # 54.1
         parts.append(f'<circle cx="{x(s):.1f}" cy="{y(g):.1f}" r="5" fill="{fill}">'
                      f'<title>step {step}: {label}, score {s:.2f}, '
-                     f'gen_gap {g:.3f}</title></circle>')
+                     f'gen_gap {g:.3f}{why}</title></circle>')
     parts.append("</svg>")
     return "\n".join(parts)
 
@@ -787,49 +793,64 @@ def svg_ladder_curve(entries, levels, width: int = 640, height: int = 360) -> st
     return "\n".join(parts)
 
 
-def _timeline_cells(rows) -> list[tuple[int, str, bool, bool]]:
-    """(step, field, accepted, scored) cells from update rows (SPEC.md 26.3).
+def _timeline_cells(rows, field: str | None = None) -> list[tuple[int, str, bool, bool, float | None, str | None]]:
+    """(step, field, accepted, scored, score-or-None, reason) cells from
+    update rows (SPEC.md 26.3; the score + reason hovers, SPEC.md 54.1).
 
     `rows` are the runner's update dicts (SPEC.md 23.1): `mutation` fields,
     `accepted` outcome, `candidate_score` present iff the step was scored.
+    `field` (SPEC.md 52.2.2, v0.38) keeps only that mutation field's cells;
+    `None` (default) keeps all — byte-identical to the pre-v0.38 cells (G2).
     """
     cells = []
     for i, r in enumerate(rows or [], start=1):
-        scored = _finite(r.get("candidate_score"))
+        s = r.get("candidate_score")
+        scored = _finite(s)
         accepted = bool(r.get("accepted"))
+        reason = r.get("reason")
         for f in (r.get("mutation") or []):
-            if isinstance(f, str):
-                cells.append((i, f, accepted, scored))
+            if isinstance(f, str) and (field is None or f == field):
+                cells.append((i, f, accepted, scored,
+                              float(s) if scored else None, reason))
     return cells
 
 
 def svg_mutation_timeline(rows, width: int = 640, row_h: int = 18,
-                          palette: str = "default", dark: bool = False) -> str:
+                          palette: str = "default", dark: bool = False,
+                          field: str | None = None) -> str:
     """SPEC.md 51.4 (v0.37): the palette (51.4.1) + dark (51.4.2) params
     over `_svg_mutation_timeline` (the pre-v0.37 body); default
-    byte-identical (G2); ARIA always on (51.4.3)."""
+    byte-identical (G2); ARIA always on (51.4.3).
+    `field` (SPEC.md 52.2.2, v0.38): the focus-field filter — only that
+    mutation field's cells render; `None` (default) is byte-identical."""
     with _styled(palette, dark):
-        return _svg_mutation_timeline(rows, width=width, row_h=row_h)
+        return _svg_mutation_timeline(rows, width=width, row_h=row_h,
+                                      field=field)
 
 
-def _svg_mutation_timeline(rows, width: int = 640, row_h: int = 18) -> str:
+def _svg_mutation_timeline(rows, width: int = 640, row_h: int = 18,
+                           field: str | None = None) -> str:
     """Mutation timeline: field x update-index strip (SPEC.md 26.3).
 
     One cell per (step, field) mutation — green accepted, red
     scored-rejected, grey unscored (duplicate / invalid-spec). Pure,
     deterministic in `rows` (G2), valid XML like the other §21.2 charts.
+    `field` (SPEC.md 52.2.2, v0.38) filters the cells to one mutation
+    field (the app's cross-view focus, 52.2.2); `None` = all fields.
     """
-    cells = _timeline_cells(rows)
+    cells = _timeline_cells(rows, field)
     if not cells:
         height = 120
         parts = _svg_header(width, height, "mutation timeline (empty)")
+        empty_msg = (f"no {html.escape(field)} mutations in the update stream"
+                     if field else "no mutations in the update stream")
         parts.append(
             f'<text x="{width // 2}" y="{height // 2}" text-anchor="middle" '
-            f'font-size="13" fill="{_AXIS}">no mutations in the update stream</text>')
+            f'font-size="13" fill="{_AXIS}">{empty_msg}</text>')
         parts.append("</svg>")
         return "\n".join(parts)
-    fields = sorted({f for _, f, _, _ in cells})
-    n_steps = max(i for i, _, _, _ in cells)
+    fields = sorted({c[1] for c in cells})
+    n_steps = max(c[0] for c in cells)
     row = {f: j for j, f in enumerate(fields)}
     L = 130  # left label gutter
     T = 30
@@ -843,7 +864,7 @@ def _svg_mutation_timeline(rows, width: int = 640, row_h: int = 18) -> str:
         y = T + row[f] * row_h
         parts.append(f'<text x="{L - 8}" y="{y + row_h - 5}" text-anchor="end" '
                      f'font-size="11" fill="{_AXIS}">{html.escape(f)}</text>')
-    for i, f, accepted, scored in cells:
+    for i, f, accepted, scored, score, reason in cells:
         if accepted:
             fill, label = _ACCEPTED, "accepted"
         elif scored:
@@ -852,10 +873,12 @@ def _svg_mutation_timeline(rows, width: int = 640, row_h: int = 18) -> str:
             fill, label = _REJECTED, "unscored"
         x = L + (i - 1) * col_w
         y = T + row[f] * row_h
+        sbit = f" @ {score:.2f}" if score is not None else ""  # 54.1
+        why = f" ({html.escape(str(reason))})" if reason else ""  # 54.1
         parts.append(
             f'<rect x="{x:.1f}" y="{y + 1:.1f}" width="{max(1.0, col_w - 1):.1f}" '
             f'height="{row_h - 2:.1f}" fill="{fill}">'
-            f'<title>step {i}: {html.escape(f)} ({label})</title></rect>')
+            f'<title>step {i}: {html.escape(f)} ({label}){sbit}{why}</title></rect>')
     for i in {1, n_steps // 2 + 1, n_steps}:  # 1, mid, n step ticks
         x = L + (i - 1) * col_w + col_w / 2
         parts.append(f'<text x="{x:.1f}" y="{bottom + 16}" text-anchor="middle" '
@@ -1081,6 +1104,165 @@ def _svg_run_curves(named, target=None, width: int = 640, height: int = 360):
     return "\n".join(parts)
 
 
+def _svg_live_sparkline(best_series, target=None, width: int = 220, height: int = 48,
+                        live: bool = True) -> str:
+    """55.1 (v0.41): the live best-score sparkline. `best_series` is the
+    running-best series (the baseline seeds point 0, like `running_best_curve`);
+    the last point is drawn as a *pulse* — a larger flash dot with a soft
+    halo — when `live=True`, a plain dot when `live=False` (55.1.2). An
+    optional horizontal target line (inside the y-range only). Empty input
+    renders the empty header + message (the 21.2 convention). Valid XML,
+    pure, deterministic (G2); ASCII-only text."""
+    pts = [float(v) for v in (best_series or []) if _finite(v)]
+    if not pts:
+        parts = _svg_header(width, height, "best score (empty)")
+        parts.append(f'<text x="{width // 2}" y="{height // 2}" '
+                     f'text-anchor="middle" font-size="12" fill="{_AXIS}">'
+                     f'no experiments yet</text>')
+        parts.append("</svg>")
+        return "\n".join(parts)
+    lo, hi = min(pts), max(pts)
+    if target is not None and _finite(target):
+        lo = min(lo, float(target)); hi = max(hi, float(target))
+    if hi - lo < 1e-9:
+        hi = lo + 1e-3
+    L, T, R, B = 8.0, 22.0, 8.0, 8.0
+    pw, ph = width - L - R, height - T - B
+
+    def x(i: int) -> float:
+        return L + pw * (i / (len(pts) - 1) if len(pts) > 1 else 0.5)
+
+    def y(s: float) -> float:
+        return T + ph * (1.0 - (float(s) - lo) / (hi - lo))
+
+    parts = _svg_header(width, height, "best score (live sparkline)")
+    if (target is not None and _finite(target)
+            and lo - 1e-9 <= float(target) <= hi + 1e-9):
+        ty = y(target)
+        parts.append(f'<line x1="{L:.1f}" y1="{ty:.1f}" x2="{L + pw:.1f}" '
+                     f'y2="{ty:.1f}" stroke="{_REJECTED}" stroke-width="1" '
+                     f'stroke-dasharray="4 3"><title>target {float(target):g}'
+                     f'</title></line>')
+    line = " ".join(f"{x(i):.1f},{y(v):.1f}" for i, v in enumerate(pts))
+    parts.append(f'<polyline fill="none" stroke="{_LINE}" stroke-width="2" '
+                 f'points="{line}"/>')
+    lx, ly = x(len(pts) - 1), y(pts[-1])
+    last = f"current best {pts[-1]:.2f}" + (" (live)" if live else "")
+    if live:
+        parts.append(f'<circle cx="{lx:.1f}" cy="{ly:.1f}" r="7" '
+                     f'fill="{_ACCEPTED}" opacity="0.28"><title>{last}'
+                     f'</title></circle>')
+    parts.append(f'<circle cx="{lx:.1f}" cy="{ly:.1f}" r="4" '
+                 f'fill="{_ACCEPTED}"><title>{last}</title></circle>')
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def svg_live_sparkline(best_series, target=None, width: int = 220, height: int = 48,
+                       live: bool = True, palette: str = "default",
+                       dark: bool = False) -> str:
+    """55.1 (v0.41): the live best-score sparkline with a pulsing last
+    point (a flash when `live=True`, a static dot when `live=False`).
+    `palette`/`dark` per SPEC.md 51.4; the default call is byte-identical
+    to an explicit one (G2); ARIA always on (51.4.3). Pure, valid XML."""
+    with _styled(palette, dark):
+        return _svg_live_sparkline(best_series, target=target, width=width,
+                                   height=height, live=live)
+
+
+def _svg_reference_curve(current, reference, target=None, width: int = 640,
+                         height: int = 360) -> str:
+    """55.3 (v0.41): the reference-run overlay — the current run's
+    best-score curve (solid, `_ACCEPTED`, on top) with a past run's
+    best-score curve (`reference`) drawn faintly beneath it (dashed,
+    `_REJECTED`, greyed, `opacity 0.75`), on one shared experiment-index
+    axis (0..max-1, so different-length runs align by position) with an
+    adaptive y-range over both (plus the target when given). This is the
+    live-curve analogue of `svg_run_curves` (50.1.3) with one borrowed
+    curve. An empty `current` renders the empty header + message (21.2);
+    an empty `reference` (with a non-empty `current`) renders only the
+    current curve. ARIA, valid XML, pure, deterministic (G2)."""
+    cur = [float(v) for v in (current or []) if _finite(v)]
+    ref = [float(v) for v in (reference or []) if _finite(v)]
+    if not cur:
+        parts = _svg_header(width, height, "reference overlay (empty)")
+        parts.append(f'<text x="{width // 2}" y="{height // 2}" '
+                     f'text-anchor="middle" font-size="13" fill="{_AXIS}">'
+                     f'no live curve to overlay</text>')
+        parts.append("</svg>")
+        return "\n".join(parts)
+    m = max(len(cur), len(ref))
+    lo = min([min(cur)] + ([min(ref)] if ref else []))
+    hi = max([max(cur)] + ([max(ref)] if ref else []))
+    if target is not None and _finite(target):
+        lo = min(lo, float(target)); hi = max(hi, float(target))
+    if hi - lo < 1e-9:
+        hi = lo + 1e-3
+    L, T, R, B = 72.0, 28.0, 24.0, 44.0
+    pw, ph = width - L - R, height - T - B
+
+    def x(i: int) -> float:
+        return L + pw * (i / (m - 1) if m > 1 else 0.5)
+
+    def y(s: float) -> float:
+        return T + ph * (1.0 - (float(s) - lo) / (hi - lo))
+
+    parts = _svg_header(width, height, "live best vs reference run")
+    parts += _svg_axes(L, T, pw, ph, lo, hi, 0.0,
+                       float(m - 1) if m > 1 else 1.0, "experiment index")
+    if (target is not None and _finite(target)
+            and lo - 1e-9 <= float(target) <= hi + 1e-9):
+        ty = y(target)
+        parts.append(f'<line x1="{L:.1f}" y1="{ty:.1f}" x2="{L + pw:.1f}" '
+                     f'y2="{ty:.1f}" stroke="{_REJECTED}" stroke-width="1" '
+                     f'stroke-dasharray="5 4"><title>target '
+                     f'{float(target):g}</title></line>')
+    if ref:  # the reference: drawn first (beneath), dashed + faint
+        xs = [x(i) for i in range(len(ref))]
+        parts.append(f'<polyline fill="none" stroke="{_REJECTED}" '
+                     f'stroke-width="1.5" stroke-dasharray="5 4" opacity="0.75" '
+                     f'points="{" ".join(f"{a:.1f},{y(v):.1f}"
+                                          for a, v in zip(xs, ref))}">'
+                     f'<title>reference (past run)</title></polyline>')
+    xs = [x(i) for i in range(len(cur))]  # the current: on top, solid
+    parts.append(f'<polyline fill="none" stroke="{_ACCEPTED}" '
+                 f'stroke-width="2.5" points="{" ".join(f"{a:.1f},{y(v):.1f}"
+                                                         for a, v in zip(xs, cur))}">'
+                 f'<title>current run</title></polyline>')
+    for a, v in zip(xs, cur):
+        parts.append(f'<circle cx="{a:.1f}" cy="{y(v):.1f}" r="3.5" '
+                     f'fill="{_ACCEPTED}"><title>current: {v:.2f}</title>'
+                     f'</circle>')
+    ly = T + 10
+    parts.append(f'<line x1="{L + pw - 110:.1f}" y1="{ly:.1f}" '
+                 f'x2="{L + pw - 90:.1f}" y2="{ly:.1f}" stroke="{_ACCEPTED}" '
+                 f'stroke-width="3"/><text x="{L + pw - 84:.1f}" '
+                 f'y="{ly + 4:.1f}" font-size="11" fill="{_AXIS}">'
+                 f'current</text>')
+    if ref:
+        ry = T + 26
+        parts.append(f'<line x1="{L + pw - 110:.1f}" y1="{ry:.1f}" '
+                     f'x2="{L + pw - 90:.1f}" y2="{ry:.1f}" '
+                     f'stroke="{_REJECTED}" stroke-width="3" '
+                     f'stroke-dasharray="5 4"/><text x="{L + pw - 84:.1f}" '
+                     f'y="{ry + 4:.1f}" font-size="11" fill="{_AXIS}">'
+                     f'reference</text>')
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def svg_reference_curve(current, reference, target=None, width: int = 640,
+                        height: int = 360, palette: str = "default",
+                        dark: bool = False) -> str:
+    """55.3 (v0.41): the reference-run overlay — the current best-score
+    curve with a past run's curve drawn faintly beneath it. `palette`/
+    `dark` per SPEC.md 51.4; the default call is byte-identical to an
+    explicit one (G2); ARIA always on (51.4.3). Pure, valid XML."""
+    with _styled(palette, dark):
+        return _svg_reference_curve(current, reference, target=target,
+                                    width=width, height=height)
+
+
 # --- SPEC.md 28 (v0.14): learning views (C1-C4) ----------------------------
 
 def _curve_records(history) -> list[tuple[float, float, float]]:
@@ -1238,8 +1420,15 @@ def svg_confusion_matrix(diag: dict | None, cell: int = 56) -> str:
             diag_cell = (i == j)
             fill = "#d1fae5" if diag_cell else "#ffffff"
             tcol = _ACCEPTED if diag_cell else _AXIS
+            count = int(conf[i][j])  # 54.1 (v0.40): the cell's hover title
+            row_total = sum(int(conf[i][c]) for c in range(k))
+            pct = (count / row_total * 100.0) if row_total else 0.0
+            cell_title = (f"true {html.escape(str(labels[i]))} \u2192 predicted "
+                          f"{html.escape(str(labels[j]))}: {count} "
+                          f"({pct:.1f}% of row)")
             parts.append(f'<rect x="{x}" y="{y}" width="{cell}" height="{cell}" '
-                         f'fill="{fill}" stroke="{_AXIS}"/>')
+                         f'fill="{fill}" stroke="{_AXIS}">'
+                         f'<title>{cell_title}</title></rect>')
             parts.append(f'<text x="{x + cell // 2}" y="{y + cell // 2 + 4}" '
                          f'text-anchor="middle" font-size="12" fill="{tcol}">'
                          f'{int(conf[i][j])}</text>')
@@ -1330,7 +1519,8 @@ def _spec_get(spec, key, default=None):
     return getattr(spec, key, default)
 
 
-def svg_architecture(spec, state_dim, n_out, width: int = 640) -> str:
+def svg_architecture(spec, state_dim, n_out, width: int = 640,
+                     highlight: str | None = None) -> str:
     """C4 (SPEC.md 28.4): a small horizontal annotated block diagram of one
     ModelSpec — an input block (state_dim) -> the family body -> an output
     block (n_out), plus an annotations row (optimizer always; LR schedule,
@@ -1341,7 +1531,14 @@ def svg_architecture(spec, state_dim, n_out, width: int = 640) -> str:
     (depth D), bagged"; boost "N rounds (depth D), boosted" (in both
     `N = train_steps // 100` clamped 2..50 as in the trainer,
     `D = architecture[0]`); knn "k = knn_k". ASCII-only, pure, valid XML,
-    deterministic (G2)."""
+    deterministic (G2).
+
+    SPEC.md 53.3 (v0.39): `highlight` (default ``None`` -> byte-identical,
+    G2) names a ModelSpec field; the body block(s) the field drives get an
+    amber ring (per family), while a field that drives no body block
+    (the annotation-row fields — optimizer / lr schedule / early stopping
+    / gradient clipping / label smoothing — or an unknown field) gets a
+    `highlight: <field>` line under the annotations."""
     if spec is None:
         height = 160
         parts = _svg_header(width, height, "architecture (empty)")
@@ -1354,6 +1551,21 @@ def svg_architecture(spec, state_dim, n_out, width: int = 640) -> str:
     arch = [int(v) for v in arch]
     n_out = int(n_out) if _finite(n_out) else 1
     sdim = int(state_dim) if _finite(state_dim) else 0
+
+    # 53.3 (v0.39): the highlight mapping (None -> byte-identical, G2)
+    hl = str(highlight).strip().lower() if highlight is not None else None
+    _NOTE_FIELDS = ("optimizer", "lr_schedule", "early_stopping_patience",
+                    "gradient_clipping", "label_smoothing")
+    _BLOCK_BY_FAMILY = {
+        "mlp": ("architecture", "activation", "hidden_dim"),
+        "convnet": ("architecture",),
+        "tree": ("architecture", "train_steps"),
+        "boost": ("architecture", "train_steps"),
+        "knn": ("knn_k",),
+    }
+    ring = hl is not None and (
+        hl == "model_family" or hl in _BLOCK_BY_FAMILY.get(family, ()))
+    hl_note = hl is not None and not ring
 
     blocks: list[tuple[str, str]] = []  # (title, detail)
     if family == "mlp":
@@ -1392,7 +1604,8 @@ def svg_architecture(spec, state_dim, n_out, width: int = 640) -> str:
     height = int(T + bh + 64)  # room for the annotations row
     parts = _svg_header(width, height, f"best spec architecture ({family})")
 
-    def block(x: float, title: str, detail: str, fill: str) -> None:
+    def block(x: float, title: str, detail: str, fill: str,
+              body: bool = False) -> None:
         parts.append(f'<rect x="{x:.1f}" y="{T:.1f}" width="{bw}" height="{bh}" '
                      f'fill="{fill}" stroke="{_AXIS}" rx="4"/>')
         parts.append(f'<text x="{x + bw / 2:.1f}" y="{T + 22:.1f}" text-anchor="middle" '
@@ -1401,6 +1614,10 @@ def svg_architecture(spec, state_dim, n_out, width: int = 640) -> str:
             parts.append(f'<text x="{x + bw / 2:.1f}" y="{T + 40:.1f}" '
                          f'text-anchor="middle" font-size="10" fill="{_AXIS}">'
                          f'{html.escape(detail)}</text>')
+        if body and ring:  # 53.3: the highlight ring (gated -> default unchanged)
+            parts.append(f'<rect x="{x - 2:.1f}" y="{T - 2:.1f}" '
+                         f'width="{bw + 4:.0f}" height="{bh + 4:.0f}" '
+                         f'fill="none" stroke="{_HIGHLIGHT}" stroke-width="2.5"/>')
 
     def arrow(x0: float, x1: float) -> None:
         y = T + bh / 2
@@ -1415,7 +1632,7 @@ def svg_architecture(spec, state_dim, n_out, width: int = 640) -> str:
     for title, detail in blocks:
         x += gap
         arrow(x - gap, x)
-        block(x, title, detail, "#eef2f7")
+        block(x, title, detail, "#eef2f7", body=True)
         x += bw
     x += gap
     arrow(x - gap, x)
@@ -1439,8 +1656,311 @@ def svg_architecture(spec, state_dim, n_out, width: int = 640) -> str:
     parts.append(f'<text x="{width / 2:.1f}" y="{T + bh + 28:.1f}" '
                  f'text-anchor="middle" font-size="11" fill="{_AXIS}">'
                  f'{html.escape(text)}</text>')
+    if hl_note:  # 53.3: the annotation-row highlight (gated -> default unchanged)
+        parts.append(f'<text x="{width / 2:.1f}" y="{T + bh + 46:.1f}" '
+                     f'text-anchor="middle" font-size="11" fill="{_HIGHLIGHT}">'
+                     f'highlight: {html.escape(str(highlight))}</text>')
     parts.append("</svg>")
     return "\n".join(parts)
+
+
+# --- v0.39 per-candidate decision views (SPEC.md 53) --------------------------
+
+def _gate_note(candidate, best, z_se, accepted, reason) -> tuple[str, str]:
+    """53.1 (v0.39): the number-line annotation — the 52.1.1 gate-math
+    numbers plus the 51.3.2 reason word ("missed by 4.2", "accepted
+    +3.1 over best", "inside CI band", "over gen-gap tolerance").
+    ASCII-only; the reason is caller-supplied (51.3.1) so the core stays
+    free of the accounting import."""
+    r = str(reason or "").strip() or "score"
+    c = float(candidate) if _finite(candidate) else None
+    b = float(best) if _finite(best) else None
+    delta = (c - b) if (c is not None and b is not None) else None
+    if c is None:
+        return (f"unscored ({r}) — no candidate dot (R3)", _REJECTED)
+    if accepted:
+        if delta is not None and b is not None:
+            return (f"accepted: {delta:+.2f} over best {b:.2f}", _ACCEPTED)
+        return ("accepted", _ACCEPTED)
+    if r == "stopped":
+        note = "stopped — final step"
+        if delta is not None and b is not None:
+            note = f"stopped — final step ({delta:+.2f} vs best {b:.2f})"
+        return (note, _REJECTED)
+    if delta is not None and delta <= 0.0 and b is not None:
+        return (f"missed by {-delta:.2f} (score {c:.2f} vs best {b:.2f})",
+                _SCORED_REJ)
+    if r == "overfit":
+        if delta is not None:
+            return (f"above best by {delta:.2f}, over gen-gap tolerance (18.5)",
+                    _SCORED_REJ)
+        return ("over gen-gap tolerance (18.5)", _SCORED_REJ)
+    if r == "ci":
+        if delta is not None and z_se > 0.0:
+            return (f"above best by {delta:.2f}, inside CI band (z*SE {z_se:.2f})",
+                    _SCORED_REJ)
+        return ("inside CI band (18.6)", _SCORED_REJ)
+    if delta is not None and b is not None:
+        return (f"rejected ({r}): {delta:+.2f} vs best {b:.2f}", _SCORED_REJ)
+    return (f"rejected ({r})", _SCORED_REJ)
+
+
+def _svg_gate_line(candidate, best_before, target, z_se, accepted, reason,
+                   width: int) -> str:
+    """53.1 (v0.39): the gate number-line body — a fixed 0-100 axis (the
+    27.1 strip's tick pattern), vertical markers for the running best and
+    the target, the CI band [best, best + z*SE] shaded when z*SE > 0
+    (the 18.6 gate), the candidate's dot, and the margin annotation
+    (52.1.1 numbers + the 51.3.2 reason word). An unscored (dup)
+    candidate renders best/target markers + the honest "unscored"
+    caption and no dot (52.1.1: the gate math is undefined when its
+    input is not finite)."""
+    c = float(candidate) if _finite(candidate) else None
+    b = float(best_before) if _finite(best_before) else None
+    t = float(target) if _finite(target) else None
+    zse = float(z_se) if _finite(z_se) and float(z_se) > 0.0 else 0.0
+    L = 24.0
+    R = 24.0
+    pw = width - L - R
+    y0 = 96.0  # the axis line
+    T = 56.0   # the marker tops
+    height = 170
+    parts = _svg_header(width, height, "gate number-line")
+
+    def x(v: float) -> float:
+        return L + pw * min(max(float(v), 0.0), 100.0) / 100.0
+
+    if b is not None and zse > 0.0:  # the CI band (SPEC.md 18.6)
+        x1, x2 = x(b), x(b + zse)
+        parts.append(f'<rect x="{min(x1, x2):.1f}" y="{T:.1f}" '
+                     f'width="{abs(x2 - x1):.1f}" height="{y0 - T:.1f}" '
+                     f'fill="{_BAND}" fill-opacity="0.35">'
+                     f'<title>CI band: best + z*SE (SPEC.md 18.6)</title></rect>')
+    if b is not None:  # the running best
+        parts.append(f'<line x1="{x(b):.1f}" y1="{T:.1f}" x2="{x(b):.1f}" '
+                     f'y2="{y0:.1f}" stroke="{_BASELINE}" stroke-width="2"/>')
+        parts.append(f'<text x="{x(b):.1f}" y="{T - 8:.1f}" text-anchor="middle" '
+                     f'font-size="10" fill="{_BASELINE}">best {b:.2f}</text>')
+    if t is not None:  # the target (dashed)
+        parts.append(f'<line x1="{x(t):.1f}" y1="{T:.1f}" x2="{x(t):.1f}" '
+                     f'y2="{y0:.1f}" stroke="{_LADDER}" stroke-width="2" '
+                     f'stroke-dasharray="5 4"/>')
+        parts.append(f'<text x="{x(t):.1f}" y="{T - 8:.1f}" text-anchor="middle" '
+                     f'font-size="10" fill="{_LADDER}">target {t:.1f}</text>')
+    if c is not None:  # the candidate dot
+        fill = _ACCEPTED if accepted else _SCORED_REJ
+        parts.append(f'<circle cx="{x(c):.1f}" cy="{(T + y0) / 2:.1f}" r="6" '
+                     f'fill="{fill}">'
+                     f'<title>candidate {c:.2f} ({reason or "?"})</title></circle>')
+    parts.append(f'<line x1="{L:.1f}" y1="{y0:.1f}" x2="{L + pw:.1f}" '
+                 f'y2="{y0:.1f}" stroke="{_AXIS}"/>')
+    for s in (0, 25, 50, 75, 100):
+        xx = L + pw * s / 100.0
+        parts.append(f'<line x1="{xx:.1f}" y1="{y0:.1f}" x2="{xx:.1f}" '
+                     f'y2="{y0 + 4:.1f}" stroke="{_AXIS}"/>')
+        parts.append(f'<text x="{xx:.1f}" y="{y0 + 16:.1f}" text-anchor="middle" '
+                     f'font-size="11" fill="{_AXIS}">{s}</text>')
+    note, ncolor = _gate_note(candidate, best_before, zse, accepted, reason)
+    parts.append(f'<text x="{width / 2:.1f}" y="{y0 + 38:.1f}" '
+                 f'text-anchor="middle" font-size="11" fill="{ncolor}">'
+                 f'{html.escape(note)}</text>')
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def svg_gate_line(candidate, best_before, target, z_se: float = 0.0,
+                  accepted: bool = False, reason: str = "",
+                  palette: str = "default", dark: bool = False,
+                  width: int = 520) -> str:
+    """SPEC.md 53.1 (v0.39): the per-candidate gate number-line — turns
+    the reason column's "no" into a picture (53.1.1): a 0-100 axis with
+    the best, the target, the CI band, and the candidate's dot, annotated
+    with the margin. ``palette``/``dark`` per SPEC.md 51.4; the default
+    is byte-identical (G2); ARIA always on (51.4.3). Pure, deterministic
+    (G2); ASCII-only text."""
+    with _styled(palette, dark):
+        return _svg_gate_line(candidate, best_before, target, z_se,
+                              accepted, reason, width)
+
+
+def _frontier_rows(updates):
+    """53.2 (v0.39): (step, score, train_seconds) for the scored updates
+    that carry a finite train time (the G2 scatter's data contract);
+    unscored (dup) steps contribute no points."""
+    rows = []
+    for i, u in enumerate(updates or [], start=1):
+        if not isinstance(u, dict):
+            continue
+        s, t = u.get("candidate_score"), u.get("train_seconds")
+        if _finite(s) and _finite(t):
+            rows.append((i, float(s), float(t)))
+    return rows
+
+
+def _dominated(rows) -> set[int]:
+    """53.2 (v0.39): the dominated indices — A dominates B iff
+    A.score >= B.score and A.train <= B.train and A is strict in at
+    least one coordinate. Pure, deterministic (G2)."""
+    out: set[int] = set()
+    for i, (_, si, ti) in enumerate(rows):
+        for j, (_, sj, tj) in enumerate(rows):
+            if i == j:
+                continue
+            if sj >= si and tj <= ti and (sj > si or tj < ti):
+                out.add(i)
+                break
+    return out
+
+
+def _svg_live_frontier(updates, width: int, height: int) -> str:
+    """53.2 (v0.39): the live Pareto frontier body — the score-vs-train-
+    time scatter that grows each step: frontier candidates in the accent
+    color, dominated ones greyed, the latest candidate drawn as a flash
+    (larger dot + halo ring). Empty -> header + message (the other
+    empty cases' pattern)."""
+    rows = _frontier_rows(updates)
+    if not rows:
+        parts = _svg_header(width, height, "live Pareto frontier (empty)")
+        parts.append(
+            f'<text x="{width // 2}" y="{height // 2}" text-anchor="middle" '
+            f'font-size="13" fill="{_AXIS}">no scored candidates with a train time yet</text>')
+        parts.append("</svg>")
+        return "\n".join(parts)
+    dom = _dominated(rows)
+    L, T = 56.0, 40.0
+    pw = width - L - 24.0
+    ph = height - T - 64.0
+    x_hi = max(t for _, _, t in rows)
+    if x_hi <= 0.0:
+        x_hi = 1.0
+    parts = _svg_header(width, height, "live Pareto frontier")
+    parts += _svg_axes(L, T, pw, ph, 0.0, 100.0, 0.0, x_hi, "train time (s)")
+
+    def px(t: float) -> float:
+        return L + pw * float(t) / x_hi
+
+    def py(s: float) -> float:
+        return T + ph * (1.0 - min(max(float(s), 0.0), 100.0) / 100.0)
+
+    latest = len(rows) - 1
+    for i, (step, s, t) in enumerate(rows):
+        if i == latest:  # drawn below as the flash
+            continue
+        if i in dom:
+            fill, r = _REJECTED, 4.0
+        else:
+            fill, r = _LINE, 5.0
+        parts.append(f'<circle cx="{px(t):.1f}" cy="{py(s):.1f}" r="{r}" '
+                     f'fill="{fill}">'
+                     f'<title>candidate {step}: score {s:.2f}, {t:.2f}s '
+                     f'({"dominated" if i in dom else "frontier"})</title></circle>')
+    step, s, t = rows[latest]  # the latest candidate: flash (53.2.2)
+    parts.append(f'<circle cx="{px(t):.1f}" cy="{py(s):.1f}" r="10" fill="none" '
+                 f'stroke="{_BASELINE}" stroke-width="2"/>')
+    parts.append(f'<circle cx="{px(t):.1f}" cy="{py(s):.1f}" r="7" '
+                 f'fill="{_ACCEPTED}">'
+                 f'<title>latest candidate {step}: score {s:.2f}, {t:.2f}s'
+                 f'</title></circle>')
+    ly = T + ph + 50.0  # legend (below the 34px x-unit line)
+    lx = L
+    for text, fill in (("frontier", _LINE), ("dominated", _REJECTED),
+                       ("latest", _ACCEPTED)):
+        parts.append(f'<rect x="{lx:.1f}" y="{ly - 9:.1f}" width="10" height="10" '
+                     f'fill="{fill}"/>')
+        parts.append(f'<text x="{lx + 14:.1f}" y="{ly:.1f}" font-size="11" '
+                     f'fill="{_AXIS}">{text}</text>')
+        lx += 14 + 7 * len(text) + 20
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def svg_live_frontier(updates, palette: str = "default", dark: bool = False,
+                      width: int = 560, height: int = 340) -> str:
+    """SPEC.md 53.2 (v0.39): the live Pareto frontier — the
+    score-vs-train-time scatter that grows each step, the new candidate
+    drawn as a flash, dominated ones greyed (53.2.1/53.2.2). The
+    frontier data (`candidate_score` + `train_seconds`) is already in
+    every update (23.1). ``palette``/``dark`` per SPEC.md 51.4; the
+    default is byte-identical (G2); ARIA always on (51.4.3). Pure,
+    deterministic (G2); ASCII-only text."""
+    with _styled(palette, dark):
+        return _svg_live_frontier(updates, width, height)
+
+
+def _time_segments(updates, baseline_seconds=None):
+    """54.2 (v0.40): the wall-time segments — the baseline first, then one
+    per update that has a finite, non-negative `train_seconds`.
+
+    `updates` are the runner's update dicts (SPEC.md 23.1); a step whose
+    `train_seconds` is missing / None / non-finite (the free duplicate
+    rejections, R3) contributes no segment. `baseline_seconds` (the reset
+    baseline's train time, SPEC.md 54.2) is the first segment when finite
+    and non-negative; `None` omits it. Pure, deterministic (G2)."""
+    segs = []
+    if _finite(baseline_seconds) and float(baseline_seconds) >= 0.0:
+        segs.append(("baseline", float(baseline_seconds)))
+    for i, u in enumerate(updates or [], start=1):
+        if not isinstance(u, dict):
+            continue
+        t = u.get("train_seconds")
+        if _finite(t) and float(t) >= 0.0:
+            segs.append((f"exp {i}", float(t)))
+    return segs
+
+
+def _svg_time_strip(updates, baseline_seconds=None, width: int = 640) -> str:
+    """54.2 (v0.40): the wall-time cost strip — a single horizontal stacked
+    bar showing where the train time went: the baseline segment first
+    (orange, `_BASELINE`), then one blue (`_LINE`) segment per update that
+    has a finite train time. Every segment carries a hover `<title>`
+    (SPEC.md 54.1) with its label, seconds, and % of the total.
+
+    Edges: the empty case (no finite segments) renders a header + message;
+    a zero total renders equal-width segments whose titles read `0.00 s`;
+    tiny segments keep a 1.0 px minimum width so they stay hoverable.
+    Pure, valid XML, deterministic (G2), ASCII-safe text."""
+    segs = _time_segments(updates, baseline_seconds)
+    if not segs:
+        height = 104
+        parts = _svg_header(width, height, "wall-time cost strip (empty)")
+        parts.append(
+            f'<text x="{width // 2}" y="{height // 2}" text-anchor="middle" '
+            f'font-size="13" fill="{_AXIS}">no train-time data in the update stream</text>')
+        parts.append("</svg>")
+        return "\n".join(parts)
+    L, R = 24.0, 24.0
+    pw = width - L - R
+    bar_y, bar_h = 44.0, 30.0
+    total = sum(t for _, t in segs)
+    parts = _svg_header(width, 104, "wall-time cost strip")
+    x = L
+    for label, t in segs:
+        frac = (t / total) if total > 0.0 else 1.0 / len(segs)
+        seg_w = max(1.0, pw * frac)
+        fill = _BASELINE if label == KIND_BASELINE else _LINE  # 35.1 (C4)
+        pct = (t / total * 100.0) if total > 0.0 else 100.0 / len(segs)
+        title = f"{label}: {t:.2f} s ({pct:.1f}%)"
+        parts.append(f'<rect x="{x:.1f}" y="{bar_y:.1f}" width="{seg_w:.1f}" '
+                     f'height="{bar_h:.1f}" fill="{fill}" stroke="{_AXIS}">'
+                     f'<title>{title}</title></rect>')
+        x += seg_w
+    parts.append(f'<text x="{L + pw / 2:.1f}" y="{bar_y + bar_h + 20:.1f}" '
+                 f'text-anchor="middle" font-size="12" fill="{_AXIS}">'
+                 f'total {total:.2f} s</text>')
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def svg_time_strip(updates, baseline_seconds=None, width: int = 640,
+                   palette: str = "default", dark: bool = False) -> str:
+    """SPEC.md 54.2 (v0.40): the wall-time cost strip — a single horizontal
+    stacked bar (the baseline first, then one segment per update with a
+    finite train time), each segment carrying a hover `<title>` (SPEC.md
+    54.1) with its label, seconds, and share of the total. ``palette`` /
+    ``dark`` per SPEC.md 51.4; the default is byte-identical (G2); ARIA
+    always on (51.4.3). Pure, deterministic (G2); ASCII-safe text."""
+    with _styled(palette, dark):
+        return _svg_time_strip(updates, baseline_seconds, width=width)
 
 
 # --- v0.15 multi-run / policy views (SPEC.md 29) -----------------------------

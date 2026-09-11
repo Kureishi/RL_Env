@@ -13,9 +13,11 @@ import os
 import queue as _queue
 import tempfile
 import threading
+import time  # 55.1 (v0.41): the live freshness caption (stream mode)
 from pathlib import Path
 
 import streamlit as st
+import streamlit.components.v1 as components  # 52.4 (v0.38): the keyboard JS
 
 from autorefine import __version__
 from autorefine.accounting import candidate_reason  # 51.3.2 (v0.37)
@@ -23,6 +25,11 @@ from autorefine.dashboard import (
     DashboardRunner,
     diff_n_summaries,  # N-run compare (SPEC.md 50.1.1, v0.36)
     diff_two_summaries,
+    eta_seconds,  # 52.3.1 (v0.38): the live remaining-time estimate
+    fields_seen,  # 52.2.1 (v0.38): the focus-field options
+    gate_math,  # 52.1.1 (v0.38): the per-candidate gate math
+    plateau_streak,  # 52.3.1 (v0.38): the live stall sentinel
+    PLATEAU_HINT,  # 52.3.1 (v0.38): the display stall threshold
     running_best_curve,  # N-run curves (SPEC.md 50.1.2, v0.36)
     ucb_trace,
 )
@@ -42,20 +49,35 @@ from autorefine.gate import Objective, model_size
 from autorefine.runconfig import RunConfig, fit_recipe  # 50.1.5/50.2 (v0.36)
 from autorefine.narrate import narrate_baseline, narrate_run, narrate_step
 from autorefine.simulate import what_if_block
+# SPEC.md 55 (v0.41): "make it feel live" — the three live-view helpers.
+# The app is a thin renderer over these pure core functions (55.x).
+from autorefine.live import (
+    freshness_caption,  # 55.1: the live freshness caption
+    list_reference_runs,  # 55.3: the reference-overlay options
+    snapshot_inputs,  # 55.2: the (info, stream, best, done) resolver
+    status_snapshot,  # 55.2: the mid-run status card
+    stream_tick_due,  # 55.1: the non-blocking stream-mode tick decision
+)
 # SPEC.md 42.2.2 (v0.28): `diff_two_summaries` moved to core (the
 # `autorefine compare` CLI prints it); the app keeps the name importable
 # (SPEC.md 38.4 unchanged) — this *is* `dashboard.diff_two_summaries`.
 from autorefine.plotting import (
     svg_action_probabilities,  # noqa: F401 (D2 view, SPEC.md 29.2)
+    svg_architecture,  # C4 (28.4) + 53.3 (v0.39) the champion spec card
     svg_audio_waveform,
+    svg_gate_line,  # 53.1 (v0.39) the per-candidate gate number-line
+    svg_live_frontier,  # 53.2 (v0.39) the live Pareto frontier
     svg_score_curve,  # 51.4.4 (v0.37): the palette/dark result re-render
     svg_field_value_matrix,  # V2 view (SPEC.md 30.2)
     svg_frontier_overlay,  # A/B view (SPEC.md 49.3.3)
     svg_loss_curves,
     svg_mutation_timeline,
     svg_run_curves,  # N-run overlay (SPEC.md 50.1.3, v0.36)
+    svg_live_sparkline,  # 55.1 (v0.41) the pulsing live sparkline
+    svg_reference_curve,  # 55.3 (v0.41) the reference-run overlay
     svg_score_gap_scatter,
     svg_score_strip,
+    svg_time_strip,  # B2 (SPEC.md 54.2) the wall-time cost strip
     svg_seed_curves,  # V1 view (SPEC.md 30.1)
     svg_seed_variance,  # D1 view (SPEC.md 29.1)
     svg_task_returns,  # noqa: F401 (D2 view, SPEC.md 29.2)
@@ -202,6 +224,70 @@ def _spec_v(v) -> str:
     if isinstance(v, (list, tuple)):
         return ",".join(str(x) for x in v)
     return str(v)
+
+
+def _drill_body(u: dict, gm: dict, reason: str,
+                target: float | None = None) -> None:
+    """SPEC.md 52.1.2 (v0.38): the drill-down body — the per-candidate
+    gate-math table (52.1.1: the score gate 39.2.2, the overfit gate
+    18.5, the CI gate 18.6), the spec-diff line (26.2), and the
+    candidate's train/holdout loss curves (28.1, the ready-made
+    `svg_loss_curves`). Shared by the live drill (the latest candidate,
+    52.1.2) and the Experiments tab (every candidate, 52.1.2). An
+    unscored (dup) candidate renders the honest caption instead of the
+    numbers (52.1.1: every output `None` when its input is not
+    finite).
+
+    SPEC.md 53.1 (v0.39): the body now leads with the gate number-line
+    — the same 52.1.1 gate-math numbers + the 51.3.2 reason word + the
+    target, rendered as a picture (best/target markers, the CI band,
+    the candidate's dot, the margin annotation)."""
+    st.markdown(svg_gate_line(
+        gm.get("candidate"), gm.get("best_before"),
+        target, gm.get("z_se") or 0.0,
+        bool(gm.get("accepted", False)), reason), unsafe_allow_html=True)
+
+    def _fmt(v) -> str:
+        if v is None:
+            return "—"
+        if isinstance(v, float):
+            return f"{v:.4f}"
+        return str(v)
+
+    if gm.get("candidate") is None:
+        st.caption("unscored (free duplicate, R3) — the gate math is "
+                   "undefined for this step (SPEC.md 52.1.1)")
+    else:
+        st.dataframe([
+            {"metric": "candidate score", "value": _fmt(gm.get("candidate")),
+             "gate": "the holdout score (SPEC.md 18.3)"},
+            {"metric": "best before", "value": _fmt(gm.get("best_before")),
+             "gate": "the running best at this step (39.2.2)"},
+            {"metric": "delta (candidate - best)",
+             "value": _fmt(gm.get("delta")),
+             "gate": "the score gate — 39.2.2 priority 1"},
+            {"metric": "gen gap (holdout - generation)",
+             "value": _fmt(gm.get("gen_gap")), "gate": "SPEC.md 18.5"},
+            {"metric": "gen tolerance (5% of score)",
+             "value": _fmt(gm.get("gen_tol")),
+             "gate": "the overfit gate — SPEC.md 18.5"},
+            {"metric": "SE (block std)", "value": _fmt(gm.get("se")),
+             "gate": "SPEC.md 18.3/18.6 (52.1.1)"},
+            {"metric": "z (the env's z)", "value": _fmt(gm.get("z")),
+             "gate": "SPEC.md 18.6 (0 = legacy)"},
+            {"metric": "z * SE threshold", "value": _fmt(gm.get("z_se")),
+             "gate": "accept iff delta > max(0, z*SE) — SPEC.md 18.6"},
+        ], width="stretch")
+        st.caption(f"verdict: **{reason}** (the 51.3.2 reason column)")
+    diffs = u.get("spec_diff") or []
+    if diffs:
+        st.caption("spec: " + " · ".join(
+            f"{d['field']}: {_spec_v(d['old'])} → {_spec_v(d['new'])}"
+            for d in diffs))
+    else:
+        st.caption("spec: unchanged this step (no field mutation)")
+    st.markdown(svg_loss_curves(u.get("loss_history") or []),
+                unsafe_allow_html=True)
 
 
 def _palette_kwargs() -> dict:
@@ -354,6 +440,7 @@ def _worker_loop(runner: DashboardRunner, record: dict) -> None:
 
     def post(kind: str, payload) -> None:
         msgs.append((kind, payload))
+        record["last_msg_at"] = time.monotonic()  # 55.1: freshness (stream mode)
         q.put(True)  # a wakeup token; the payload itself lives in `msgs`
 
     try:
@@ -374,11 +461,20 @@ def _worker_loop(runner: DashboardRunner, record: dict) -> None:
         post("end", None)
 
 
-def _drain_live(record: dict, narrate: bool = False) -> None:
+def _drain_live(record: dict, narrate: bool = False,
+                stream_mode: bool = False) -> None:
     """SPEC.md 51.2.3 (v0.37): the synchronous drain — render the existing
     live UI (Task line, table, curve, decision views, progress) on the main
     thread from the worker's messages. A run still completes within one
     script run (the AppTest contract, 51.1.2).
+
+    ``stream_mode`` (SPEC.md 55.1, v0.41) is the opt-in **live** path: when
+    set, the drain is *non-blocking* — it renders the messages available so
+    far and returns as soon as the worker has caught up (the app then
+    ``st.rerun()``s and re-drains, so the page *ticks*), and it shows the
+    live freshness caption (55.1) + the pulsing best-score sparkline
+    (55.1.2). Default (``False``) is the byte-identical synchronous drain —
+    every AppTest runs this path (55.4).
 
     Re-runnable: it replays ``record["messages"]`` from the start, so if a
     script re-run **preempts** a live drain, the new run reattaches and
@@ -405,11 +501,14 @@ def _drain_live(record: dict, narrate: bool = False) -> None:
     stream: list[dict] = []
     table = chart = bar = note = narr = None
     vbars = vmatrix = vtimeline = vucb = vstrip = vscatter = None
+    vfresh = vspark = None  # 55.1 (v0.41): the live freshness + sparkline
 
     while True:
         if idx >= len(msgs):
             if not thread.is_alive():
                 record["drained"] = True
+                break
+            if stream_mode:  # 55.1: non-blocking — the app ticks and re-drains
                 break
             try:
                 q.get(timeout=300)
@@ -442,6 +541,7 @@ def _drain_live(record: dict, narrate: bool = False) -> None:
             }]
             best_series = [round(info["baseline_score"], 2)]
             best_before = info["baseline_score"]
+            rows_meta = [None]  # 52.2.2: per-row mutations (baseline: none)
             table = st.empty()
             chart = st.empty()
             bar = st.progress(0.0, text="starting…")
@@ -455,6 +555,24 @@ def _drain_live(record: dict, narrate: bool = False) -> None:
             vucb = st.empty() if runner.policy_name == "bandit" else None
             vstrip = st.empty()  # G1 (SPEC.md 27.1)
             vscatter = st.empty()  # G2 (SPEC.md 27.2)
+            vfrontier = st.empty()  # 53.2 (v0.39) the live Pareto frontier
+            vchamp = st.empty()    # 53.3 (v0.39) the live champion spec card
+            vtime = st.empty()  # B2 (SPEC.md 54.2) the wall-time cost strip
+            # live-interaction placeholders (SPEC.md 52, v0.38): the
+            # ETA/plateau caption (52.3) + the latest-candidate drill-down
+            # (52.1); the focus selectbox (52.2) is created exactly once,
+            # at the first update that introduces any mutation field
+            meta = st.empty()
+            drill = st.empty()
+            focus_ph = None
+            if stream_mode:  # 55.1 (v0.41): the live freshness + sparkline
+                vfresh = st.empty()
+                vspark = st.empty()
+                vfresh.caption(freshness_caption(0, 0.0, done=False))
+                vspark.markdown(
+                    svg_live_sparkline(best_series, info.get("target"),
+                                       live=True),
+                    unsafe_allow_html=True)
             continue
 
         if kind == "update":
@@ -485,6 +603,7 @@ def _drain_live(record: dict, narrate: bool = False) -> None:
                     for d in u.get("spec_diff") or []
                 ) or (u["reason"] or "—")),
             })
+            rows_meta.append(list(u.get("mutation") or []))  # 52.2.2
             best_series.append(round(u["best_score"], 2))
             # the bar tracks the *budget*, not the stream-row count: spent =
             # budget − experiments_left, so free duplicate rejections (R3) do
@@ -493,10 +612,27 @@ def _drain_live(record: dict, narrate: bool = False) -> None:
             bar.progress(frac, text=(
                 f"experiment {spent} of {budget}"
                 + ("  ·  dup step (free, R3)" if is_dup else "")))
-            table.dataframe(pd.DataFrame(rows), width="stretch")
+            # 52.2.2: the focus filter over the live table — keep only
+            # the rows whose update mutated the field (the baseline row
+            # mutated nothing and drops out when a field is focused)
+            focus = st.session_state.get("focus_field") or "All"
+            shown = ([r for r, m in zip(rows, rows_meta) if m and focus in m]
+                     if focus != "All" else rows)
+            table.dataframe(pd.DataFrame(shown), width="stretch")
             chart.line_chart(pd.DataFrame({"best score": best_series}))
             # decision views, live (SPEC.md 26.5) — pure over the stream so far
             stream.append(u)
+            # 52.2.2: the focus-field selectbox — exactly once per script
+            # run, at the first update that introduces any mutation field
+            # (a second key="focus_field" mid-drain would raise; the
+            # position is deterministic for a given message set)
+            if focus_ph is None and fields_seen(stream):
+                focus_ph = st.selectbox(
+                    "Focus field (filter the table + timeline)",
+                    ("All", *fields_seen(stream)), key="focus_field",
+                    help="Keep only the candidates that mutated this "
+                         "field — the live table and the mutation "
+                         "timeline both filter (SPEC.md 52.2.2).")
             if u.get("field_stats"):  # D1: per-field win-rate bars (SPEC.md 26.1)
                 vbars.bar_chart(
                     pd.DataFrame.from_dict(u["field_stats"], orient="index")
@@ -505,10 +641,27 @@ def _drain_live(record: dict, narrate: bool = False) -> None:
                 vmatrix.markdown(
                     svg_field_value_matrix(u["field_value_stats"]),
                     unsafe_allow_html=True)
-            vtimeline.markdown(  # D3: mutation timeline (SPEC.md 26.3)
-                svg_mutation_timeline(stream), unsafe_allow_html=True)
+            vtimeline.markdown(  # D3 (SPEC.md 26.3) + the 52.2.2 focus filter
+                svg_mutation_timeline(
+                    stream, field=None if focus == "All" else focus),
+                unsafe_allow_html=True)
             vstrip.markdown(svg_score_strip(stream), unsafe_allow_html=True)
             vscatter.markdown(svg_score_gap_scatter(stream), unsafe_allow_html=True)
+            vfrontier.markdown(svg_live_frontier(stream), unsafe_allow_html=True)
+            vtime.markdown(  # B2 (SPEC.md 54.2): the wall-time cost strip
+                svg_time_strip(stream, info.get("baseline_train_seconds")),
+                unsafe_allow_html=True)
+            if u["accepted"]:
+                # 53.3 (v0.39): the champion card re-renders on every
+                # acceptance, the just-mutated field (the mutation's
+                # first field) highlighted (53.3.2)
+                hl = (u.get("mutation") or [None])[0]
+                vchamp.markdown(svg_architecture(
+                    runner.env.best_spec.to_dict(),
+                    runner.env.task.state_dim,
+                    runner.env.task.n_outputs,
+                    highlight=hl if isinstance(hl, str) else None),
+                    unsafe_allow_html=True)
             if vucb is not None and u.get("ucb"):  # D4: bandit UCB (SPEC.md 26.4)
                 trace = ucb_trace(stream, alpha=runner.policy.alpha)
                 vucb.line_chart(
@@ -533,6 +686,34 @@ def _drain_live(record: dict, narrate: bool = False) -> None:
                     f"{kindtxt}: {'accepted +' if u['accepted'] else 'rejected '} "
                     f"{score_txt} · {diff_txt}"
                 )
+            # 52.3.1: the live ETA + the stall sentinel (the 31.1
+            # patience semantics, display-only — the env's opt-in
+            # `stall_patience` gate stays off unless explicitly set)
+            streak = plateau_streak(stream)
+            left = int(u.get("experiments_left") or 0)
+            eta = eta_seconds(stream, left)
+            eta_txt = f"≈ {eta:.1f}s" if eta is not None else "—"
+            meta.caption(
+                f"ETA {eta_txt} · {left} experiment(s) left"
+                + (f"  ·  plateau: {streak} non-improving scored "
+                   "experiments in a row — Stop would be honest "
+                   "(SPEC.md 31.1)" if streak >= PLATEAU_HINT else ""))
+            # 52.1.2: the live drill-down — the latest candidate's gate
+            # math (52.1.1, over its CI-gate inputs) + loss curves
+            gm = gate_math(u, best_before, runner.env.z_accept)
+            with drill.expander(
+                    f"candidate #{u['index']} — {reason} · gate math + "
+                    "curves (SPEC.md 52.1)", expanded=False):
+                _drill_body(u, gm, reason, info["target"])
+            if stream_mode and vfresh is not None:  # 55.1: re-render live
+                _el = (time.monotonic()
+                       - record.get("last_msg_at", time.monotonic()))
+                vfresh.caption(freshness_caption(len(stream), _el,
+                                                 done=False))
+                vspark.markdown(
+                    svg_live_sparkline(best_series, info.get("target"),
+                                       live=True),
+                    unsafe_allow_html=True)
             best_before = u["best_score"]  # the running best for the next row
             continue
 
@@ -544,6 +725,16 @@ def _drain_live(record: dict, narrate: bool = False) -> None:
             st.session_state["result"] = {
                 "info": info, "rows": rows, "best_series": best_series,
                 "res": res,
+                # SPEC.md 52 (v0.38): the Experiments-tab drill-down —
+                # the full update stream (each carries `se`/
+                # `effective_score`, 52.1.1) + the env's z (18.6)
+                "stream": stream,
+                "z": runner.env.z_accept,
+                # 53.3 (v0.39): the champion card's state_dim/n_out (the
+                # Experiments tab re-renders the architecture SVG from
+                # the stored stream)
+                "state_dim": runner.env.task.state_dim,
+                "n_out": runner.env.task.n_outputs,
             }
             continue
 
@@ -559,13 +750,17 @@ def _drain_live(record: dict, narrate: bool = False) -> None:
 def _run(csv_path: str, label: str, target: float, policy: str, seed: int,
          experiments: int, max_train: float, runs_dir: str,
          quality: str = "v04", narrate: bool = False,
-         initial_stop: bool = False) -> None:
+         initial_stop: bool = False,
+         stream_mode: bool = False) -> None:
     """Start the live loop (SPEC.md 51.2.3): build the runner, launch the
     daemon worker, then drain its messages synchronously into the live UI.
 
     ``narrate`` (default ``False``) swaps the terse per-step caption for a
     plain-English line (48.5.3). ``initial_stop`` (51.2.3) seeds the worker's
     stop flag — a Stop pressed alongside Run aborts after the first step.
+    ``stream_mode`` (SPEC.md 55.1, v0.41) is the opt-in live path: the drain
+    is non-blocking and the app ``st.rerun()``s to tick the page; the default
+    (``False``) is the byte-identical synchronous drain (55.4).
     """
     runner = DashboardRunner(
         csv_path=csv_path, label=label or None, target=target, policy=policy,
@@ -584,7 +779,9 @@ def _run(csv_path: str, label: str, target: float, policy: str, seed: int,
     record["thread"] = threading.Thread(
         target=_worker_loop, args=(runner, record), daemon=True)
     record["thread"].start()
-    _drain_live(record, narrate)
+    _drain_live(record, narrate, stream_mode=stream_mode)
+    if stream_mode and stream_tick_due(record):  # 55.1: tick the page
+        st.rerun()
 
 
 def _render_result(res: dict) -> None:
@@ -727,6 +924,13 @@ def _render_result(res: dict) -> None:
         st.markdown(
             _pal_svg(pal, res["scatter_svg"],
                      lambda: svg_score_gap_scatter(res["updates"], **pal)),
+            unsafe_allow_html=True)
+    if res.get("time_strip_svg"):  # B2 (SPEC.md 54.2): wall-time cost strip
+        st.markdown(
+            _pal_svg(pal, res["time_strip_svg"],
+                     lambda: svg_time_strip(res["updates"],
+                                            res.get("baseline_train_seconds"),
+                                            **pal)),
             unsafe_allow_html=True)
     if res.get("ladder_svg"):  # G3: curriculum ladder (SPEC.md 27.3)
         st.markdown(res["ladder_svg"], unsafe_allow_html=True)
@@ -1005,9 +1209,16 @@ def _render_experiments(payload: dict) -> None:
     per-candidate rows (including the 51.3.2 reason column, carried from
     the live table by the stored rows) + the best-score curve. Renders the
     live or the restored run (23.2 persistence); the verdict/plots/artifacts
-    live in the Results tab's `_render_result` (51.1.1)."""
+    live in the Results tab's `_render_result` (51.1.1).
+
+    SPEC.md 52 (v0.38): each candidate also gets a drill-down expander
+    (its gate math + loss curves, 52.1) over the stored stream (52.1.2),
+    and the table honors the Run tab's `focus_field` filter (52.2: one
+    widget, two views)."""
     import pandas as pd  # a streamlit dependency, app-only
     info = payload["info"]
+    stream = payload.get("stream") or []
+    z = payload.get("z", 0.0)
     st.subheader("Experiments")
     st.caption(
         f"label **{info['label']}** · head **{info['head']}** · "
@@ -1015,8 +1226,61 @@ def _render_experiments(payload: dict) -> None:
         f"· baseline **{info['baseline_score']:.2f}** vs target **{info['target']:.1f}** "
         f"· {info['policy']}, seed {info['seed']}"
     )
-    st.dataframe(pd.DataFrame(payload["rows"]), width="stretch")
+    # 52.2.2: the focus filter — the Run tab's selectbox owns the widget;
+    # here the table keeps only the candidates that mutated the field
+    # (the baseline row, which mutated nothing, drops out)
+    focus = st.session_state.get("focus_field") or "All"
+    rows = payload["rows"]
+    if focus != "All" and stream:
+        keep = {u.get("index") for u in stream
+                if isinstance(u.get("mutation"), list) and focus in u["mutation"]}
+        rows = [r for r in rows if r.get("#") in keep]
+    st.dataframe(pd.DataFrame(rows), width="stretch")
     st.line_chart(pd.DataFrame({"best score": payload["best_series"]}))
+    # 52.1.2: the per-candidate drill-downs — the running best is replayed
+    # exactly as the live loop does (the baseline seeds it; each update's
+    # `best_score` succeeds it), so the gate math is row-correct (52.1.1)
+    if stream:
+        st.subheader("Drill-downs — gate math + curves per candidate")
+        best_before = info.get("baseline_score")
+        for u in stream:
+            if not isinstance(u, dict):
+                continue
+            gm = gate_math(u, best_before, z)
+            reason = ("stopped" if u.get("reason") == "stopped"
+                      else candidate_reason(u.get("accepted"),
+                                           u.get("candidate_score"),
+                                           u.get("gen_gap"), best_before))
+            with st.expander(f"candidate #{u.get('index')} — {reason} · "
+                             "gate math + curves (SPEC.md 52.1)",
+                             expanded=False):
+                _drill_body(u, gm, reason, info.get("target"))
+            if u.get("best_score") is not None:
+                best_before = u["best_score"]
+    # 53.2/53.3 (v0.39): the decision views over the stored stream —
+    # the live Pareto frontier (53.2) + the champion spec card with the
+    # last acceptance's first mutated field highlighted (53.3)
+    if stream:
+        st.subheader("Decision views (SPEC.md 53.2)")
+        st.markdown(svg_live_frontier(stream), unsafe_allow_html=True)
+    best_spec = (payload.get("res") or {}).get("best_spec")
+    if best_spec:
+        last_hl = None
+        for u in reversed(stream):
+            if u.get("accepted") and u.get("mutation"):
+                last_hl = u["mutation"][0]
+                break
+        st.subheader("Champion spec (SPEC.md 53.3)")
+        st.markdown(svg_architecture(
+            best_spec, payload.get("state_dim", 1), payload.get("n_out", 1),
+            highlight=last_hl if isinstance(last_hl, str) else None),
+            unsafe_allow_html=True)
+    # B2 (SPEC.md 54.2): the wall-time cost strip over the stored stream
+    if stream:
+        st.subheader("Wall-time cost strip (SPEC.md 54.2)")
+        st.markdown(svg_time_strip(
+            stream, (payload.get("res") or {}).get("baseline_train_seconds")),
+            unsafe_allow_html=True)
 
 
 def _render_optin_views(path, label: str, target: float, policy: str,
@@ -1102,6 +1366,44 @@ def _render_optin_views(path, label: str, target: float, policy: str,
                        f"--runs-dir {pd_}` first.")
 
 
+# SPEC.md 52.4 (v0.38): the keyboard shortcuts (S = Stop, R = Run) — a
+# zero-height same-origin (srcdoc) iframe; its JS listens for keydown on
+# the parent document and DOM-clicks the matching existing button (the
+# 51.2.3 Stop / the run_button) — no new buttons, no new state. Guards:
+# skip while typing in an input/textarea/select, and while meta/ctrl/alt
+# are held (browser shortcuts stay intact).
+_KEYBOARD_HTML = (
+    "<script>"
+    "(function () {"
+    "  function findButton(snippet) {"
+    "    var doc = window.parent.document;"
+    "    var bs = doc.querySelectorAll('button');"
+    "    for (var i = 0; i < bs.length; i++) {"
+    "      if ((bs[i].textContent || '').indexOf(snippet) !== -1) {"
+    "        return bs[i];"
+    "      }"
+    "    }"
+    "    return null;"
+    "  }"
+    "  window.parent.document.addEventListener('keydown', function (ev) {"
+    "    if (ev.metaKey || ev.ctrlKey || ev.altKey) return;"
+    "    var t = ev.target;"
+    "    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' ||"
+    "             t.tagName === 'SELECT')) return;"
+    "    var key = (ev.key || '').toLowerCase();"
+    "    if (key === 's') {"
+    "      var b = findButton('Stop the run');"
+    "      if (b) { b.click(); ev.preventDefault(); }"
+    "    } else if (key === 'r') {"
+    "      var b = findButton('Run the improvement loop');"
+    "      if (b) { b.click(); ev.preventDefault(); }"
+    "    }"
+    "  }, true);"
+    "})();"
+    "</script>"
+)
+
+
 def main() -> None:
     st.set_page_config(page_title="AutoRefine dashboard", page_icon=":gear:",
                        layout="wide")
@@ -1182,6 +1484,13 @@ def main() -> None:
                             help="A friendly line per experiment instead of the "
                                  "terse caption (off by default, SPEC.md 48.5).")
 
+    live_mode = side.checkbox("Live dashboard (tick mode)", value=False,
+                              key="live_mode",
+                              help="Tick the page as experiments land instead "
+                                   "of one synchronous block (off by default; "
+                                   "the default path stays byte-identical — "
+                                   "SPEC.md 55.1).")
+
     path = _resolve_csv(upload, csv_path)
     result = st.session_state.get("result")
     if path is None and result is None:
@@ -1227,7 +1536,9 @@ def main() -> None:
         if live:  # 51.2.3 preemption-safe reattach: drain the surviving run
             if stop_pressed:
                 rec["stop"]["flag"] = True
-            _drain_live(rec, narrate)
+            _drain_live(rec, narrate, stream_mode=live_mode)
+            if live_mode and stream_tick_due(rec):  # 55.1: keep ticking
+                st.rerun()
         elif st.button("Run the improvement loop", type="primary",
                        key="run_button"):
             if path is None:
@@ -1236,7 +1547,8 @@ def main() -> None:
                 _run(path, label.strip() or None, float(target), policy,
                      int(seed), int(experiments), float(max_train),
                      runs_dir.strip() or "runs", quality,
-                     narrate=narrate, initial_stop=stop_pressed)
+                     narrate=narrate, initial_stop=stop_pressed,
+                     stream_mode=live_mode)
         elif result is not None:
             # widget-triggered re-run (download click, sidebar change) — the
             # last completed result stays on screen (SPEC.md 23.2 persistence)
@@ -1248,6 +1560,39 @@ def main() -> None:
             st.caption("Press **Run** — every experiment is shown as it "
                        "happens (live table + curve), then the verdict, "
                        "plots, and downloads (SPEC.md 23.2).")
+        # SPEC.md 55.2/55.3 (v0.41): the "feel live" views — the mid-run
+        # status snapshot (55.2) + the reference-run overlay (55.3). Gated
+        # on a run existing (live or finished); a no-op before that (55.4).
+        result = st.session_state.get("result")  # re-read (the run just
+        # finished; the sidebar's `result` was captured before it, 51.1.2)
+        if result is not None or live:
+            sinfo, sstream, sseries, sdone = snapshot_inputs(rec, result)
+            if st.button("Copy status (how's it going?)",
+                         key="copy_status",
+                         help="A self-contained text card: task, best, "
+                              "budget, ETA, last 3 decisions (SPEC.md 55.2)."):
+                st.code(status_snapshot(sinfo, sstream, sseries,
+                                        done=sdone), language="text")
+            _runs = runs_dir.strip() or "runs"
+            _refs = list_reference_runs(_runs)
+            _ref_labels = ["(none)"] + [name for name, _c in _refs]
+            _ref_i = st.selectbox("Reference run (overlay beneath the "
+                                  "current curve)", _ref_labels, index=0,
+                                  key="ref_run",
+                                  help="Draw a past run's best-score curve "
+                                       "faintly beneath the current one — "
+                                       "'am I beating last time?' "
+                                       "(SPEC.md 55.3).")
+            if _ref_i != "(none)" and sseries:
+                _ref_curve = dict(_refs)[_ref_i]
+                st.markdown(
+                    svg_reference_curve(sseries, _ref_curve,
+                                        target=(sinfo or {}).get("target")),
+                    unsafe_allow_html=True)
+        # 52.4 (v0.38): the keyboard shortcuts (S = Stop, R = Run) — the
+        # zero-height iframe renders once per script run in the Run tab;
+        # inert while idle (the idle screen st.stop()s before the tabs)
+        components.html(_KEYBOARD_HTML, height=0)
 
     with t_results:  # 51.1.1: the result view for the live or restored run
         result = st.session_state.get("result")  # re-read fresh (51.1.2)

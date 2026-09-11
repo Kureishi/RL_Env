@@ -31,7 +31,7 @@ broken run dir is rc 1.
 
 D (42.4) regression — A1–A31 stay green in their own files (no run
 behavior, summary key set, artifact, or app-view change); the version
-stepped to `0.37.0` in both sources (33.1, advanced again with v0.32,
+stepped to `0.39.0` in both sources (33.1, advanced again with v0.32,
 SPEC.md 45).
 
 House rules: no cross-test imports (the sine/csv fixtures are duplicated
@@ -565,7 +565,7 @@ def test_explain_missing_run_rc1(tmp_path, capsys):
 # --- SPEC.md 33.1 / 42.4 (A32): version ----------------------------------------
 
 def test_version_028_both_sources():
-    """A32 (42.4, 33.1): the version stepped to `0.37.0` in both sources
-    (advanced again with v0.37 ⇒ `0.37.0`, M40, SPEC.md 51, both together)."""
+    """A32 (42.4, 33.1): the version stepped to `0.39.0` in both sources
+    (advanced again with v0.39 ⇒ `0.39.0`, M42, SPEC.md 53, both together)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.37.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.41.0"

@@ -27,7 +27,7 @@ run dir is rc 1 (47.4.4).
 
 Regression — A1–A36 stay green (the rest of the suite); the A25 index
 advances (defined == set(range(1, 38))); the version stepped to
-`0.37.0` in both sources (33.1).
+`0.39.0` in both sources (33.1).
 
 House rules: no cross-test imports (fixtures duplicated per file);
 stdlib + numpy only; every test cites A37 + its SPEC §.
@@ -232,7 +232,7 @@ def test_config_bad_json(tmp_path, capsys):
 
 def test_version_flag(capsys):
     """A37 (SPEC.md 47.2.1): `autorefine --version` is rc 0 printing
-    `autorefine 0.37.0` from the 33.1 single version source."""
+    `autorefine 0.39.0` from the 33.1 single version source."""
     import contextlib
     import io
     buf = io.StringIO()
@@ -243,7 +243,7 @@ def test_version_flag(capsys):
             rc = exc.code
     assert rc == 0
     assert buf.getvalue().strip() == f"autorefine {autorefine.__version__}"
-    assert buf.getvalue().strip() == "autorefine 0.37.0"
+    assert buf.getvalue().strip() == "autorefine 0.41.0"
 
 
 def test_help_exit_table_and_examples():
@@ -389,10 +389,10 @@ def test_share_missing_dir(tmp_path, capsys):
 # --- 47.5 regression --------------------------------------------------------------
 
 def test_version_round_v033():
-    """A37 (SPEC.md 47.5, 33.1): the version stepped to `0.37.0` in
-    both sources (v0.37 ⇒ `0.37.0`, M40)."""
+    """A37 (SPEC.md 47.5, 33.1): the version stepped to `0.39.0` in
+    both sources (v0.39 ⇒ `0.39.0`, M42)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.37.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.41.0"
 
 
 def test_spec_cites_a37_and_round():

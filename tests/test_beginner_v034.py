@@ -18,7 +18,7 @@ Covers the pure core behind the app's five beginner features:
   (Windows console-safe).
 
 Plus the A38 round regression: the app renders the onboarding core
-(source scan of dashboard_app.py) and the version stepped to `0.37.0`
+(source scan of dashboard_app.py) and the version stepped to `0.39.0`
 in both sources (33.1).
 
 House rules: no cross-test imports (all fixtures synthesized here);
@@ -310,7 +310,7 @@ def test_app_preset_changes_advanced_widgets(tmp_path):
 
 
 def test_version_round_v034():
-    """A38 (SPEC.md 48.6, 33.1): the version stepped to `0.37.0` in
-    both sources (v0.37 ⇒ `0.37.0`, M40, SPEC.md 51)."""
+    """A38 (SPEC.md 48.6, 33.1): the version stepped to `0.39.0` in
+    both sources (v0.39 ⇒ `0.39.0`, M42, SPEC.md 53)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.37.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.41.0"
