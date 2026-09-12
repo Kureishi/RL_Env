@@ -2799,3 +2799,1056 @@ def svg_policy_trace(trace, width: int = 640, height: int = 360) -> str:
                  f'font-size="12" fill="{_AXIS}">{html.escape(summary)}</text>')
     parts.append("</svg>")
     return "\n".join(parts)
+
+
+# --- SPEC.md 57 (v0.43): the research decision surfaces ----------------------
+# All four render pure data derived by `research.py` (57.1-57.4) — the
+# already-logged `experiments.jsonl` / update stream. Hand-rolled SVG,
+# ARIA on via `_svg_header`, `<title>` tooltips everywhere, palette/dark
+# per 51.4, byte-identical under the default theme (G2).
+
+def svg_spec_lineage(lineage, width: int = 760, row_h: int = 64,
+                     palette: str = "default", dark: bool = False) -> str:
+    """SPEC.md 57.1 (v0.43): the spec-lineage graph (DAG) — \"where did we
+    actually explore\". Nodes are specs (the `research.spec_lineage` shape:
+    `{nodes: {hash: {label, score, accepted}}, edges: [{src, dst, accepted,
+    delta, fields}]}`), laid out as a tidy tree (the champion chain is the
+    backbone; rejected candidates branch off their parent): x is the
+    DFS leaf order (internal nodes centered over their children), y is the
+    depth. Edges are cubic beziers — green (`_ACCEPTED`) for accepted
+    mutations, grey (`_REJECTED`) for rejected, stroke width
+    `1.5 + 3.5*min(1, |delta|/10)` (weight = score delta, 57.1.2). Node
+    boxes: label (family + hash6) + the candidate's score, filled by
+    verdict, each with a `<title>` (score, verdict, mutated fields).
+    Legend + the `n specs / n mutations` summary. Pure, valid XML, deterministic
+    (G2); empty -> header + message."""
+    with _styled(palette, dark):
+        return _svg_spec_lineage(lineage, width, row_h)
+
+
+def _svg_spec_lineage(lineage, width: int, row_h: int) -> str:
+    nodes = lineage.get("nodes") if isinstance(lineage, dict) else None
+    edges = lineage.get("edges") if isinstance(lineage, dict) else None
+    nodes = {h: n for h, n in (nodes or {}).items()
+             if isinstance(h, str) and isinstance(n, dict)}
+    edges = [e for e in (edges or []) if isinstance(e, dict)]
+    if not nodes:
+        height = 120
+        parts = _svg_header(width, height, "spec lineage (empty)")
+        parts.append(f'<text x="{width // 2}" y="{height // 2}" text-anchor="middle" '
+                     f'font-size="13" fill="{_AXIS}">no logged specs (empty run)</text>')
+        parts.append("</svg>")
+        return "\n".join(parts)
+    incoming: dict[str, dict] = {}
+    children: dict[str, list[str]] = {}
+    for e in edges:
+        src, dst = e.get("src"), e.get("dst")
+        if not (isinstance(src, str) and isinstance(dst, str)
+                and src in nodes and dst in nodes):
+            continue
+        children.setdefault(src, []).append(dst)
+        if dst not in incoming:  # first (and only) parent wins (57.1)
+            incoming[dst] = e
+    # root: the first node (insertion order = log order) without a parent
+    root = next(iter(nodes))
+    for h in nodes:
+        if h not in incoming:
+            root = h
+            break
+    pos: dict[str, float] = {}
+    depth: dict[str, int] = {}
+    leaf = {"x": 0.0}
+
+    def _walk(h: str, d: int) -> float:
+        depth[h] = d
+        kids = children.get(h, [])
+        if not kids:
+            pos[h] = leaf["x"]
+            leaf["x"] += 1.0
+            return pos[h]
+        xs = [_walk(k, d + 1) for k in kids]
+        pos[h] = sum(xs) / len(xs)
+        return pos[h]
+
+    _walk(root, 0)
+    for h in nodes:  # safety: any unreachable node (shouldn't happen)
+        if h not in pos:
+            pos[h] = leaf["x"]
+            leaf["x"] += 1.0
+            depth[h] = 0
+    max_x = max(pos.values())
+    max_d = max(depth.values())
+    L, R, T = 20.0, 20.0, 40.0
+    unit = (width - L - R) / (max_x + 1.0)
+    height = int(T + (max_d + 1) * row_h + 56)
+
+    def px(h: str) -> float:
+        return L + unit * (pos[h] + 0.5)
+
+    def py(d: int) -> float:
+        return T + d * row_h
+
+    parts = _svg_header(width, height, "spec lineage (DAG)")
+    # edges first (below the nodes)
+    for e in edges:
+        src, dst = e.get("src"), e.get("dst")
+        if src not in pos or dst not in pos:
+            continue
+        ok = bool(e.get("accepted"))
+        delta = e.get("delta")
+        dw = 1.5 + 3.5 * min(1.0, abs(float(delta)) / 10.0) \
+            if isinstance(delta, (int, float)) and not isinstance(delta, bool) \
+            else 1.5
+        x1, y1 = px(src), py(depth[src]) + 20.0
+        x2, y2 = px(dst), py(depth[dst]) - 20.0
+        midy = (y1 + y2) / 2.0
+        stroke = _ACCEPTED if ok else _REJECTED
+        dlabel = "n/a" if delta is None else f"{float(delta):.2f}"
+        parts.append(
+            f'<path d="M {x1:.1f} {y1:.1f} C {x1:.1f} {midy:.1f}, '
+            f'{x2:.1f} {midy:.1f}, {x2:.1f} {y2:.1f}" fill="none" '
+            f'stroke="{stroke}" stroke-width="{dw:.2f}">'
+            f'<title>mutation {html.escape(", ".join(e.get("fields") or ["?"]))} '
+            f'· {"accepted" if ok else "rejected"} · Δscore {dlabel}</title></path>')
+    # nodes on top
+    box_h = 40.0
+    for h, n in nodes.items():
+        x, y = px(h), py(depth[h])
+        ok = bool(n.get("accepted"))
+        w = min(150.0, unit * 0.92)
+        score = n.get("score")
+        slabel = ("—" if not isinstance(score, (int, float))
+                  or isinstance(score, bool) else f"{float(score):.1f}")
+        node_fill = _ACCEPTED if ok else _REJECTED
+        parts.append(f'<rect x="{x - w / 2:.1f}" y="{y - box_h / 2:.1f}" '
+                     f'width="{w:.1f}" height="{box_h:.1f}" rx="8" '
+                     f'fill="{node_fill}" fill-opacity="0.85">')
+        fields = incoming.get(h, {}).get("fields") or []
+        title = (f'{n.get("label", h)} · score {slabel} · '
+                 f'{"accepted" if ok else "rejected"} · '
+                 f'mutated: {", ".join(fields) if fields else "(root)"}')
+        parts.append(f'<title>{html.escape(title)}</title></rect>')
+        parts.append(f'<text x="{x:.1f}" y="{y - 2:.1f}" text-anchor="middle" '
+                     f'font-size="11" fill="white">'
+                     f'{html.escape(str(n.get("label", h)))}</text>')
+        parts.append(f'<text x="{x:.1f}" y="{y + 13:.1f}" text-anchor="middle" '
+                     f'font-size="12" fill="white">{slabel}</text>')
+    # legend + summary
+    ly = height - 34.0
+    lx = L
+    for text, fill in (("accepted", _ACCEPTED), ("rejected", _REJECTED)):
+        parts.append(f'<rect x="{lx:.1f}" y="{ly - 9:.1f}" width="10" height="10" '
+                     f'fill="{fill}" fill-opacity="0.85"/>')
+        parts.append(f'<text x="{lx + 14:.1f}" y="{ly:.1f}" font-size="11" '
+                     f'fill="{_AXIS}">{text}</text>')
+        lx += 14 + 7 * len(text) + 20
+    parts.append(f'<text x="{lx:.1f}" y="{ly:.1f}" font-size="11" '
+                 f'fill="{_AXIS}">edge = one mutation · width ∝ |Δscore|</text>')
+    summary = (f"n specs = {len(nodes)} · n mutations = {len(edges)}")
+    parts.append(f'<text x="{width // 2}" y="{height - 8}" text-anchor="middle" '
+                 f'font-size="12" fill="{_AXIS}">{html.escape(summary)}</text>')
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def svg_field_response(stats, width: int = 640, row_h: int = 64,
+                       palette: str = "default", dark: bool = False) -> str:
+    """SPEC.md 57.2 (v0.43): the per-field response surfaces — for each
+    registry field, a value → mean-holdout-score mini chart (the
+    `research.field_response_stats` shape `{field: {value: {n, mean,
+    best}}}`): one row per field (sorted), one cell per value (numeric-
+    first, the V2 `_fv_sort_key` order, 30.2): a vertical bar whose height
+    is the mean (clamped to the 0-100 scale), the mean value above the
+    bar, the value + `n` candidates carrying that value below the cell
+    baseline, and a `<title>` `field value: mean (n, best)` per cell. The
+    core \"which knobs matter for my data\" view (57.2.1). Pure, valid XML,
+    deterministic (G2); empty -> header + message."""
+    with _styled(palette, dark):
+        return _svg_field_response(stats, width, row_h)
+
+
+def _svg_field_response(stats, width: int, row_h: int) -> str:
+    fields = sorted(f for f in (stats or {})
+                    if isinstance(stats.get(f), dict) and stats[f])
+    if not fields:
+        height = 120
+        parts = _svg_header(width, height, "field response surfaces (empty)")
+        parts.append(f'<text x="{width // 2}" y="{height // 2}" text-anchor="middle" '
+                     f'font-size="13" fill="{_AXIS}">no scored specs to aggregate</text>')
+        parts.append("</svg>")
+        return "\n".join(parts)
+    L, R, T = 120.0, 24.0, 34.0
+    n_rows = len(fields)
+    max_vals = max(len(stats[f]) for f in fields)
+    cell_w = min(110.0, (width - L - R) / max(1, max_vals))
+    height = int(T + n_rows * row_h + 44)
+    parts = _svg_header(width, height, "per-field response surfaces")
+    for fi, field in enumerate(fields):
+        vals = stats[field]
+        y0 = T + fi * row_h
+        parts.append(f'<text x="{L - 10:.1f}" y="{y0 + row_h * 0.62:.1f}" '
+                     f'text-anchor="end" font-size="12" fill="{_AXIS}">'
+                     f'{html.escape(str(field))}</text>')
+        base_y = y0 + row_h - 16.0  # the cell baseline (score 0)
+        bar_max = row_h - 32.0
+        for vi, value in enumerate(sorted(vals, key=_fv_sort_key)):
+            cell = vals[value]
+            n = int(cell.get("n", 0) or 0)
+            mean = float(cell.get("mean", 0.0) or 0.0)
+            best = float(cell.get("best", 0.0) or 0.0)
+            x0 = L + vi * cell_w
+            cx = x0 + cell_w / 2.0
+            frac = min(max(mean, 0.0), 100.0) / 100.0
+            bh = max(1.0, frac * bar_max)
+            title = f"{field} {value}: mean {mean:.2f} (n={n}, best {best:.2f})"
+            parts.append(f'<rect x="{x0 + 2:.1f}" y="{y0 + 2:.1f}" '
+                         f'width="{max(1.0, cell_w - 4):.1f}" height="{row_h - 4:.1f}" '
+                         f'fill="{_LANE_BG}"><title>{html.escape(title)}</title></rect>')
+            parts.append(f'<line x1="{x0 + 2:.1f}" y1="{base_y:.1f}" '
+                         f'x2="{x0 + cell_w - 2:.1f}" y2="{base_y:.1f}" '
+                         f'stroke="{_AXIS}" stroke-width="1"/>')
+            parts.append(f'<rect x="{cx - 12:.1f}" y="{base_y - bh:.1f}" '
+                         f'width="24" height="{bh:.1f}" fill="{_LINE}" '
+                         f'fill-opacity="0.85"><title>{html.escape(title)}</title></rect>')
+            parts.append(f'<text x="{cx:.1f}" y="{base_y - bh - 4:.1f}" '
+                         f'text-anchor="middle" font-size="11" fill="{_AXIS}">'
+                         f'{mean:.1f}</text>')
+            parts.append(f'<text x="{cx:.1f}" y="{y0 + row_h - 4:.1f}" '
+                         f'text-anchor="middle" font-size="10" fill="{_AXIS}">'
+                         f'{value} · n={n}</text>')
+    parts.append(f'<text x="{L:.1f}" y="{height - 8}" font-size="11" fill="{_AXIS}">'
+                 f'bar = mean holdout score of candidates carrying that '
+                 f'value (0-100 clamped) · n = sample size</text>')
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def svg_gate_region(data, width: int = 640, height: int = 420,
+                    palette: str = "default", dark: bool = False) -> str:
+    """SPEC.md 57.3 (v0.43): the gate-decision region — the holdout-score ×
+    gen-gap plane with the acceptance rule drawn as a *region* instead of
+    an opaque \"rejected\". `data` is the `research.gate_region_candidates`
+    shape `{baseline_score, tol, candidates: [{score, gen_gap, accepted,
+    reason, best_before}]}`. The shaded polygon is
+    `{score ≥ baseline} ∩ {gen_gap ≤ (1+tol)·score − baseline}` — exactly
+    the 18.5 penalty (`eff = score − (gap − 0.05·score)₊`) with z = 0;
+    the dashed line `gen_gap = tol·score` marks where the penalty starts;
+    the vertical dashed line marks the run baseline. Every candidate is a
+    dot — accepted (`_ACCEPTED`), overfit (`_SCORED_REJ`), score
+    (`_BASELINE`), ci (`_LINE`), other (`_REJECTED`) — each with a
+    `<title>` (score, gap, reason, best_before). The per-step CI margin
+    (18.6, z·SE) is a state-dependent shift, noted in the caption (57.3.2).
+    Pure, valid XML, deterministic (G2); no candidates -> header + message."""
+    with _styled(palette, dark):
+        return _svg_gate_region(data, width, height)
+
+
+def _svg_gate_region(data, width: int, height: int) -> str:
+    cands = [c for c in ((data or {}).get("candidates") or [])
+             if isinstance(c, dict) and _finite(c.get("score"))]
+    if not cands:
+        parts = _svg_header(width, height, "gate-decision region (empty)")
+        parts.append(f'<text x="{width // 2}" y="{height // 2}" text-anchor="middle" '
+                     f'font-size="13" fill="{_AXIS}">no scored candidates yet</text>')
+        parts.append("</svg>")
+        return "\n".join(parts)
+    tol = float((data or {}).get("tol", 0.05) or 0.05)
+    B = (data or {}).get("baseline_score")
+    B = float(B) if _finite(B) else None
+    xmax = max(100.0, max(float(c["score"]) for c in cands) * 1.05)
+    gaps = [float(c["gen_gap"]) for c in cands if _finite(c.get("gen_gap"))]
+    ymax = max(1.0, (max(gaps) * 1.2 if gaps else 0.0))
+    L, R, T, Bm = 64.0, 24.0, 34.0, 84.0
+    pw, ph = width - L - R, height - T - Bm
+
+    def px(s: float) -> float:
+        return L + pw * min(max(float(s), 0.0), xmax) / xmax
+
+    def py(g: float) -> float:
+        return T + ph * (1.0 - min(max(float(g), 0.0), ymax) / ymax)
+
+    parts = _svg_header(width, height, "gate-decision region (score × gen gap)")
+    parts += _svg_axes(L, T, pw, ph, 0.0, ymax, 0.0, xmax, "holdout score")
+    # the acceptance region vs the run baseline (18.5 penalty, z = 0)
+    if B is not None and 0.0 <= B < xmax:
+        top_right = min(ymax, (1.0 + tol) * xmax - B)
+        top_left = min(ymax, tol * B)
+        parts.append(
+            f'<polygon points="{px(B):.1f},{py(0.0):.1f} '
+            f'{px(xmax):.1f},{py(0.0):.1f} {px(xmax):.1f},{py(top_right):.1f} '
+            f'{px(B):.1f},{py(top_left):.1f}" '
+            f'fill="{_ACCEPTED}" fill-opacity="0.12">'
+            f'<title>acceptance region: eff(score, gap) &gt; '
+            f'{B:.2f} (18.5 penalty, z=0)</title></polygon>')
+    # the penalty boundary: gen_gap = tol · score (dashed)
+    x_end = min(xmax, ymax / tol) if tol > 0 else xmax
+    lab_x = min(x_end, xmax * 0.55)
+    parts.append(f'<line x1="{px(0.0):.1f}" y1="{py(0.0):.1f}" '
+                 f'x2="{px(x_end):.1f}" y2="{py(tol * x_end):.1f}" '
+                 f'stroke="{_AXIS}" stroke-width="1.5" stroke-dasharray="6 4"/>')
+    parts.append(f'<text x="{px(lab_x) + 6:.1f}" '
+                 f'y="{py(tol * lab_x) - 6:.1f}" font-size="11" '
+                 f'fill="{_AXIS}">gen_gap = {int(round(tol * 100))}%·score (18.5)</text>')
+    # the run-baseline reference line
+    if B is not None and 0.0 <= B < xmax:
+        parts.append(f'<line x1="{px(B):.1f}" y1="{py(0.0):.1f}" '
+                     f'x2="{px(B):.1f}" y2="{py(min(ymax, tol * B)):.1f}" '
+                     f'stroke="{_BASELINE}" stroke-width="1.5" stroke-dasharray="4 3"/>')
+    # the candidates
+    colors = {"accepted": _ACCEPTED, "overfit": _SCORED_REJ,
+              "score": _BASELINE, "ci": _LINE}
+    for c in cands:
+        s = float(c["score"])
+        g = float(c["gen_gap"]) if _finite(c.get("gen_gap")) else 0.0
+        reason = str(c.get("reason") or ("accepted" if c.get("accepted") else "?"))
+        fill = colors.get(reason, _REJECTED)
+        bb = c.get("best_before")
+        bbt = "—" if not _finite(bb) else f"{float(bb):.2f}"
+        title = (f"score {s:.2f} · gen_gap {g:.2f} · {reason} · "
+                 f"best_before {bbt}")
+        parts.append(f'<circle cx="{px(s):.1f}" cy="{py(g):.1f}" r="5" '
+                     f'fill="{fill}"><title>{html.escape(title)}</title></circle>')
+    # legend + caption
+    ly = T + ph + 26.0
+    lx = L
+    for text, fill in (("accepted", _ACCEPTED), ("overfit", _SCORED_REJ),
+                       ("score", _BASELINE), ("ci", _LINE)):
+        parts.append(f'<circle cx="{lx + 5:.1f}" cy="{ly - 4:.1f}" r="5" fill="{fill}"/>')
+        parts.append(f'<text x="{lx + 14:.1f}" y="{ly:.1f}" font-size="11" '
+                     f'fill="{_AXIS}">{text}</text>')
+        lx += 14 + 7 * len(text) + 16
+    parts.append(f'<text x="{width // 2}" y="{height - 8}" text-anchor="middle" '
+                 f'font-size="12" fill="{_AXIS}">'
+                 f'shaded = acceptance vs the run baseline (18.5; z=0) · '
+                 f'the per-step CI margin (18.6) shifts this by z·SE</text>')
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def svg_bandit_beliefs(data, width: int = 640, row_h: int = 44,
+                       palette: str = "default", dark: bool = False) -> str:
+    """SPEC.md 57.4 (v0.43): the bandit belief bars — the per-field learned
+    preference as a probability with its 95% Wilson CI, plus the final UCB
+    value: one row per field (`research.bandit_beliefs` shape
+    `{field: {trials, wins, win_rate, lo, hi, ucb}}`), a light band
+    (`_BAND`) spanning `[lo, hi]`, a tick at the win rate (`_LINE`), and a
+    diamond at the UCB (`_BASELINE`) when present (26.4 — None for the
+    search policy). The highest-UCB field is flagged \"best-believed\"
+    (ties: lexicographically smallest, G2). A `<title>` per row carries the
+    full numbers. The x axis runs 0..max(1, 1.15·max UCB). Pure, valid
+    XML, deterministic (G2); empty -> header + message."""
+    with _styled(palette, dark):
+        return _svg_bandit_beliefs(data, width, row_h)
+
+
+def _svg_bandit_beliefs(data, width: int, row_h: int) -> str:
+    fields = sorted(f for f in (data or {})
+                    if isinstance(data.get(f), dict) and data[f]["trials"] > 0)
+    if not fields:
+        height = 120
+        parts = _svg_header(width, height, "bandit belief bars (empty)")
+        parts.append(f'<text x="{width // 2}" y="{height // 2}" text-anchor="middle" '
+                     f'font-size="13" fill="{_AXIS}">no field stats — needs a bandit-policy '
+                     f'run (SPEC.md 57.4)</text>')
+        parts.append("</svg>")
+        return "\n".join(parts)
+    ucbs = [float(data[f]["ucb"]) for f in fields
+            if _finite(data[f].get("ucb"))]
+    xhi = max(1.0, (max(ucbs) * 1.15 if ucbs else 1.0))
+    best = max(fields,
+               key=lambda f: (float(data[f]["ucb"]) if _finite(data[f].get("ucb"))
+                              else float("-inf")))
+    L, R, T = 150.0, 24.0, 30.0
+    n = len(fields)
+    height = int(T + n * row_h + 48)
+    pw = width - L - R
+
+    def px(v: float) -> float:
+        return L + pw * min(max(float(v), 0.0), xhi) / xhi
+
+    parts = _svg_header(width, height, "bandit belief bars")
+    for i, f in enumerate(fields):
+        d = data[f]
+        p = float(d["win_rate"])
+        lo = float(d["lo"])
+        hi = float(d["hi"])
+        u = d.get("ucb")
+        y0 = T + i * row_h
+        cy = y0 + row_h * 0.5
+        is_best = (f == best)
+        label = f + ("  ★" if is_best else "")
+        title = (f"{f}: win {float(d['wins']):.0f}/{int(d['trials'])} "
+                 f"({p:.3f}) · 95% CI [{lo:.3f}, {hi:.3f}]"
+                 + (f" · UCB {float(u):.3f}" if _finite(u) else "")
+                 + (" · best-believed (max UCB)" if is_best else ""))
+        tcolor = _BASELINE if is_best else _AXIS
+        parts.append(f'<text x="{L - 10:.1f}" y="{cy + 4:.1f}" text-anchor="end" '
+                     f'font-size="12" fill="{tcolor}">'
+                     f'{html.escape(label)}</text>')
+        parts.append(f'<rect x="{L:.1f}" y="{y0 + 4:.1f}" width="{pw:.1f}" '
+                     f'height="{row_h - 8:.1f}" fill="{_LANE_BG}">'
+                     f'<title>{html.escape(title)}</title></rect>')
+        # the 95% CI band
+        parts.append(f'<rect x="{px(lo):.1f}" y="{cy - 4:.1f}" '
+                     f'width="{max(1.0, px(hi) - px(lo)):.1f}" height="8" '
+                     f'fill="{_BAND}" fill-opacity="0.9"><title>{html.escape(title)}</title></rect>')
+        # the win-rate tick
+        parts.append(f'<rect x="{px(p) - 1.5:.1f}" y="{cy - 8:.1f}" '
+                     f'width="3" height="16" fill="{_LINE}">'
+                     f'<title>{html.escape(title)}</title></rect>')
+        # the UCB diamond
+        if _finite(u):
+            cx = px(float(u))
+            parts.append(f'<path d="M {cx:.1f} {cy - 7:.1f} L {cx + 7:.1f} {cy:.1f} '
+                         f'L {cx:.1f} {cy + 7:.1f} L {cx - 7:.1f} {cy:.1f} Z" '
+                         f'fill="{_BASELINE}"><title>{html.escape(title)}</title></path>')
+    # x axis + ticks
+    ay = T + n * row_h + 8.0
+    parts.append(f'<line x1="{L:.1f}" y1="{ay:.1f}" x2="{L + pw:.1f}" y2="{ay:.1f}" '
+                 f'stroke="{_AXIS}" stroke-width="1"/>')
+    for frac in (0.0, 0.5, 1.0):
+        v = xhi * frac
+        parts.append(f'<line x1="{px(v):.1f}" y1="{ay:.1f}" x2="{px(v):.1f}" '
+                     f'y2="{ay + 5:.1f}" stroke="{_AXIS}" stroke-width="1"/>')
+        parts.append(f'<text x="{px(v):.1f}" y="{ay + 18:.1f}" text-anchor="middle" '
+                     f'font-size="10" fill="{_AXIS}">{v:.2f}</text>')
+    parts.append(f'<text x="{width // 2}" y="{height - 8}" text-anchor="middle" '
+                 f'font-size="12" fill="{_AXIS}">band = 95% Wilson CI · tick = win '
+                 f'rate (26.1) · diamond = UCB (26.4) · ★ = best-believed</text>')
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+# --- SPEC.md 58 (v0.44): the researcher round-2 surfaces --------------------
+# The error-analysis pack's difficulty ranking (58.1) and the
+# 3-objective frontier (58.2). Both render pure data (the
+# `diagnostics.holdout_difficulty` shape and the `research.frontier3`
+# shape) — hand-rolled SVG, ARIA via `_svg_header`, `<title>` tooltips
+# everywhere, palette/dark per 51.4, byte-identical under the default
+# theme (G2).
+
+# 58.1: the rendered row cap — the ranking is a list; beyond this the
+# head + tail (easiest/hardest, the informative ends) are shown with an
+# omitted marker between them
+_DIFF_ROWS_MAX = 30
+_DIFF_HALF = 15
+
+
+def _fmt_label(v) -> str:
+    """58.1: a true/predicted class or target value → a short ASCII label
+    (ints plain, floats `%.3g`, anything else `str`) — stable and G2."""
+    if isinstance(v, bool):
+        return str(v)
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, float):
+        return f"{v:.3g}"
+    return str(v)
+
+
+def svg_difficulty_ranking(data, width: int = 640, row_h: int = 26,
+                           palette: str = "default", dark: bool = False) -> str:
+    """SPEC.md 58.1 (v0.44): the per-input difficulty ranking — the
+    holdout items easiest → hardest (top → bottom), from the
+    `diagnostics.holdout_difficulty` shape `{"n", "head", "items":
+    [{index, true, predicted, correct, difficulty}]}`. One row per item:
+    the `#index true → predicted` label on the left, a lollipop bar from
+    the zero axis to the difficulty value, colored by the row's verdict
+    (`_ACCEPTED` correct / `_REJECTED` misclassified), a `<title>` per
+    row carrying the full numbers. The axis is signed when any
+    difficulty is negative (the softmax margin mode — negative =
+    misclassified) and non-negative otherwise (the mse `|pred − y|`
+    mode). At most `_DIFF_ROWS_MAX` rows render (the head + tail, with a
+    `… n omitted …` marker) so a 200-item holdout stays legible. Pure,
+    valid XML, deterministic (G2); no items -> header + message."""
+    with _styled(palette, dark):
+        return _svg_difficulty_ranking(data, width, row_h)
+
+
+def _svg_difficulty_ranking(data, width: int, row_h: int) -> str:
+    items = [it for it in ((data or {}).get("items") or [])
+             if isinstance(it, dict) and _finite(it.get("difficulty"))]
+    if not items:
+        parts = _svg_header(width, 120, "difficulty ranking (empty)")
+        parts.append(f'<text x="{width // 2}" y="60" text-anchor="middle" '
+                     f'font-size="13" fill="{_AXIS}">no holdout items '
+                     f'(non-classification task?)</text>')
+        parts.append("</svg>")
+        return "\n".join(parts)
+    n = len(items)
+    if n > _DIFF_ROWS_MAX:  # the informative ends only (easiest + hardest)
+        shown = items[:_DIFF_HALF] + [None] + items[-_DIFF_HALF:]
+    else:
+        shown = items
+    vals = [float(it["difficulty"]) for it in items]
+    signed = any(v < 0.0 for v in vals)
+    vmin = min(min(vals), 0.0 if signed else 0.0)
+    vmax = max(vals)
+    if vmax <= vmin:
+        vmax = vmin + 1.0
+    metric = ("signed margin (softmax)" if signed
+              else "|pred − y| (mse)")
+    L, R, T = 170.0, 24.0, 34.0
+    height = int(T + len(shown) * row_h + 48)
+    pw = width - L - R
+
+    def px(v: float) -> float:
+        return L + pw * (min(max(v, vmin), vmax) - vmin) / (vmax - vmin)
+
+    x0 = px(0.0) if signed else L
+    parts = _svg_header(width, height, "per-input difficulty ranking")
+    if signed:
+        parts.append(f'<line x1="{x0:.1f}" y1="{T - 6:.1f}" x2="{x0:.1f}" '
+                     f'y2="{T + len(shown) * row_h + 6:.1f}" stroke="{_AXIS}" '
+                     f'stroke-width="1.5" stroke-dasharray="3 3"/>')
+        parts.append(f'<text x="{x0 + 4:.1f}" y="{T + 2:.1f}" font-size="10" '
+                     f'fill="{_AXIS}">0</text>')
+    for i, it in enumerate(shown):
+        y0 = T + i * row_h
+        if it is None:  # the omitted marker row
+            parts.append(f'<text x="{width // 2}" y="{y0 + row_h * 0.65:.1f}" '
+                         f'text-anchor="middle" font-size="11" fill="{_AXIS}">'
+                         f'… {n - _DIFF_ROWS_MAX} items omitted '
+                         f'(head + tail shown) …</text>')
+            continue
+        cy = y0 + row_h * 0.5
+        d = float(it["difficulty"])
+        correct = bool(it.get("correct"))
+        idx = int(it.get("index", i))
+        tr = it.get("true")
+        pd = it.get("predicted")
+        label = f"#{idx}  {_fmt_label(tr)} → {_fmt_label(pd)}"
+        title = (f"item #{idx} · true {_fmt_label(tr)} · "
+                 f"predicted {_fmt_label(pd)} · "
+                 f"{'correct' if correct else 'MISCLASSIFIED'} · "
+                 f"difficulty {d:.3f}")
+        fill = _ACCEPTED if correct else _REJECTED
+        parts.append(f'<rect x="{L:.1f}" y="{y0 + 1.5:.1f}" width="{pw:.1f}" '
+                     f'height="{max(1.0, row_h - 3):.1f}" fill="{_LANE_BG}">'
+                     f'<title>{html.escape(title)}</title></rect>')
+        parts.append(f'<text x="{L - 10:.1f}" y="{cy + 4:.1f}" text-anchor="end" '
+                     f'font-size="11" fill="{_AXIS}">{html.escape(label)}</text>')
+        x1 = px(d)
+        bx = min(x1, x0)
+        bw = max(1.0, abs(x1 - x0))
+        parts.append(f'<rect x="{bx:.1f}" y="{cy - 4:.1f}" width="{bw:.1f}" '
+                     f'height="8" fill="{fill}" fill-opacity="0.85">'
+                     f'<title>{html.escape(title)}</title></rect>')
+        parts.append(f'<circle cx="{x1:.1f}" cy="{cy:.1f}" r="4" fill="{fill}">'
+                     f'<title>{html.escape(title)}</title></circle>')
+    parts.append(f'<text x="{width // 2}" y="{height - 8}" text-anchor="middle" '
+                 f'font-size="12" fill="{_AXIS}">easiest → hardest · '
+                 f'bar = {metric} · {n} holdout items</text>')
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def svg_frontier3(data, width: int = 980, height: int = 380,
+                  palette: str = "default", dark: bool = False) -> str:
+    """SPEC.md 58.2 (v0.44): the 3-objective frontier as a two-panel
+    tradeoff from the `research.frontier3` shape `{"points":
+    [{score, time, size, label, frontier, …}], "frontier": [idx],
+    "unsized": int}`. Panel 1 (left): score × train-seconds — every
+    point (the 2-objective view). Panel 2 (right): score × parameter
+    count — the sized points only (tree/boost/knn sizes are
+    data-dependent and render as `None`, so they appear in panel 1
+    with the unsized count noted in the caption). Frontier points are
+    the strong color (`_ACCEPTED`), dominated ones grey
+    (`_REJECTED`); every dot carries a `<title>` (label, score,
+    seconds, size or `n/a`, verdict). Pure, valid XML, deterministic
+    (G2); no points -> header + message; no sized points -> panel 2 is
+    an empty-state caption."""
+    with _styled(palette, dark):
+        return _svg_frontier3(data, width, height)
+
+
+def _svg_frontier3(data, width: int, height: int) -> str:
+    pts = [p for p in ((data or {}).get("points") or [])
+           if isinstance(p, dict) and _finite(p.get("score"))
+           and _finite(p.get("time"))]
+    if not pts:
+        parts = _svg_header(width, height, "3-objective frontier (empty)")
+        parts.append(f'<text x="{width // 2}" y="{height // 2}" text-anchor="middle" '
+                     f'font-size="13" fill="{_AXIS}">no scored candidates '
+                     f'with train time</text>')
+        parts.append("</svg>")
+        return "\n".join(parts)
+    sized = [p for p in pts if isinstance(p.get("size"), (int, float))
+             and not isinstance(p.get("size"), bool) and p["size"] >= 0]
+    unsized = len(pts) - len(sized)
+    L, T, B = 56.0, 46.0, 92.0
+    gap = 28.0
+    pw = (width - 2 * L - gap) / 2.0
+    ph = height - T - B
+    s_lo = min(p["score"] for p in pts)
+    s_hi = max(p["score"] for p in pts)
+    if s_hi - s_lo < 1e-9:
+        s_hi = s_lo + 1.0
+
+    def sy(s: float) -> float:
+        return T + ph * (1.0 - (s - s_lo) / (s_hi - s_lo))
+
+    parts = _svg_header(width, height, "3-objective frontier "
+                                       "(score × time × size)")
+    parts.append(f'<text x="{L + pw / 2:.1f}" y="{T - 10:.1f}" '
+                 f'text-anchor="middle" font-size="12" fill="{_AXIS}">'
+                 f'score × training time</text>')
+    if sized:
+        parts.append(f'<text x="{L + pw + gap + pw / 2:.1f}" y="{T - 10:.1f}" '
+                     f'text-anchor="middle" font-size="12" fill="{_AXIS}">'
+                     f'score × parameter count</text>')
+    # ---- panel 1: score × time
+    t_lo = min(p["time"] for p in pts)
+    t_hi = max(p["time"] for p in pts)
+    if t_hi - t_lo < 1e-9:
+        t_hi = t_lo + 1e-3
+
+    def tx(t: float) -> float:
+        return L + pw * (t - t_lo) / (t_hi - t_lo)
+
+    parts.append(f'<line x1="{L:.1f}" y1="{T:.1f}" x2="{L:.1f}" '
+                 f'y2="{T + ph:.1f}" stroke="{_AXIS}"/>')
+    parts.append(f'<line x1="{L:.1f}" y1="{T + ph:.1f}" x2="{L + pw:.1f}" '
+                 f'y2="{T + ph:.1f}" stroke="{_AXIS}"/>')
+    for k in range(5):
+        val = s_hi - (s_hi - s_lo) * k / 4
+        y = T + ph * k / 4
+        parts.append(f'<line x1="{L - 4:.1f}" y1="{y:.1f}" x2="{L:.1f}" '
+                     f'y2="{y:.1f}" stroke="{_AXIS}"/>')
+        parts.append(f'<text x="{L - 8:.1f}" y="{y + 4:.1f}" text-anchor="end" '
+                     f'font-size="10" fill="{_AXIS}">{val:.2f}</text>')
+    parts.append(f'<text x="{L:.1f}" y="{T + ph + 16:.1f}" font-size="10" '
+                 f'fill="{_AXIS}">{t_lo:.2f}s</text>')
+    parts.append(f'<text x="{L + pw:.1f}" y="{T + ph + 16:.1f}" '
+                 f'text-anchor="end" font-size="10" fill="{_AXIS}">'
+                 f'{t_hi:.2f}s</text>')
+    for p in pts:
+        fill = _ACCEPTED if p.get("frontier") else _REJECTED
+        title = (f"{p.get('label', '?')} · score {p['score']:.2f} · "
+                 f"{p['time']:.3f}s · "
+                 + (f"size {int(p['size'])} params · " if p.get("size") is not None
+                    else "size n/a (data-dependent) · ")
+                 + ("FRONTIER" if p.get("frontier") else "dominated"))
+        parts.append(f'<circle cx="{tx(p["time"]):.1f}" cy="{sy(p["score"]):.1f}" '
+                     f'r="5" fill="{fill}" fill-opacity="0.9">'
+                     f'<title>{html.escape(title)}</title></circle>')
+    # ---- panel 2: score × size (sized points only)
+    x2 = L + pw + gap
+    if sized:
+        z_lo = min(p["size"] for p in sized)
+        z_hi = max(p["size"] for p in sized)
+        if z_hi - z_lo < 1e-9:
+            z_hi = z_lo + 1.0
+
+        def zx(z: float) -> float:
+            return x2 + pw * (z - z_lo) / (z_hi - z_lo)
+
+        parts.append(f'<line x1="{x2:.1f}" y1="{T:.1f}" x2="{x2:.1f}" '
+                     f'y2="{T + ph:.1f}" stroke="{_AXIS}"/>')
+        parts.append(f'<line x1="{x2:.1f}" y1="{T + ph:.1f}" x2="{x2 + pw:.1f}" '
+                     f'y2="{T + ph:.1f}" stroke="{_AXIS}"/>')
+        for k in range(5):
+            val = s_hi - (s_hi - s_lo) * k / 4
+            y = T + ph * k / 4
+            parts.append(f'<line x1="{x2 - 4:.1f}" y1="{y:.1f}" x2="{x2:.1f}" '
+                         f'y2="{y:.1f}" stroke="{_AXIS}"/>')
+            parts.append(f'<text x="{x2 - 8:.1f}" y="{y + 4:.1f}" text-anchor="end" '
+                         f'font-size="10" fill="{_AXIS}">{val:.2f}</text>')
+        parts.append(f'<text x="{x2:.1f}" y="{T + ph + 16:.1f}" font-size="10" '
+                     f'fill="{_AXIS}">{int(z_lo)} params</text>')
+        parts.append(f'<text x="{x2 + pw:.1f}" y="{T + ph + 16:.1f}" '
+                     f'text-anchor="end" font-size="10" fill="{_AXIS}">'
+                     f'{int(z_hi)} params</text>')
+        for p in sized:
+            fill = _ACCEPTED if p.get("frontier") else _REJECTED
+            title = (f"{p.get('label', '?')} · score {p['score']:.2f} · "
+                     f"size {int(p['size'])} params · "
+                     + ("FRONTIER" if p.get("frontier") else "dominated"))
+            parts.append(f'<circle cx="{zx(p["size"]):.1f}" '
+                         f'cy="{sy(p["score"]):.1f}" r="5" fill="{fill}" '
+                         f'fill-opacity="0.9">'
+                         f'<title>{html.escape(title)}</title></circle>')
+    else:
+        parts.append(f'<text x="{x2 + pw / 2:.1f}" y="{T + ph / 2:.1f}" '
+                     f'text-anchor="middle" font-size="12" fill="{_AXIS}">'
+                     f'no parameter counts</text>')
+        parts.append(f'<text x="{x2 + pw / 2:.1f}" y="{T + ph / 2 + 18:.1f}" '
+                     f'text-anchor="middle" font-size="11" fill="{_AXIS}">'
+                     f'tree/boost/knn sizes are data-dependent (58.2)</text>')
+    # ---- legend + caption
+    ly = T + ph + 40.0
+    lx = L
+    for text, fill in (("frontier", _ACCEPTED), ("dominated", _REJECTED)):
+        parts.append(f'<circle cx="{lx + 5:.1f}" cy="{ly - 4:.1f}" r="5" '
+                     f'fill="{fill}" fill-opacity="0.9"/>')
+        parts.append(f'<text x="{lx + 14:.1f}" y="{ly:.1f}" font-size="11" '
+                     f'fill="{_AXIS}">{text}</text>')
+        lx += 14 + 7 * len(text) + 20
+    parts.append(f'<text x="{width // 2}" y="{height - 8}" text-anchor="middle" '
+                 f'font-size="12" fill="{_AXIS}">3D non-dominance: a point '
+                 f'stands if nothing is ≥ on score, ≤ on time (and ≤ on '
+                 f'size when both are sized) · {unsized} unsized point(s) '
+                 f'shown in panel 1 only</text>')
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+# --- v0.46 what-if & comparison views (SPEC.md 60) ----------------------------
+
+def _fv_label(value) -> str:
+    """60.x: a spec value → its chip/tooltip label (the 57.2 key rule)."""
+    if value is None:
+        return "-"
+    if isinstance(value, (list, tuple)):
+        return ",".join(str(v) for v in value)
+    return str(value)
+
+
+def svg_whatif_effect(data, width: int = 480, height: int = 170,
+                      palette: str = "default", dark: bool = False) -> str:
+    """SPEC.md 60.1 (v0.46): the what-if estimated effect — the `whatif.
+    whatif_preview` shape rendered as two bars on the 0-100 score scale
+    (the 57.2 convention, clamped): the champion's **current** value of
+    the field (grey) and the **what-if** value (the strong line color),
+    each with its mean + `n`, and the signed `delta` annotated above the
+    what-if bar (`+3.2 over current` / `−4.1 vs current`). A `<title>`
+    per bar (`field value: mean (n)`). `value_mean` `None` (the value
+    was never logged) → an honest empty state ("no logged candidates
+    with this value yet — the effect is unknown, not zero"), never an
+    invented bar. Pure, valid XML, deterministic (G2)."""
+    with _styled(palette, dark):
+        return _svg_whatif_effect(data, width, height)
+
+
+def _svg_whatif_effect(data, width: int, height: int) -> str:
+    d = data if isinstance(data, dict) else {}
+    field = str(d.get("field", "field"))
+    if d.get("value_mean") is None:
+        parts = _svg_header(width, height, f"what-if effect ({field})")
+        parts.append(f'<text x="{width // 2}" y="{height // 2 - 8}" '
+                     f'text-anchor="middle" font-size="12" fill="{_AXIS}">'
+                     f'no logged candidates with {field}='
+                     f'{html.escape(_fv_label(d.get("value")))} yet</text>')
+        parts.append(f'<text x="{width // 2}" y="{height // 2 + 10}" '
+                     f'text-anchor="middle" font-size="11" fill="{_AXIS}">'
+                     f'the estimated effect is unknown — not zero '
+                     f'(pool: {int(d.get("pool", 0) or 0)})</text>')
+        parts.append("</svg>")
+        return "\n".join(parts)
+    L, B = 60.0, 34.0
+    bar_w = 96.0
+    gap = 60.0
+    x0 = L + 20
+    base_y = height - B
+    bar_max = height - 96.0
+    cur = d.get("current_mean")
+    val = float(d["value_mean"])
+    delta = d.get("delta")
+    n_val = int(d.get("value_n", 0) or 0)
+    parts = _svg_header(width, height, f"what-if effect ({field})")
+
+    def bar(x: float, label: str, mean: float | None, n: int | None,
+            fill: str) -> None:
+        title = (f"{field} {_fv_label(d.get('value') if fill == _LINE
+                                      else d.get('current_value'))}: "
+                 + (f"mean {mean:.2f} (n={n})" if mean is not None else "not logged"))
+        frac = 0.0 if mean is None else min(max(mean, 0.0), 100.0) / 100.0
+        bh = bar_max if mean is None else max(2.0, frac * bar_max)
+        parts.append(f'<rect x="{x:.1f}" y="{base_y - bh:.1f}" '
+                     f'width="{bar_w:.1f}" height="{bh:.1f}" fill="{fill}" '
+                     f'fill-opacity="0.85" rx="3"><title>{html.escape(title)}</title></rect>')
+        parts.append(f'<text x="{x + bar_w / 2:.1f}" y="{base_y - bh - 6:.1f}" '
+                     f'text-anchor="middle" font-size="12" fill="{_AXIS}">'
+                     f'{"?" if mean is None else f"{mean:.1f}"}</text>')
+        parts.append(f'<text x="{x + bar_w / 2:.1f}" y="{base_y + 14:.1f}" '
+                     f'text-anchor="middle" font-size="10" fill="{_AXIS}">'
+                     f'{html.escape(label)}'
+                     f'{"" if n is None else f" · n={n}"}</text>')
+
+    bar(x0, f"current {_fv_label(d.get('current_value'))}",
+        None if cur is None else float(cur), None, _REJECTED)
+    bar(x0 + bar_w + gap, f"what-if {_fv_label(d.get('value'))}",
+        val, n_val, _LINE)
+    parts.append(f'<line x1="{L:.1f}" y1="{base_y:.1f}" x2="{width - 24:.1f}" '
+                 f'y2="{base_y:.1f}" stroke="{_AXIS}" stroke-width="1"/>')
+    if delta is not None:
+        sign = "+" if delta >= 0 else "−"
+        color = _ACCEPTED if delta >= 0 else _SCORED_REJ
+        parts.append(f'<text x="{width / 2:.1f}" y="30" text-anchor="middle" '
+                     f'font-size="13" font-weight="bold" fill="{color}">'
+                     f'{sign}{abs(delta):.2f} vs current value '
+                     f'(logged surface, 57.2)</text>')
+    parts.append(f'<text x="{width // 2}" y="{height - 8}" text-anchor="middle" '
+                 f'font-size="11" fill="{_AXIS}">estimated effect read off '
+                 f'the run\'s logged candidates — zero retraining</text>')
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def svg_spec_fingerprint(a, b=None, width: int = 640, row_h: int = 26,
+                         palette: str = "default", dark: bool = False) -> str:
+    """SPEC.md 60.2 (v0.46): the spec fingerprint ("DNA") — one row per
+    registry field (registry order) with a horizontal bar whose length
+    is the field value **normalized within its own space** (the
+    `whatif.spec_fingerprint` / `fingerprint_diff` rule: ordered →
+    min-max, categorical → ordinal, sequence → scale reading). `b`
+    (default `None`) adds a second spec beneath each bar (the
+    strong line color = spec A, the highlight amber = spec B), so two
+    specs on the same task are eyeball-comparable — "wide + shallow"
+    vs "narrow + deep". Fields unset in a spec render the value label
+    with no bar (never a fake 0). A `<title>` per row (`name: value
+    → t`). Pure, valid XML, deterministic (G2); no set fields →
+    header + message."""
+    with _styled(palette, dark):
+        return _svg_spec_fingerprint(a, b, width, row_h)
+
+
+def _svg_spec_fingerprint(a, b, width: int, row_h: int) -> str:
+    from .whatif import fingerprint_diff, spec_fingerprint
+    rows = fingerprint_diff(a, b) if b is not None else spec_fingerprint(a)
+    vis = [r for r in rows
+           if (r.get("t_a") if "t_a" in r else r.get("t")) is not None
+           or (r.get("t_b") if "t_b" in r else r.get("t")) is not None]
+    if not vis:
+        parts = _svg_header(width, 120, "spec fingerprint (empty)")
+        parts.append(f'<text x="{width // 2}" y="60" text-anchor="middle" '
+                     f'font-size="13" fill="{_AXIS}">no fingerprintable '
+                     f'fields set</text>')
+        parts.append("</svg>")
+        return "\n".join(parts)
+    L, R = 150.0, 90.0
+    T = 34.0
+    height = int(T + len(vis) * row_h + 40)
+    plot_w = width - L - R
+    two = b is not None
+    parts = _svg_header(width, height, "spec fingerprint"
+                        + (" (A vs B)" if two else ""))
+    for i, r in enumerate(vis):
+        y0 = T + i * row_h
+        name = str(r["name"])
+        ta = r.get("t_a", r.get("t"))
+        tb = r.get("t_b")
+        va = r.get("value_a", r.get("value"))
+        vb = r.get("value_b")
+        title = f"{name}: {html.escape(_fv_label(va))} → t={ta if ta is None else round(ta, 3)}"
+        if two and tb is not None:
+            title += f" · B {html.escape(_fv_label(vb))} → t={round(tb, 3)}"
+        parts.append(f'<rect x="{L - 8:.1f}" y="{y0:.1f}" width="{width - L - R + 16:.1f}" '
+                     f'height="{row_h - 3:.1f}" fill="{_LANE_BG}">'
+                     f'<title>{html.escape(title)}</title></rect>')
+        parts.append(f'<text x="{L - 12:.1f}" y="{y0 + row_h * 0.55:.1f}" '
+                     f'text-anchor="end" font-size="11" fill="{_AXIS}">'
+                     f'{html.escape(name)}</text>')
+        if two:
+            ba_h = (row_h - 8.0) * (float(ta) if ta is not None else 0.0)
+            bb_h = (row_h - 8.0) * (float(tb) if tb is not None else 0.0)
+            if ta is not None:
+                parts.append(f'<rect x="{L:.1f}" y="{y0 + 2.5:.1f}" '
+                             f'width="{ba_h:.1f}" height="{row_h / 2 - 4:.1f}" '
+                             f'fill="{_LINE}" fill-opacity="0.85"/>')
+            if tb is not None:
+                parts.append(f'<rect x="{L:.1f}" y="{y0 + row_h / 2 + 0.5:.1f}" '
+                             f'width="{bb_h:.1f}" height="{row_h / 2 - 4:.1f}" '
+                             f'fill="{_BASELINE}" fill-opacity="0.85"/>')
+            val_text = f"{_fv_label(va)} | {_fv_label(vb)}"
+        else:
+            bh = (row_h - 9.0) * (float(ta) if ta is not None else 0.0)
+            if ta is not None:
+                parts.append(f'<rect x="{L:.1f}" y="{y0 + 3:.1f}" '
+                             f'width="{bh:.1f}" height="{row_h - 9:.1f}" '
+                             f'fill="{_LINE}" fill-opacity="0.85"/>')
+            val_text = _fv_label(va)
+        parts.append(f'<text x="{width - R + 10:.1f}" y="{y0 + row_h * 0.55:.1f}" '
+                     f'font-size="10" fill="{_AXIS}">{html.escape(val_text)}</text>')
+    parts.append(f'<text x="{L:.1f}" y="{height - 8}" font-size="11" '
+                 f'fill="{_AXIS}">bar = value normalized within its registry '
+                 f'space (0–1) ·'
+                 + (" A (top) vs B (bottom)" if two else "")
+                 + " · no bar = field unset</text>")
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def svg_interaction_heatmap(data, width: int = 640, cell: int = 64,
+                            palette: str = "default", dark: bool = False) -> str:
+    """SPEC.md 60.3 (v0.46): the interaction heatmap — the `whatif.
+    interaction_matrix` shape as a field × field grid: off-diagonal
+    cells are the joint mutations (both fields mutated in the same
+    candidate), filled by `delta` vs the run's mean (green = joint
+    lift, red = joint drag, opacity ∝ |delta| / max|delta|) with the
+    `n` count inside; the diagonal is the per-field mutation count
+    (the marginal). A `<title>` per cell (pair, n, mean, delta / the
+    marginal count). Pure, valid XML, deterministic (G2); no mutated
+    fields → header + message."""
+    with _styled(palette, dark):
+        return _svg_interaction_heatmap(data, width, cell)
+
+
+def _svg_interaction_heatmap(data, width: int, cell: int) -> str:
+    d = data if isinstance(data, dict) else {}
+    fields = [f for f in (d.get("fields") or []) if isinstance(f, str)]
+    n = len(fields)
+    if n == 0:
+        parts = _svg_header(width, 120, "interaction heatmap (empty)")
+        parts.append(f'<text x="{width // 2}" y="60" text-anchor="middle" '
+                     f'font-size="13" fill="{_AXIS}">no co-mutated field '
+                     f'pairs in the logged candidates</text>')
+        parts.append("</svg>")
+        return "\n".join(parts)
+    L, T = 130.0, 40.0
+    cell = min(float(cell), (width - L - 24.0) / n)
+    height = int(T + n * cell + 56.0)
+    cells = d.get("cells") or {}
+    marg = d.get("marginals") or {}
+    max_abs = 0.0
+    for f1 in fields:
+        row = cells.get(f1) or {}
+        for f2 in fields:
+            c = row.get(f2)
+            if c and f1 != f2:
+                max_abs = max(max_abs, abs(float(c.get("delta", 0.0) or 0.0)))
+    parts = _svg_header(width, height, "interaction heatmap (joint mutations)")
+    parts.append(f'<text x="{L - 10:.1f}" y="{T - 12:.1f}" text-anchor="end" '
+                 f'font-size="10" fill="{_AXIS}">field \\ field</text>')
+    for j, fj in enumerate(fields):
+        parts.append(f'<text x="{L + j * cell + cell / 2:.1f}" y="{T - 6:.1f}" '
+                     f'text-anchor="middle" font-size="9" fill="{_AXIS}">'
+                     f'{html.escape(fj[-9:])}</text>')
+    for i, fi in enumerate(fields):
+        parts.append(f'<text x="{L - 10:.1f}" y="{T + i * cell + cell / 2 + 3:.1f}" '
+                     f'text-anchor="end" font-size="10" fill="{_AXIS}">'
+                     f'{html.escape(fi)}</text>')
+        for j, fj in enumerate(fields):
+            x = L + j * cell
+            y = T + i * cell
+            if i == j:
+                m = int(marg.get(fi, 0) or 0)
+                title = f"{fi}: mutated in {m} candidate(s) (marginal)"
+                parts.append(f'<rect x="{x + 1:.1f}" y="{y + 1:.1f}" '
+                             f'width="{cell - 2:.1f}" height="{cell - 2:.1f}" '
+                             f'fill="{_NOSCORE_BG}"><title>{html.escape(title)}</title></rect>')
+                parts.append(f'<text x="{x + cell / 2:.1f}" y="{y + cell / 2 + 3:.1f}" '
+                             f'text-anchor="middle" font-size="10" fill="{_AXIS}">'
+                             f'n={m}</text>')
+                continue
+            c = (cells.get(fi) or {}).get(fj)
+            if c is None:
+                parts.append(f'<rect x="{x + 1:.1f}" y="{y + 1:.1f}" '
+                             f'width="{cell - 2:.1f}" height="{cell - 2:.1f}" '
+                             f'fill="{_LANE_BG}"><title>{fi} + {fj}: '
+                             f'never co-mutated</title></rect>')
+                continue
+            delta = float(c.get("delta", 0.0) or 0.0)
+            nn = int(c.get("n", 0) or 0)
+            mean = float(c.get("mean", 0.0) or 0.0)
+            frac = 0.0 if max_abs == 0.0 else min(1.0, abs(delta) / max_abs)
+            fill = _ACCEPTED if delta >= 0 else _SCORED_REJ
+            opacity = 0.25 + 0.65 * frac
+            title = (f"{fi} + {fj} co-mutated: n={nn}, mean {mean:.2f}, "
+                     f"delta {delta:+.2f} vs run mean")
+            parts.append(f'<rect x="{x + 1:.1f}" y="{y + 1:.1f}" '
+                         f'width="{cell - 2:.1f}" height="{cell - 2:.1f}" '
+                         f'fill="{fill}" fill-opacity="{opacity:.2f}">'
+                         f'<title>{html.escape(title)}</title></rect>')
+            parts.append(f'<text x="{x + cell / 2:.1f}" y="{y + cell / 2 + 3:.1f}" '
+                         f'text-anchor="middle" font-size="10" fill="{_AXIS}">'
+                         f'n={nn}</text>')
+    parts.append(f'<text x="{L:.1f}" y="{height - 22}" font-size="11" '
+                 f'fill="{_AXIS}">cell = both fields mutated in the same '
+                 f'candidate · green/red = joint delta vs the run mean '
+                 f'({float(d.get("overall_mean", 0.0) or 0.0):.2f}) · '
+                 f'diagonal = per-field mutation count</text>')
+    parts.append(f'<text x="{L:.1f}" y="{height - 8}" font-size="11" '
+                 f'fill="{_AXIS}">{int(d.get("n_scored", 0) or 0)} scored '
+                 f'candidate(s) in the pool</text>')
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def svg_weighted_reslice(data, width: int = 640, height: int = 190,
+                         palette: str = "default", dark: bool = False) -> str:
+    """SPEC.md 60.4 (v0.46): the objective-weight reslice — the
+    `whatif.weighted_reslice` shape as a 0–1 composite axis: one dot
+    per logged candidate at its `composite` (pass = the accepted
+    green, miss = the rejected grey), a dashed target line at
+    `target`, and a star on the counterfactual **final** (the
+    40.2 convention: best composite, ties by train time then log
+    order). A `<title>` per dot (candidate #, score, train, size or
+    `n/a`, composite, verdict). Weights + target in the header
+    caption. Pure, valid XML, deterministic (G2); empty pool →
+    header + message."""
+    with _styled(palette, dark):
+        return _svg_weighted_reslice(data, width, height)
+
+
+def _svg_weighted_reslice(data, width: int, height: int) -> str:
+    d = data if isinstance(data, dict) else {}
+    cands = [c for c in (d.get("candidates") or [])
+             if isinstance(c, dict) and _finite(c.get("composite"))]
+    w = d.get("weights") or {}
+    target = d.get("target")
+    if not cands:
+        parts = _svg_header(width, height, "weighted reslice (empty)")
+        parts.append(f'<text x="{width // 2}" y="{height // 2}" '
+                     f'text-anchor="middle" font-size="13" fill="{_AXIS}">'
+                     f'no scored candidates to re-gate</text>')
+        parts.append("</svg>")
+        return "\n".join(parts)
+    L, T, B = 56.0, 40.0, 56.0
+    ph = height - T - B
+    mid_y = T + ph / 2.0
+
+    def cx(v: float) -> float:
+        return L + (width - L - 24.0) * min(1.0, max(0.0, float(v)))
+
+    parts = _svg_header(width, height, "objective-weight reslice (composite 0–1)")
+    wtxt = (f"w(score)={float(w.get('score', 0.0) or 0.0):g} · "
+            f"w(train)={float(w.get('train', 0.0) or 0.0):g} · "
+            f"w(size)={float(w.get('size', 0.0) or 0.0):g}")
+    parts.append(f'<text x="{width - 24:.1f}" y="24" text-anchor="end" '
+                 f'font-size="11" fill="{_AXIS}">{html.escape(wtxt)}</text>')
+    for k in range(5):
+        v = k / 4.0
+        x = cx(v)
+        parts.append(f'<line x1="{x:.1f}" y1="{T:.1f}" x2="{x:.1f}" '
+                     f'y2="{T + ph:.1f}" stroke="{_LANE_BG}"/>')
+        parts.append(f'<text x="{x:.1f}" y="{T + ph + 14:.1f}" '
+                     f'text-anchor="middle" font-size="10" fill="{_AXIS}">'
+                     f'{v:.2f}</text>')
+    if _finite(target):
+        tx = cx(float(target))
+        parts.append(f'<line x1="{tx:.1f}" y1="{T - 4:.1f}" x2="{tx:.1f}" '
+                     f'y2="{T + ph + 4:.1f}" stroke="{_HIGHLIGHT}" '
+                     f'stroke-width="2" stroke-dasharray="5,4">'
+                     f'<title>composite target {float(target):.2f}</title></line>')
+        parts.append(f'<text x="{tx:.1f}" y="{T - 8:.1f}" text-anchor="middle" '
+                     f'font-size="10" fill="{_HIGHLIGHT}">target '
+                     f'{float(target):.2f}</text>')
+    final = d.get("final") or {}
+    for c in cands:
+        comp = float(c["composite"])
+        ok = bool(c.get("pass"))
+        fill = _ACCEPTED if ok else _REJECTED
+        x = cx(comp)
+        score = float(c.get("score", 0.0) or 0.0)
+        tr = c.get("train")
+        sz = c.get("size")
+        title = (f"candidate {int(c.get('cand', 0) or 0)}: score {score:.2f}, "
+                 f"train {tr if tr is not None else 'n/a'}s, "
+                 f"size {sz if sz is not None else 'n/a'}, composite "
+                 f"{comp:.3f} → {'pass' if ok else 'miss'}")
+        parts.append(f'<circle cx="{x:.1f}" cy="{mid_y:.1f}" r="6" '
+                     f'fill="{fill}" fill-opacity="0.9"><title>{html.escape(title)}</title></circle>')
+    if final and _finite(final.get("composite")):
+        fx = cx(float(final["composite"]))
+        parts.append(f'<text x="{fx:.1f}" y="{mid_y - 12:.1f}" '
+                     f'text-anchor="middle" font-size="14" fill="{_HIGHLIGHT}">'
+                     f'★<title>counterfactual final: candidate '
+                     f'{int(final.get("cand", 0) or 0)}</title></text>')
+    parts.append(f'<text x="{L:.1f}" y="{height - 8}" font-size="11" '
+                 f'fill="{_AXIS}">dot = logged candidate at its composite '
+                 f'(pool-relative min-max, renormalized over its axes) · '
+                 f'{int(d.get("passing", 0) or 0)}/{int(d.get("pool", 0) or 0)} '
+                 f'pass the weighted gate</text>')
+    parts.append("</svg>")
+    return "\n".join(parts)

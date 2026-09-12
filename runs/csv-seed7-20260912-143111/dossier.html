@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"/>
+<title>AutoRefine dossier — csv</title>
+<style>
+body{font-family:ui-monospace,Consolas,monospace;margin:24px;color:#1f2933;}
+h1{font-size:20px;} h2{font-size:15px;margin-top:28px;}
+table{border-collapse:collapse;margin:8px 0 4px;}
+td,th{border:1px solid #cbd2d9;padding:4px 10px;text-align:left;font-size:13px;}
+th{background:#f0f4f8;}
+pre{background:#f0f4f8;border:1px solid #cbd2d9;padding:10px;overflow:auto;}
+.dim{color:#6b7280;font-size:13px;}
+.foot{color:#6b7280;font-size:12px;margin-top:32px;}
+</style></head><body>
+<h1>AutoRefine dossier — csv (seed 7)</h1>
+<h2>Summary</h2>
+<table>
+<tr><th>finished_reason</th><td>budget_exhausted</td></tr>
+<tr><th>baseline_score</th><td>33.3333</td></tr>
+<tr><th>final_best_score</th><td>50</td></tr>
+<tr><th>improvement_factor</th><td>1.5</td></tr>
+<tr><th>experiments_run</th><td>2</td></tr>
+<tr><th>wall_seconds</th><td>0.189</td></tr>
+</table>
+<h2>Recipe (run_config)</h2>
+<pre>autorefine fit --data C:\tmp\pytest-of-kurei\pytest-270\test_app_seed_sweep_progress_s0\data.csv --experiments 2 --target 95.0</pre>
+<pre>{
+  &quot;autorefine_version&quot;: &quot;0.43.0&quot;,
+  &quot;block_size&quot;: 512,
+  &quot;ci_blocks&quot;: 8,
+  &quot;curriculum&quot;: false,
+  &quot;dataset_size&quot;: 48,
+  &quot;efficiency_weight&quot;: 0.5,
+  &quot;ensemble_top_k&quot;: 0,
+  &quot;gen_gap_penalty&quot;: 0.5,
+  &quot;kfold&quot;: 0,
+  &quot;max_experiments&quot;: 2,
+  &quot;max_train_seconds&quot;: 30.0,
+  &quot;max_wall_seconds&quot;: 900.0,
+  &quot;policy&quot;: &quot;bandit&quot;,
+  &quot;rl_episodes&quot;: null,
+  &quot;schema&quot;: &quot;autorefine.run_config/1&quot;,
+  &quot;screen_frac&quot;: 1.0,
+  &quot;seed&quot;: 7,
+  &quot;stall_patience&quot;: null,
+  &quot;target&quot;: 95.0,
+  &quot;task&quot;: &quot;csv&quot;,
+  &quot;task_config&quot;: {
+    &quot;path&quot;: &quot;C:\\tmp\\pytest-of-kurei\\pytest-270\\test_app_seed_sweep_progress_s0\\data.csv&quot;
+  },
+  &quot;z_accept&quot;: 1.0
+}</pre>
+<h2>Provenance</h2>
+<svg xmlns="http://www.w3.org/2000/svg" width="560" height="408" viewBox="0 0 560 408" role="img" aria-label="provenance certificate" font-family="monospace">
+<rect x="0" y="0" width="560" height="408" fill="white"/>
+<text x="280" y="16" text-anchor="middle" font-size="14" fill="#333333">provenance certificate</text>
+<rect x="8" y="40" width="544" height="360" fill="white" stroke="#333333" stroke-width="1.5" rx="8"/>
+<text x="24" y="68" font-size="15" font-weight="bold" fill="#333333">AutoRefine — provenance certificate</text>
+<text x="24" y="96" font-size="13" fill="#333333">tool: autorefine</text>
+<text x="24" y="120" font-size="13" fill="#333333">version: 0.43.0</text>
+<text x="24" y="144" font-size="13" fill="#333333">python: 3.13.9</text>
+<text x="24" y="168" font-size="13" fill="#333333">numpy: 2.3.5</text>
+<text x="24" y="192" font-size="13" fill="#333333">  streamlit: 1.51.0</text>
+<text x="24" y="216" font-size="13" fill="#333333">  pillow: 12.3.0</text>
+<text x="24" y="240" font-size="13" fill="#333333">  soundfile: 0.14.0</text>
+<text x="24" y="264" font-size="13" fill="#333333">task: csv</text>
+<text x="24" y="288" font-size="13" fill="#333333">seed: 7</text>
+<text x="24" y="312" font-size="13" fill="#333333">target: 95.0</text>
+<text x="24" y="336" font-size="13" fill="#333333">config_hash: <tspan fill="#1a66c2">56e747c5d3f5112c…</tspan><title>56e747c5d3f5112cac0f389d23ff03cacf28b03b0b7859f553ecbe037875d212</title></text>
+<text x="24" y="360" font-size="13" fill="#333333">git_sha: 490e1f5</text>
+</svg>
+<h2>Frontier</h2>
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360" role="img" aria-label="pareto frontier" font-family="monospace">
+<rect x="0" y="0" width="640" height="360" fill="white"/>
+<text x="320" y="16" text-anchor="middle" font-size="14" fill="#333333">pareto frontier</text>
+<line x1="72.0" y1="28.0" x2="72.0" y2="316.0" stroke="#333333"/>
+<line x1="72.0" y1="316.0" x2="616.0" y2="316.0" stroke="#333333"/>
+<line x1="68.0" y1="28.0" x2="72.0" y2="28.0" stroke="#333333"/>
+<text x="64.0" y="32.0" text-anchor="end" font-size="11" fill="#333333">50.00</text>
+<line x1="68.0" y1="100.0" x2="72.0" y2="100.0" stroke="#333333"/>
+<text x="64.0" y="104.0" text-anchor="end" font-size="11" fill="#333333">45.83</text>
+<line x1="68.0" y1="172.0" x2="72.0" y2="172.0" stroke="#333333"/>
+<text x="64.0" y="176.0" text-anchor="end" font-size="11" fill="#333333">41.67</text>
+<line x1="68.0" y1="244.0" x2="72.0" y2="244.0" stroke="#333333"/>
+<text x="64.0" y="248.0" text-anchor="end" font-size="11" fill="#333333">37.50</text>
+<line x1="68.0" y1="316.0" x2="72.0" y2="316.0" stroke="#333333"/>
+<text x="64.0" y="320.0" text-anchor="end" font-size="11" fill="#333333">33.33</text>
+<text x="72.0" y="334.0" text-anchor="start" font-size="11" fill="#333333">0.04</text>
+<text x="616.0" y="334.0" text-anchor="end" font-size="11" fill="#333333">0.10</text>
+<text x="344.0" y="350.0" text-anchor="middle" font-size="11" fill="#333333">training seconds</text>
+<polyline fill="none" stroke="#1a66c2" stroke-width="2" points="72.0,316.0 616.0,28.0"/>
+<circle cx="72.0" cy="316.0" r="4" fill="#1a66c2"><title>score 33.33 @ 0.041s</title></circle>
+<circle cx="616.0" cy="28.0" r="4" fill="#1a66c2"><title>score 50.00 @ 0.101s</title></circle>
+</svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="380" viewBox="0 0 980 380" role="img" aria-label="3-objective frontier (score × time × size)" font-family="monospace">
+<rect x="0" y="0" width="980" height="380" fill="white"/>
+<text x="490" y="16" text-anchor="middle" font-size="14" fill="#333333">3-objective frontier (score × time × size)</text>
+<text x="266.0" y="36.0" text-anchor="middle" font-size="12" fill="#333333">score × training time</text>
+<text x="714.0" y="36.0" text-anchor="middle" font-size="12" fill="#333333">score × parameter count</text>
+<line x1="56.0" y1="46.0" x2="56.0" y2="288.0" stroke="#333333"/>
+<line x1="56.0" y1="288.0" x2="476.0" y2="288.0" stroke="#333333"/>
+<line x1="52.0" y1="46.0" x2="56.0" y2="46.0" stroke="#333333"/>
+<text x="48.0" y="50.0" text-anchor="end" font-size="10" fill="#333333">50.00</text>
+<line x1="52.0" y1="106.5" x2="56.0" y2="106.5" stroke="#333333"/>
+<text x="48.0" y="110.5" text-anchor="end" font-size="10" fill="#333333">45.83</text>
+<line x1="52.0" y1="167.0" x2="56.0" y2="167.0" stroke="#333333"/>
+<text x="48.0" y="171.0" text-anchor="end" font-size="10" fill="#333333">41.67</text>
+<line x1="52.0" y1="227.5" x2="56.0" y2="227.5" stroke="#333333"/>
+<text x="48.0" y="231.5" text-anchor="end" font-size="10" fill="#333333">37.50</text>
+<line x1="52.0" y1="288.0" x2="56.0" y2="288.0" stroke="#333333"/>
+<text x="48.0" y="292.0" text-anchor="end" font-size="10" fill="#333333">33.33</text>
+<text x="56.0" y="304.0" font-size="10" fill="#333333">0.04s</text>
+<text x="476.0" y="304.0" text-anchor="end" font-size="10" fill="#333333">0.10s</text>
+<circle cx="61.0" cy="288.0" r="5" fill="#6b7280" fill-opacity="0.9"><title>mlp 362bf6 · score 33.33 · 0.041s · size 202 params · dominated</title></circle>
+<circle cx="56.0" cy="288.0" r="5" fill="#15803d" fill-opacity="0.9"><title>mlp 3a6af3 · score 33.33 · 0.041s · size 202 params · FRONTIER</title></circle>
+<circle cx="476.0" cy="46.0" r="5" fill="#15803d" fill-opacity="0.9"><title>mlp 4f9eef · score 50.00 · 0.101s · size 202 params · FRONTIER</title></circle>
+<line x1="504.0" y1="46.0" x2="504.0" y2="288.0" stroke="#333333"/>
+<line x1="504.0" y1="288.0" x2="924.0" y2="288.0" stroke="#333333"/>
+<line x1="500.0" y1="46.0" x2="504.0" y2="46.0" stroke="#333333"/>
+<text x="496.0" y="50.0" text-anchor="end" font-size="10" fill="#333333">50.00</text>
+<line x1="500.0" y1="106.5" x2="504.0" y2="106.5" stroke="#333333"/>
+<text x="496.0" y="110.5" text-anchor="end" font-size="10" fill="#333333">45.83</text>
+<line x1="500.0" y1="167.0" x2="504.0" y2="167.0" stroke="#333333"/>
+<text x="496.0" y="171.0" text-anchor="end" font-size="10" fill="#333333">41.67</text>
+<line x1="500.0" y1="227.5" x2="504.0" y2="227.5" stroke="#333333"/>
+<text x="496.0" y="231.5" text-anchor="end" font-size="10" fill="#333333">37.50</text>
+<line x1="500.0" y1="288.0" x2="504.0" y2="288.0" stroke="#333333"/>
+<text x="496.0" y="292.0" text-anchor="end" font-size="10" fill="#333333">33.33</text>
+<text x="504.0" y="304.0" font-size="10" fill="#333333">202 params</text>
+<text x="924.0" y="304.0" text-anchor="end" font-size="10" fill="#333333">203 params</text>
+<circle cx="504.0" cy="288.0" r="5" fill="#6b7280" fill-opacity="0.9"><title>mlp 362bf6 · score 33.33 · size 202 params · dominated</title></circle>
+<circle cx="504.0" cy="288.0" r="5" fill="#15803d" fill-opacity="0.9"><title>mlp 3a6af3 · score 33.33 · size 202 params · FRONTIER</title></circle>
+<circle cx="504.0" cy="46.0" r="5" fill="#15803d" fill-opacity="0.9"><title>mlp 4f9eef · score 50.00 · size 202 params · FRONTIER</title></circle>
+<circle cx="61.0" cy="324.0" r="5" fill="#15803d" fill-opacity="0.9"/>
+<text x="70.0" y="328.0" font-size="11" fill="#333333">frontier</text>
+<circle cx="151.0" cy="324.0" r="5" fill="#6b7280" fill-opacity="0.9"/>
+<text x="160.0" y="328.0" font-size="11" fill="#333333">dominated</text>
+<text x="490" y="372" text-anchor="middle" font-size="12" fill="#333333">3D non-dominance: a point stands if nothing is ≥ on score, ≤ on time (and ≤ on size when both are sized) · 0 unsized point(s) shown in panel 1 only</text>
+</svg>
+<h2>Spec lineage</h2>
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="288" viewBox="0 0 760 288" role="img" aria-label="spec lineage (DAG)" font-family="monospace">
+<rect x="0" y="0" width="760" height="288" fill="white"/>
+<text x="380" y="16" text-anchor="middle" font-size="14" fill="#333333">spec lineage (DAG)</text>
+<path d="M 380.0 60.0 C 380.0 72.0, 380.0 72.0, 380.0 84.0" fill="none" stroke="#15803d" stroke-width="1.50"><title>mutation weight_decay · accepted · Δscore 0.00</title></path>
+<path d="M 380.0 124.0 C 380.0 136.0, 380.0 136.0, 380.0 148.0" fill="none" stroke="#15803d" stroke-width="5.00"><title>mutation train_steps · accepted · Δscore 16.67</title></path>
+<rect x="305.0" y="20.0" width="150.0" height="40.0" rx="8" fill="#15803d" fill-opacity="0.85">
+<title>mlp 362bf6 · score 33.3 · accepted · mutated: (root)</title></rect>
+<text x="380.0" y="38.0" text-anchor="middle" font-size="11" fill="white">mlp 362bf6</text>
+<text x="380.0" y="53.0" text-anchor="middle" font-size="12" fill="white">33.3</text>
+<rect x="305.0" y="84.0" width="150.0" height="40.0" rx="8" fill="#15803d" fill-opacity="0.85">
+<title>mlp 3a6af3 · score 33.3 · accepted · mutated: weight_decay</title></rect>
+<text x="380.0" y="102.0" text-anchor="middle" font-size="11" fill="white">mlp 3a6af3</text>
+<text x="380.0" y="117.0" text-anchor="middle" font-size="12" fill="white">33.3</text>
+<rect x="305.0" y="148.0" width="150.0" height="40.0" rx="8" fill="#15803d" fill-opacity="0.85">
+<title>mlp 4f9eef · score 50.0 · accepted · mutated: train_steps</title></rect>
+<text x="380.0" y="166.0" text-anchor="middle" font-size="11" fill="white">mlp 4f9eef</text>
+<text x="380.0" y="181.0" text-anchor="middle" font-size="12" fill="white">50.0</text>
+<rect x="20.0" y="245.0" width="10" height="10" fill="#15803d" fill-opacity="0.85"/>
+<text x="34.0" y="254.0" font-size="11" fill="#333333">accepted</text>
+<rect x="110.0" y="245.0" width="10" height="10" fill="#6b7280" fill-opacity="0.85"/>
+<text x="124.0" y="254.0" font-size="11" fill="#333333">rejected</text>
+<text x="200.0" y="254.0" font-size="11" fill="#333333">edge = one mutation · width ∝ |Δscore|</text>
+<text x="380" y="280" text-anchor="middle" font-size="12" fill="#333333">n specs = 3 · n mutations = 2</text>
+</svg>
+<h2>Sensitivity (per-field response)</h2>
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="1038" viewBox="0 0 640 1038" role="img" aria-label="per-field response surfaces" font-family="monospace">
+<rect x="0" y="0" width="640" height="1038" fill="white"/>
+<text x="320" y="16" text-anchor="middle" font-size="14" fill="#333333">per-field response surfaces</text>
+<text x="110.0" y="73.7" text-anchor="end" font-size="12" fill="#333333">activation</text>
+<rect x="122.0" y="36.0" width="106.0" height="60.0" fill="#f6f8fa"><title>activation tanh: mean 38.89 (n=3, best 50.00)</title></rect>
+<line x1="122.0" y1="82.0" x2="228.0" y2="82.0" stroke="#333333" stroke-width="1"/>
+<rect x="163.0" y="69.6" width="24" height="12.4" fill="#1a66c2" fill-opacity="0.85"><title>activation tanh: mean 38.89 (n=3, best 50.00)</title></rect>
+<text x="175.0" y="65.6" text-anchor="middle" font-size="11" fill="#333333">38.9</text>
+<text x="175.0" y="94.0" text-anchor="middle" font-size="10" fill="#333333">tanh · n=3</text>
+<text x="110.0" y="137.7" text-anchor="end" font-size="12" fill="#333333">architecture</text>
+<rect x="122.0" y="100.0" width="106.0" height="60.0" fill="#f6f8fa"><title>architecture 16,8: mean 38.89 (n=3, best 50.00)</title></rect>
+<line x1="122.0" y1="146.0" x2="228.0" y2="146.0" stroke="#333333" stroke-width="1"/>
+<rect x="163.0" y="133.6" width="24" height="12.4" fill="#1a66c2" fill-opacity="0.85"><title>architecture 16,8: mean 38.89 (n=3, best 50.00)</title></rect>
+<text x="175.0" y="129.6" text-anchor="middle" font-size="11" fill="#333333">38.9</text>
+<text x="175.0" y="158.0" text-anchor="middle" font-size="10" fill="#333333">16,8 · n=3</text>
+<text x="110.0" y="201.7" text-anchor="end" font-size="12" fill="#333333">batch_size</text>
+<rect x="122.0" y="164.0" width="106.0" height="60.0" fill="#f6f8fa"><title>batch_size 32: mean 38.89 (n=3, best 50.00)</title></rect>
+<line x1="122.0" y1="210.0" x2="228.0" y2="210.0" stroke="#333333" stroke-width="1"/>
+<rect x="163.0" y="197.6" width="24" height="12.4" fill="#1a66c2" fill-opacity="0.85"><title>batch_size 32: mean 38.89 (n=3, best 50.00)</title></rect>
+<text x="175.0" y="193.6" text-anchor="middle" font-size="11" fill="#333333">38.9</text>
+<text x="175.0" y="222.0" text-anchor="middle" font-size="10" fill="#333333">32 · n=3</text>
+<text x="110.0" y="265.7" text-anchor="end" font-size="12" fill="#333333">early_stopping_patience</text>
+<rect x="122.0" y="228.0" width="106.0" height="60.0" fill="#f6f8fa"><title>early_stopping_patience 0: mean 38.89 (n=3, best 50.00)</title></rect>
+<line x1="122.0" y1="274.0" x2="228.0" y2="274.0" stroke="#333333" stroke-width="1"/>
+<rect x="163.0" y="261.6" width="24" height="12.4" fill="#1a66c2" fill-opacity="0.85"><title>early_stopping_patience 0: mean 38.89 (n=3, best 50.00)</title></rect>
+<text x="175.0" y="257.6" text-anchor="middle" font-size="11" fill="#333333">38.9</text>
+<text x="175.0" y="286.0" text-anchor="middle" font-size="10" fill="#333333">0 · n=3</text>
+<text x="110.0" y="329.7" text-anchor="end" font-size="12" fill="#333333">gradient_clipping</text>
+<rect x="122.0" y="292.0" width="106.0" height="60.0" fill="#f6f8fa"><title>gradient_clipping 0.0: mean 38.89 (n=3, best 50.00)</title></rect>
+<line x1="122.0" y1="338.0" x2="228.0" y2="338.0" stroke="#333333" stroke-width="1"/>
+<rect x="163.0" y="325.6" width="24" height="12.4" fill="#1a66c2" fill-opacity="0.85"><title>gradient_clipping 0.0: mean 38.89 (n=3, best 50.00)</title></rect>
+<text x="175.0" y="321.6" text-anchor="middle" font-size="11" fill="#333333">38.9</text>
+<text x="175.0" y="350.0" text-anchor="middle" font-size="10" fill="#333333">0.0 · n=3</text>
+<text x="110.0" y="393.7" text-anchor="end" font-size="12" fill="#333333">init_scale</text>
+<rect x="122.0" y="356.0" width="106.0" height="60.0" fill="#f6f8fa"><title>init_scale 1.0: mean 38.89 (n=3, best 50.00)</title></rect>
+<line x1="122.0" y1="402.0" x2="228.0" y2="402.0" stroke="#333333" stroke-width="1"/>
+<rect x="163.0" y="389.6" width="24" height="12.4" fill="#1a66c2" fill-opacity="0.85"><title>init_scale 1.0: mean 38.89 (n=3, best 50.00)</title></rect>
+<text x="175.0" y="385.6" text-anchor="middle" font-size="11" fill="#333333">38.9</text>
+<text x="175.0" y="414.0" text-anchor="middle" font-size="10" fill="#333333">1.0 · n=3</text>
+<text x="110.0" y="457.7" text-anchor="end" font-size="12" fill="#333333">input_noise</text>
+<rect x="122.0" y="420.0" width="106.0" height="60.0" fill="#f6f8fa"><title>input_noise 0.02: mean 38.89 (n=3, best 50.00)</title></rect>
+<line x1="122.0" y1="466.0" x2="228.0" y2="466.0" stroke="#333333" stroke-width="1"/>
+<rect x="163.0" y="453.6" width="24" height="12.4" fill="#1a66c2" fill-opacity="0.85"><title>input_noise 0.02: mean 38.89 (n=3, best 50.00)</title></rect>
+<text x="175.0" y="449.6" text-anchor="middle" font-size="11" fill="#333333">38.9</text>
+<text x="175.0" y="478.0" text-anchor="middle" font-size="10" fill="#333333">0.02 · n=3</text>
+<text x="110.0" y="521.7" text-anchor="end" font-size="12" fill="#333333">knn_k</text>
+<rect x="122.0" y="484.0" width="106.0" height="60.0" fill="#f6f8fa"><title>knn_k 5: mean 38.89 (n=3, best 50.00)</title></rect>
+<line x1="122.0" y1="530.0" x2="228.0" y2="530.0" stroke="#333333" stroke-width="1"/>
+<rect x="163.0" y="517.6" width="24" height="12.4" fill="#1a66c2" fill-opacity="0.85"><title>knn_k 5: mean 38.89 (n=3, best 50.00)</title></rect>
+<text x="175.0" y="513.6" text-anchor="middle" font-size="11" fill="#333333">38.9</text>
+<text x="175.0" y="542.0" text-anchor="middle" font-size="10" fill="#333333">5 · n=3</text>
+<text x="110.0" y="585.7" text-anchor="end" font-size="12" fill="#333333">label_smoothing</text>
+<rect x="122.0" y="548.0" width="106.0" height="60.0" fill="#f6f8fa"><title>label_smoothing 0.0: mean 38.89 (n=3, best 50.00)</title></rect>
+<line x1="122.0" y1="594.0" x2="228.0" y2="594.0" stroke="#333333" stroke-width="1"/>
+<rect x="163.0" y="581.6" width="24" height="12.4" fill="#1a66c2" fill-opacity="0.85"><title>label_smoothing 0.0: mean 38.89 (n=3, best 50.00)</title></rect>
+<text x="175.0" y="577.6" text-anchor="middle" font-size="11" fill="#333333">38.9</text>
+<text x="175.0" y="606.0" text-anchor="middle" font-size="10" fill="#333333">0.0 · n=3</text>
+<text x="110.0" y="649.7" text-anchor="end" font-size="12" fill="#333333">learning_rate</text>
+<rect x="122.0" y="612.0" width="106.0" height="60.0" fill="#f6f8fa"><title>learning_rate 0.001: mean 38.89 (n=3, best 50.00)</title></rect>
+<line x1="122.0" y1="658.0" x2="228.0" y2="658.0" stroke="#333333" stroke-width="1"/>
+<rect x="163.0" y="645.6" width="24" height="12.4" fill="#1a66c2" fill-opacity="0.85"><title>learning_rate 0.001: mean 38.89 (n=3, best 50.00)</title></rect>
+<text x="175.0" y="641.6" text-anchor="middle" font-size="11" fill="#333333">38.9</text>
+<text x="175.0" y="670.0" text-anchor="middle" font-size="10" fill="#333333">0.001 · n=3</text>
+<text x="110.0" y="713.7" text-anchor="end" font-size="12" fill="#333333">lr_schedule</text>
+<rect x="122.0" y="676.0" width="106.0" height="60.0" fill="#f6f8fa"><title>lr_schedule constant: mean 38.89 (n=3, best 50.00)</title></rect>
+<line x1="122.0" y1="722.0" x2="228.0" y2="722.0" stroke="#333333" stroke-width="1"/>
+<rect x="163.0" y="709.6" width="24" height="12.4" fill="#1a66c2" fill-opacity="0.85"><title>lr_schedule constant: mean 38.89 (n=3, best 50.00)</title></rect>
+<text x="175.0" y="705.6" text-anchor="middle" font-size="11" fill="#333333">38.9</text>
+<text x="175.0" y="734.0" text-anchor="middle" font-size="10" fill="#333333">constant · n=3</text>
+<text x="110.0" y="777.7" text-anchor="end" font-size="12" fill="#333333">model_family</text>
+<rect x="122.0" y="740.0" width="106.0" height="60.0" fill="#f6f8fa"><title>model_family mlp: mean 38.89 (n=3, best 50.00)</title></rect>
+<line x1="122.0" y1="786.0" x2="228.0" y2="786.0" stroke="#333333" stroke-width="1"/>
+<rect x="163.0" y="773.6" width="24" height="12.4" fill="#1a66c2" fill-opacity="0.85"><title>model_family mlp: mean 38.89 (n=3, best 50.00)</title></rect>
+<text x="175.0" y="769.6" text-anchor="middle" font-size="11" fill="#333333">38.9</text>
+<text x="175.0" y="798.0" text-anchor="middle" font-size="10" fill="#333333">mlp · n=3</text>
+<text x="110.0" y="841.7" text-anchor="end" font-size="12" fill="#333333">optimizer</text>
+<rect x="122.0" y="804.0" width="106.0" height="60.0" fill="#f6f8fa"><title>optimizer momentum: mean 38.89 (n=3, best 50.00)</title></rect>
+<line x1="122.0" y1="850.0" x2="228.0" y2="850.0" stroke="#333333" stroke-width="1"/>
+<rect x="163.0" y="837.6" width="24" height="12.4" fill="#1a66c2" fill-opacity="0.85"><title>optimizer momentum: mean 38.89 (n=3, best 50.00)</title></rect>
+<text x="175.0" y="833.6" text-anchor="middle" font-size="11" fill="#333333">38.9</text>
+<text x="175.0" y="862.0" text-anchor="middle" font-size="10" fill="#333333">momentum · n=3</text>
+<text x="110.0" y="905.7" text-anchor="end" font-size="12" fill="#333333">train_steps</text>
+<rect x="122.0" y="868.0" width="106.0" height="60.0" fill="#f6f8fa"><title>train_steps 400: mean 33.33 (n=2, best 33.33)</title></rect>
+<line x1="122.0" y1="914.0" x2="228.0" y2="914.0" stroke="#333333" stroke-width="1"/>
+<rect x="163.0" y="903.3" width="24" height="10.7" fill="#1a66c2" fill-opacity="0.85"><title>train_steps 400: mean 33.33 (n=2, best 33.33)</title></rect>
+<text x="175.0" y="899.3" text-anchor="middle" font-size="11" fill="#333333">33.3</text>
+<text x="175.0" y="926.0" text-anchor="middle" font-size="10" fill="#333333">400 · n=2</text>
+<rect x="232.0" y="868.0" width="106.0" height="60.0" fill="#f6f8fa"><title>train_steps 1000: mean 50.00 (n=1, best 50.00)</title></rect>
+<line x1="232.0" y1="914.0" x2="338.0" y2="914.0" stroke="#333333" stroke-width="1"/>
+<rect x="273.0" y="898.0" width="24" height="16.0" fill="#1a66c2" fill-opacity="0.85"><title>train_steps 1000: mean 50.00 (n=1, best 50.00)</title></rect>
+<text x="285.0" y="894.0" text-anchor="middle" font-size="11" fill="#333333">50.0</text>
+<text x="285.0" y="926.0" text-anchor="middle" font-size="10" fill="#333333">1000 · n=1</text>
+<text x="110.0" y="969.7" text-anchor="end" font-size="12" fill="#333333">weight_decay</text>
+<rect x="122.0" y="932.0" width="106.0" height="60.0" fill="#f6f8fa"><title>weight_decay 0.0001: mean 33.33 (n=1, best 33.33)</title></rect>
+<line x1="122.0" y1="978.0" x2="228.0" y2="978.0" stroke="#333333" stroke-width="1"/>
+<rect x="163.0" y="967.3" width="24" height="10.7" fill="#1a66c2" fill-opacity="0.85"><title>weight_decay 0.0001: mean 33.33 (n=1, best 33.33)</title></rect>
+<text x="175.0" y="963.3" text-anchor="middle" font-size="11" fill="#333333">33.3</text>
+<text x="175.0" y="990.0" text-anchor="middle" font-size="10" fill="#333333">0.0001 · n=1</text>
+<rect x="232.0" y="932.0" width="106.0" height="60.0" fill="#f6f8fa"><title>weight_decay 0.001: mean 41.67 (n=2, best 50.00)</title></rect>
+<line x1="232.0" y1="978.0" x2="338.0" y2="978.0" stroke="#333333" stroke-width="1"/>
+<rect x="273.0" y="964.7" width="24" height="13.3" fill="#1a66c2" fill-opacity="0.85"><title>weight_decay 0.001: mean 41.67 (n=2, best 50.00)</title></rect>
+<text x="285.0" y="960.7" text-anchor="middle" font-size="11" fill="#333333">41.7</text>
+<text x="285.0" y="990.0" text-anchor="middle" font-size="10" fill="#333333">0.001 · n=2</text>
+<text x="120.0" y="1030" font-size="11" fill="#333333">bar = mean holdout score of candidates carrying that value (0-100 clamped) · n = sample size</text>
+</svg>
+<h2>Error analysis</h2>
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="112" viewBox="0 0 640 112" role="img" aria-label="per-class accuracy (holdout)" font-family="monospace">
+<rect x="0" y="0" width="640" height="112" fill="white"/>
+<text x="320" y="16" text-anchor="middle" font-size="14" fill="#333333">per-class accuracy (holdout)</text>
+<line x1="160.0" y1="34.0" x2="160.0" y2="78.0" stroke="#d9e0e7"/>
+<text x="160.0" y="94.0" text-anchor="middle" font-size="11" fill="#333333">0%</text>
+<line x1="262.0" y1="34.0" x2="262.0" y2="78.0" stroke="#d9e0e7"/>
+<text x="262.0" y="94.0" text-anchor="middle" font-size="11" fill="#333333">25%</text>
+<line x1="364.0" y1="34.0" x2="364.0" y2="78.0" stroke="#d9e0e7"/>
+<text x="364.0" y="94.0" text-anchor="middle" font-size="11" fill="#333333">50%</text>
+<line x1="466.0" y1="34.0" x2="466.0" y2="78.0" stroke="#d9e0e7"/>
+<text x="466.0" y="94.0" text-anchor="middle" font-size="11" fill="#333333">75%</text>
+<line x1="568.0" y1="34.0" x2="568.0" y2="78.0" stroke="#d9e0e7"/>
+<text x="568.0" y="94.0" text-anchor="middle" font-size="11" fill="#333333">100%</text>
+<rect x="160.0" y="36.0" width="408.0" height="16.0" fill="#f6f8fa"/>
+<rect x="160.0" y="36.0" width="136.0" height="16.0" fill="#1a66c2"><title>0: 33.3%</title></rect>
+<text x="152.0" y="48.0" text-anchor="end" font-size="11" fill="#333333">0 (n=3)</text>
+<text x="576.0" y="48.0" font-size="11" fill="#333333">33.3%</text>
+<rect x="160.0" y="58.0" width="408.0" height="16.0" fill="#f6f8fa"/>
+<rect x="160.0" y="58.0" width="272.0" height="16.0" fill="#1a66c2"><title>1: 66.7%</title></rect>
+<text x="152.0" y="70.0" text-anchor="end" font-size="11" fill="#333333">1 (n=3)</text>
+<text x="576.0" y="70.0" font-size="11" fill="#333333">66.7%</text>
+</svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="278" height="192" viewBox="0 0 278 192" role="img" aria-label="confusion matrix (rows true, columns predicted)" font-family="monospace">
+<rect x="0" y="0" width="278" height="192" fill="white"/>
+<text x="139" y="16" text-anchor="middle" font-size="14" fill="#333333">confusion matrix (rows true, columns predicted)</text>
+<text x="8" y="26" font-size="11" fill="#333333">true class (rows)</text>
+<text x="150" y="26" font-size="11" fill="#333333">predicted class (columns)</text>
+<text x="178" y="26" text-anchor="middle" font-size="11" fill="#333333">0</text>
+<text x="234" y="26" text-anchor="middle" font-size="11" fill="#333333">1</text>
+<text x="142" y="66" text-anchor="end" font-size="11" fill="#333333">0</text>
+<rect x="150" y="34" width="56" height="56" fill="#d1fae5" stroke="#333333"><title>true 0 → predicted 0: 1 (33.3% of row)</title></rect>
+<text x="178" y="66" text-anchor="middle" font-size="12" fill="#15803d">1</text>
+<rect x="206" y="34" width="56" height="56" fill="#ffffff" stroke="#333333"><title>true 0 → predicted 1: 2 (66.7% of row)</title></rect>
+<text x="234" y="66" text-anchor="middle" font-size="12" fill="#333333">2</text>
+<text x="142" y="122" text-anchor="end" font-size="11" fill="#333333">1</text>
+<rect x="150" y="90" width="56" height="56" fill="#ffffff" stroke="#333333"><title>true 1 → predicted 0: 1 (33.3% of row)</title></rect>
+<text x="178" y="122" text-anchor="middle" font-size="12" fill="#333333">1</text>
+<rect x="206" y="90" width="56" height="56" fill="#d1fae5" stroke="#333333"><title>true 1 → predicted 1: 2 (66.7% of row)</title></rect>
+<text x="234" y="122" text-anchor="middle" font-size="12" fill="#15803d">2</text>
+<text x="206" y="164" text-anchor="middle" font-size="11" fill="#333333">green diagonal = correct predictions</text>
+</svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="238" viewBox="0 0 640 238" role="img" aria-label="per-input difficulty ranking" font-family="monospace">
+<rect x="0" y="0" width="640" height="238" fill="white"/>
+<text x="320" y="16" text-anchor="middle" font-size="14" fill="#333333">per-input difficulty ranking</text>
+<line x1="257.6" y1="28.0" x2="257.6" y2="196.0" stroke="#333333" stroke-width="1.5" stroke-dasharray="3 3"/>
+<text x="261.6" y="36.0" font-size="10" fill="#333333">0</text>
+<rect x="170.0" y="35.5" width="446.0" height="23.0" fill="#f6f8fa"><title>item #1 · true 1 · predicted 1 · correct · difficulty 1.694</title></rect>
+<text x="160.0" y="51.0" text-anchor="end" font-size="11" fill="#333333">#1  1 → 1</text>
+<rect x="257.6" y="43.0" width="358.4" height="8" fill="#15803d" fill-opacity="0.85"><title>item #1 · true 1 · predicted 1 · correct · difficulty 1.694</title></rect>
+<circle cx="616.0" cy="47.0" r="4" fill="#15803d"><title>item #1 · true 1 · predicted 1 · correct · difficulty 1.694</title></circle>
+<rect x="170.0" y="61.5" width="446.0" height="23.0" fill="#f6f8fa"><title>item #2 · true 0 · predicted 0 · correct · difficulty 0.970</title></rect>
+<text x="160.0" y="77.0" text-anchor="end" font-size="11" fill="#333333">#2  0 → 0</text>
+<rect x="257.6" y="69.0" width="205.3" height="8" fill="#15803d" fill-opacity="0.85"><title>item #2 · true 0 · predicted 0 · correct · difficulty 0.970</title></rect>
+<circle cx="462.9" cy="73.0" r="4" fill="#15803d"><title>item #2 · true 0 · predicted 0 · correct · difficulty 0.970</title></circle>
+<rect x="170.0" y="87.5" width="446.0" height="23.0" fill="#f6f8fa"><title>item #4 · true 1 · predicted 1 · correct · difficulty 0.460</title></rect>
+<text x="160.0" y="103.0" text-anchor="end" font-size="11" fill="#333333">#4  1 → 1</text>
+<rect x="257.6" y="95.0" width="97.2" height="8" fill="#15803d" fill-opacity="0.85"><title>item #4 · true 1 · predicted 1 · correct · difficulty 0.460</title></rect>
+<circle cx="354.9" cy="99.0" r="4" fill="#15803d"><title>item #4 · true 1 · predicted 1 · correct · difficulty 0.460</title></circle>
+<rect x="170.0" y="113.5" width="446.0" height="23.0" fill="#f6f8fa"><title>item #3 · true 1 · predicted 0 · MISCLASSIFIED · difficulty -0.047</title></rect>
+<text x="160.0" y="129.0" text-anchor="end" font-size="11" fill="#333333">#3  1 → 0</text>
+<rect x="247.8" y="121.0" width="9.9" height="8" fill="#6b7280" fill-opacity="0.85"><title>item #3 · true 1 · predicted 0 · MISCLASSIFIED · difficulty -0.047</title></rect>
+<circle cx="247.8" cy="125.0" r="4" fill="#6b7280"><title>item #3 · true 1 · predicted 0 · MISCLASSIFIED · difficulty -0.047</title></circle>
+<rect x="170.0" y="139.5" width="446.0" height="23.0" fill="#f6f8fa"><title>item #0 · true 0 · predicted 1 · MISCLASSIFIED · difficulty -0.414</title></rect>
+<text x="160.0" y="155.0" text-anchor="end" font-size="11" fill="#333333">#0  0 → 1</text>
+<rect x="170.0" y="147.0" width="87.6" height="8" fill="#6b7280" fill-opacity="0.85"><title>item #0 · true 0 · predicted 1 · MISCLASSIFIED · difficulty -0.414</title></rect>
+<circle cx="170.0" cy="151.0" r="4" fill="#6b7280"><title>item #0 · true 0 · predicted 1 · MISCLASSIFIED · difficulty -0.414</title></circle>
+<rect x="170.0" y="165.5" width="446.0" height="23.0" fill="#f6f8fa"><title>item #5 · true 0 · predicted 1 · MISCLASSIFIED · difficulty -0.414</title></rect>
+<text x="160.0" y="181.0" text-anchor="end" font-size="11" fill="#333333">#5  0 → 1</text>
+<rect x="170.0" y="173.0" width="87.6" height="8" fill="#6b7280" fill-opacity="0.85"><title>item #5 · true 0 · predicted 1 · MISCLASSIFIED · difficulty -0.414</title></rect>
+<circle cx="170.0" cy="177.0" r="4" fill="#6b7280"><title>item #5 · true 0 · predicted 1 · MISCLASSIFIED · difficulty -0.414</title></circle>
+<text x="320" y="230" text-anchor="middle" font-size="12" fill="#333333">easiest → hardest · bar = signed margin (softmax) · 6 holdout items</text>
+</svg>
+<p class="foot">Generated by autorefine — self-contained, no external assets (SPEC.md 22.2); a re-render is byte-identical (G2).</p>
+</body></html>

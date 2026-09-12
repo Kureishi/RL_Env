@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 
 from .config import Budget
-from .diagnostics import holdout_diagnostics
+from .diagnostics import holdout_difficulty, holdout_diagnostics
 from .gate import actuals_from_run, default_objectives, evaluate
 from .improver.bandit import BanditPolicy
 from .improver.meta_env import (  # GEN_GAP_TOL: 52.1.1 (v0.38)
@@ -25,11 +25,13 @@ from .improver.meta_env import (  # GEN_GAP_TOL: 52.1.1 (v0.38)
 )
 from .improver.policy import SearchPolicy
 from .runconfig import fit_recipe
+from .steering import SteeringState  # SPEC.md 59.2 (v0.45)
 from .memory import KIND_BASELINE, KIND_CURRICULUM, KIND_EXPERIMENT  # 35.1 (C4)
 from .plotting import (
     html_report,
     svg_architecture,
     svg_confusion_matrix,
+    svg_difficulty_ranking,  # 58.1 (v0.44) the difficulty ranking
     svg_decision_boundary,  # V3 view (SPEC.md 30.3)
     svg_family_bars,  # V5 view (SPEC.md 30.5)
     svg_field_value_matrix,  # V2 view (SPEC.md 30.2)
@@ -66,7 +68,8 @@ class DashboardRunner:
                  max_train_seconds: float = 30.0, runs_dir: str = "runs",
                  search_quality: str = "v04", modality: str | None = None,
                  stall_patience: int | None = None,
-                 objectives: tuple | None = None) -> None:
+                 objectives: tuple | None = None,
+                 steering: SteeringState | None = None) -> None:
         if policy not in ("bandit", "search"):
             raise ValueError(f"unsupported policy {policy!r}: {_RL_HINT}")
         if search_quality not in ("v04", "legacy"):
@@ -94,6 +97,13 @@ class DashboardRunner:
         # (score/train/model) is the §37.2 objective set
         self.objectives = (tuple(objectives) if objectives is not None
                            else default_objectives(float(target)))
+        # SPEC.md 59.2 (v0.45): the human-in-the-loop steering rules over the
+        # spec space (None = off, the pre-v0.45 byte-identical path)
+        if steering is not None and not isinstance(steering, SteeringState):
+            raise ValueError(
+                f"steering must be a SteeringState or None, got "
+                f"{type(steering).__name__} (SPEC.md 59.2)")
+        self.steering = steering
         self.env: AutoRefineEnv | None = None
         self.policy: SearchPolicy | BanditPolicy | None = None
         self._state: dict | None = None
@@ -182,9 +192,15 @@ class DashboardRunner:
             stop_check=self._stop_check,
             # v0.23 (SPEC.md 37.1.3): driver metadata for the canonical recipe
             policy=self.policy_name, target=self.target, rl_episodes=None,
+            # SPEC.md 59.2 (v0.45): the steering rules (None = off, pre-v0.45)
+            steering=self.steering,
         )
-        self.policy = (SearchPolicy(seed=self.seed) if self.policy_name == "search"
-                       else BanditPolicy(seed=self.seed))
+        # SPEC.md 59.2 (v0.45): steering pins drop their field from the
+        # proposal pool (the env's force-set in step() is the backstop)
+        excl = tuple(f for f, _v in self.steering.pins) if self.steering else ()
+        self.policy = (SearchPolicy(seed=self.seed, exclude_fields=excl)
+                       if self.policy_name == "search"
+                       else BanditPolicy(seed=self.seed, exclude_fields=excl))
         self._state = self.env.reset()
         self._phase = "running"
         return {
@@ -282,6 +298,7 @@ class DashboardRunner:
             search_quality=self.search_quality, modality=self.modality,
             stall_patience=self.stall_patience,  # v0.17 (SPEC.md 31.1)
             objectives=self.objectives,  # v0.23 (SPEC.md 37.2)
+            steering=self.steering,  # SPEC.md 59.2 (v0.45)
         )
 
     def _clone(self, seed: int) -> "DashboardRunner":
@@ -354,6 +371,10 @@ deterministic run, so per-seed results are bit-identical to the serial
         ]
         # learning views (SPEC.md 28), computed live from memory (no reloads)
         diag = holdout_diagnostics(self.env.task, self.env.best_model)
+        # 58.1 (v0.44): the per-input difficulty ranking (the error-analysis
+        # pack) — None when the task has no holdout rows (episode tasks)
+        diff = (holdout_difficulty(self.env.task, self.env.best_model)
+                if self.env.best_model is not None else None)
         gallery: list | None = None
         hold_errors = getattr(self.env.task, "holdout_errors", None)
         if callable(hold_errors) and self.env.best_model is not None:
@@ -423,6 +444,14 @@ deterministic run, so per-seed results are bit-identical to the serial
             "diagnostics": diag,
             "per_class_svg": svg_per_class_bars(diag) if diag else None,
             "confusion_svg": svg_confusion_matrix(diag) if diag else None,
+            # 58.1 (v0.44): the difficulty ranking (error-analysis pack)
+            "difficulty": diff,
+            "difficulty_svg": svg_difficulty_ranking(diff) if diff else None,
+            # 58.3 (v0.44): the task geometry the dossier needs (the 58.2
+            # size axis + the 58.3 dossier render) — additive keys
+            "state_dim": self.env.task.state_dim,
+            "n_out": self.env.task.n_outputs,
+            "grid": getattr(self.env.task, "feature_grid", None),
             # V3 (SPEC.md 30.3): decision boundary on the 2-D feature plane
             # (None for 1-feature / mse-head / episode tasks)
             "boundary": boundary,

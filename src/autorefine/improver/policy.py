@@ -15,8 +15,12 @@ REFINE_STEPS = 2  # extra mutations in the same field after a success
 
 
 class SearchPolicy:
-    def __init__(self, seed: int) -> None:
+    def __init__(self, seed: int, exclude_fields: tuple = ()) -> None:
         self.rng = np.random.default_rng(seed)
+        # SPEC.md 59.2 (v0.45): steering pins — the excluded fields are never
+        # chosen as a mutation target (empty default = the exact pre-v0.45
+        # seeded proposal stream, A1-A4 pins green)
+        self.exclude_fields = tuple(exclude_fields)
         self.fail_streak = 0
         self.refine_left = 0
         self.last_field: str | None = None
@@ -53,7 +57,9 @@ class SearchPolicy:
         else:
             # SPEC.md 25.7: the v1 field space (14 legacy fields) keeps the
             # A1-A4 seeded streams bit-stable as the spec space grows
-            field = str(self.rng.choice(SEARCH_FIELDS))
+            pool = [f for f in SEARCH_FIELDS if f not in self.exclude_fields] \
+                or list(SEARCH_FIELDS)  # 59.2: pin-safe fallback
+            field = str(self.rng.choice(pool))
             self._started = True
             mode = "uniform"
 

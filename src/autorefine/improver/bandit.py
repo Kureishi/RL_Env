@@ -20,12 +20,17 @@ from .catalog import relevant_fields
 
 
 class BanditPolicy:
-    def __init__(self, seed: int, alpha: float = 1.0, mode: str = "local") -> None:
+    def __init__(self, seed: int, alpha: float = 1.0, mode: str = "local",
+                 exclude_fields: tuple = ()) -> None:
         self.rng = np.random.default_rng(seed)
         self.alpha = float(alpha)  # exploration weight in the UCB bonus
         # SPEC.md 18.1: "local" is the v0.4 default; "uniform" restores the
         # v0.3 proposal stream (both are deterministic given the seed, G2)
         self.mode = mode
+        # SPEC.md 59.2 (v0.45): steering pins — the excluded fields are never
+        # chosen as a mutation target (empty default = the exact pre-v0.45
+        # proposal stream, A1-A4 pins green)
+        self.exclude_fields = tuple(exclude_fields)
         self.trials: dict[str, int] = {f: 0 for f in FIELD_NAMES}
         self.wins: dict[str, float] = {f: 0.0 for f in FIELD_NAMES}
 
@@ -57,8 +62,12 @@ class BanditPolicy:
         # uses (trials/wins history is kept across family switches)
         best = env_state.get("best_spec") or {}
         fields = relevant_fields(best.get("model_family", "mlp"))
+        # SPEC.md 59.2 (v0.45): steering pins drop their field from the
+        # candidate pool (an all-excluded pool falls back to the full set —
+        # a pin that covers every field would deadlock the search)
+        cands = [f for f in fields if f not in self.exclude_fields] or list(fields)
         # deterministic tie-break: highest UCB, then lexicographically largest field
-        field = max(fields, key=lambda f: (self._ucb(f), f))
+        field = max(cands, key=lambda f: (self._ucb(f), f))
         # SPEC.md 25.5: the model_family field offers the task's relevant
         # families (knn/convnet on grid-capable tasks; legacy three otherwise)
         task = env_state.get("task")

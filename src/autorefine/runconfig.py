@@ -10,6 +10,7 @@ Core module: stdlib only, no new dependencies (SPEC.md 3).
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field, fields
 from typing import Any
 
@@ -25,8 +26,15 @@ _FIELDS = (
     "gen_gap_penalty", "block_size",
     "ensemble_top_k", "curriculum", "stall_patience", "screen_frac",
     "kfold",
+    # SPEC.md 59.4 (v0.45): the steering rules (empty = pre-v0.45 runs;
+    # optional in `from_dict` for back-compat — old run_config.json loads)
+    "pins", "biases", "constraints",
     "autorefine_version",
 )
+
+# SPEC.md 59.4 (v0.45): the v0.45 fields are optional in `from_dict`
+# (absent → the empty list) so pre-v0.45 run_config.json still loads
+_OPTIONAL_FIELDS = ("pins", "biases", "constraints")
 
 _INT = lambda v: isinstance(v, int) and not isinstance(v, bool)  # noqa: E731
 _NUM = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)  # noqa: E731
@@ -54,6 +62,10 @@ _VALIDATORS: dict[str, Any] = {
     "screen_frac": _NUM,
     # SPEC.md 44.1.4 (v0.30): int >= 0 (0 = off; the legacy single split)
     "kfold": lambda v: _INT(v) and v >= 0,
+    # SPEC.md 59.4 (v0.45): lists of [field, value] / [field, [values]] pairs
+    "pins": lambda v: isinstance(v, list),
+    "biases": lambda v: isinstance(v, list),
+    "constraints": lambda v: isinstance(v, list),
     "autorefine_version": lambda v: isinstance(v, str) and v,
 }
 
@@ -89,6 +101,12 @@ class RunConfig:
     screen_frac: float = 1.0
     # SPEC.md 44.1 (v0.30): k-fold holdout scoring (0 = off, legacy)
     kfold: int = 0
+    # SPEC.md 59.4 (v0.45): the steering rules — lists of [field, value]
+    # (pins/biases) and [field, [value, ...]] (constraints) pairs;
+    # empty = pre-v0.45 behavior (the byte-identical default path)
+    pins: list = field(default_factory=list)
+    biases: list = field(default_factory=list)
+    constraints: list = field(default_factory=list)
     # identity
     autorefine_version: str = "0.0.0"
 
@@ -119,6 +137,9 @@ class RunConfig:
         kw: dict[str, Any] = {}
         for name in _FIELDS:
             if name not in d:
+                if name in _OPTIONAL_FIELDS:
+                    kw[name] = []  # SPEC.md 59.4 (v0.45): pre-v0.45 back-compat
+                    continue
                 raise ValueError(f"run_config is missing field {name!r} "
                                  f"(SPEC.md 37.1.2)")
             value = d[name]
@@ -136,6 +157,9 @@ class RunConfig:
         """Build the recipe from a reset-ready `AutoRefineEnv` + the
         driver's own metadata (SPEC.md 37.1.3)."""
         import autorefine  # local: avoid the package-init cycle
+        # SPEC.md 59.4 (v0.45): the steering rules (absent/empty = pre-v0.45)
+        st = getattr(env, "steering", None)
+        sd = st.to_dict() if st is not None else {}
         return cls(
             task=env.task_name,
             seed=int(env.seed),
@@ -157,6 +181,9 @@ class RunConfig:
             stall_patience=env.stall_patience,
             screen_frac=float(env.screen_frac),
             kfold=int(env.kfold),  # SPEC.md 44.1 (v0.30)
+            pins=list(sd.get("pins") or []),  # SPEC.md 59.4 (v0.45)
+            biases=list(sd.get("biases") or []),  # SPEC.md 59.4 (v0.45)
+            constraints=list(sd.get("constraints") or []),  # 59.4 (v0.45)
             autorefine_version=autorefine.__version__,
         )
 
@@ -174,6 +201,18 @@ _PRESET_V04 = dict(ci_blocks=8, z_accept=1.0, efficiency_weight=0.5,
                    gen_gap_penalty=0.5, block_size=512)
 _PRESET_LEGACY = dict(ci_blocks=0, z_accept=0.0, efficiency_weight=0.0,
                       gen_gap_penalty=0.0, block_size=512)
+
+
+def _steering_value(value: Any) -> str:
+    """SPEC.md 59.4 (v0.45): one steering value as a CLI token — a
+    list/tuple (an architecture tuple, e.g. ``[8, 16]``) is ``json.dumps``
+    -ed; a scalar is ``str``-ed. A constraint's *set* of values is
+    comma-joined by the caller (the CLI's comma split); architecture-tuple
+    constraint values cannot be expressed via the comma split and are the
+    app/Python API surface (59.4)."""
+    if isinstance(value, (list, tuple)):
+        return json.dumps(list(value))
+    return str(value)
 
 
 def _quality(config: RunConfig) -> dict:
@@ -239,6 +278,14 @@ def fit_recipe(config: RunConfig) -> list[str]:
         cmd += ["--screen-frac", str(d["screen_frac"])]
     if d["kfold"] > 0:  # SPEC.md 44.1 (v0.30): non-default values only
         cmd += ["--kfold", str(d["kfold"])]
+    # SPEC.md 59.4 (v0.45): the steering rules — repeatable flags, one per rule
+    for f, v in d["pins"]:
+        cmd += ["--pin", f"{f}={_steering_value(v)}"]
+    for f, v in d["biases"]:
+        cmd += ["--bias", f"{f}={_steering_value(v)}"]
+    for f, vs in d["constraints"]:
+        cmd += ["--constrain",
+                f"{f}={','.join(_steering_value(x) for x in vs)}"]
     return cmd
 
 
@@ -321,4 +368,14 @@ def runconfig_to_flags(config: RunConfig) -> dict[str, Any]:
         flags["screen-frac"] = d["screen_frac"]
     if d["kfold"] > 0:  # v0.30 (SPEC.md 44.1)
         flags["kfold"] = d["kfold"]
+    # SPEC.md 59.4 (v0.45): the steering rules — lists of "field=value" tokens
+    # for the CLI's repeatable append flags (`_config_value` returns a list as-is)
+    if d["pins"]:
+        flags["pin"] = [f"{f}={_steering_value(v)}" for f, v in d["pins"]]
+    if d["biases"]:
+        flags["bias"] = [f"{f}={_steering_value(v)}" for f, v in d["biases"]]
+    if d["constraints"]:
+        flags["constrain"] = [
+            f"{f}={','.join(_steering_value(x) for x in vs)}"
+            for f, vs in d["constraints"]]
     return flags

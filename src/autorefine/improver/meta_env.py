@@ -34,6 +34,7 @@ from ..memory import (
 )
 from ..pareto import ParetoFrontier
 from ..runconfig import RunConfig  # SPEC.md 37.1 (v0.23, G3)
+from ..steering import SteeringState, apply_steering  # SPEC.md 59.2 (v0.45)
 from ..tasks import TASKS
 from ..trainer import train
 from .curriculum import ParityCurriculum  # SPEC.md 20.1 (type reference)
@@ -253,6 +254,12 @@ class AutoRefineEnv:
         # step(); truthy -> the run finishes with `stopped`. Not a knob
         # (51.2.1): absent from KNOBS, RunConfig, and the CLI.
         stop_check: Callable[[], bool] | None = None,
+        # --- v0.45 steering (SPEC.md 59.2; None = off, pre-v0.45 exact) --------
+        # the human-in-the-loop rules over the spec space: pins force-set
+        # a field (baseline + every candidate), biases redirect a mutated
+        # field, constraints reject out-of-set candidates (invalid_spec).
+        # Not a knob (59.2): absent from KNOBS; recorded in RunConfig.
+        steering: SteeringState | None = None,
     ) -> None:
         if task not in TASKS:  # registry: SPEC.md 15 "more tasks"
             raise ValueError(f"unknown task {task!r} (available: {sorted(TASKS)})")
@@ -262,6 +269,23 @@ class AutoRefineEnv:
             raise ValueError(
                 f"stop_check must be a zero-arg callable or None, got "
                 f"{type(stop_check).__name__} (SPEC.md 51.2.1)")
+        # SPEC.md 59.2 (v0.45): a non-SteeringState non-None steering is a
+        # construction-time error (the same fail-loud style as stop_check);
+        # pins must not break the baseline spec (a pin is a baseline change)
+        if steering is not None and not isinstance(steering, SteeringState):
+            raise ValueError(
+                f"steering must be a SteeringState or None, got "
+                f"{type(steering).__name__} (SPEC.md 59.2)")
+        if steering is not None and steering.pins:
+            base = DEFAULT_SPEC.to_dict()
+            for f, v in steering.pins:
+                base[f] = v
+            try:
+                ModelSpec.from_dict(base)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"steering pin(s) break the baseline spec: {exc} "
+                    f"(SPEC.md 59.2)") from exc
         # SPEC.md 33.2 (C2): validation routes through the KNOBS registry —
         # one home for the rules, the A21/A22 error messages unchanged
         _sp = KNOBS["stall_patience"].validate(stall_patience)
@@ -338,7 +362,22 @@ class AutoRefineEnv:
         # SPEC.md 51.2.1 (v0.37): the driver's stop hook (None = off);
         # consulted at the top of step(), honored between experiments
         self.stop_check = stop_check
+        # SPEC.md 59.2 (v0.45): the steering rules (None = off, pre-v0.45)
+        self.steering = steering
         self._started = False
+
+    def _base_spec(self) -> ModelSpec:
+        """SPEC.md 59.2.3 (v0.45): the reset / curriculum re-screen
+        baseline — DEFAULT_SPEC with the steering **pins** force-set
+        (biases/constraints act on candidates only, 59.2.2). No steering
+        (or no pins) returns DEFAULT_SPEC exactly — the pre-v0.45 path
+        (G2)."""
+        if self.steering is not None and self.steering.pins:
+            base = DEFAULT_SPEC.to_dict()
+            for f, v in self.steering.pins:
+                base[f] = v
+            return ModelSpec.from_dict(base)
+        return DEFAULT_SPEC
 
     # --- lifecycle ----------------------------------------------------------
     def reset(self) -> dict:
@@ -383,9 +422,12 @@ class AutoRefineEnv:
         # SPEC.md 20.3: size from the explicit override or the task default)
         self.dataset = self.task.make_dataset(self.dataset_size)
 
+        # SPEC.md 59.2.3 (v0.45): the baseline — DEFAULT_SPEC with the
+        # steering pins force-set (no pins = DEFAULT_SPEC exactly, G2)
+        base_spec = self._base_spec()
         # baseline: free initialization, not counted against the budget
         result = train(
-            self.dataset, DEFAULT_SPEC, self.seed,
+            self.dataset, base_spec, self.seed,
             time_limit_seconds=self.bm.train_time_limit(),
             n_out=self.task.n_outputs, head=self.task.head,
         )
@@ -396,16 +438,16 @@ class AutoRefineEnv:
         self.baseline_eff = eff
         self.best_eff = eff
         self.best_std = std
-        self.best_spec = DEFAULT_SPEC
+        self.best_spec = base_spec
         self.best_model = result.model
-        self.seen.add(DEFAULT_SPEC.fingerprint())
-        self.pareto.add(score, result.train_seconds, DEFAULT_SPEC.fingerprint())
+        self.seen.add(base_spec.fingerprint())
+        self.pareto.add(score, result.train_seconds, base_spec.fingerprint())
         if self.ensemble_top_k > 0:  # SPEC.md 19.3: the baseline is a member
             self._top.append((score, result.model))
         self.memory.log({
             "kind": KIND_BASELINE,  # SPEC.md 35.1 (C4): the kind registry
-            "spec": DEFAULT_SPEC.to_dict(),
-            "spec_hash": DEFAULT_SPEC.fingerprint(),
+            "spec": base_spec.to_dict(),
+            "spec_hash": base_spec.fingerprint(),
             "mutation": None,
             "holdout_score": score,
             "std": std,  # SPEC.md 30.4 (V4): the §18.3 holdout sigma (0.0 legacy)
@@ -424,8 +466,9 @@ class AutoRefineEnv:
         self._screen_champion = None
         self._screen_baseline_score = None
         if self.screen_active:
+            # SPEC.md 59.2.3 (v0.45): a pinned baseline is a pinned champion
             sres = train(
-                self._subsample(self.dataset), DEFAULT_SPEC, self.seed,
+                self._subsample(self.dataset), base_spec, self.seed,
                 time_limit_seconds=self.bm.train_time_limit(),
                 n_out=self.task.n_outputs, head=self.task.head,
             )
@@ -474,6 +517,24 @@ class AutoRefineEnv:
         except SpecError as exc:
             return self._reject_invalid(
                 action if isinstance(action, dict) else dict(action), [], str(exc))
+        # SPEC.md 59.2.2 (v0.45): steering — pins force-set, biases redirect
+        # a mutated field to the biased value, constraints reject candidates
+        # outside the allowed set (invalid_spec, 25.4). None steering = the
+        # pre-v0.45 path exactly (G2); a pin-rewritten spec that turns out
+        # duplicate falls through to the normal R3 dedup rejection below.
+        if self.steering is not None and self.steering.active:
+            champ = self.best_spec.to_dict() if self.best_spec else {}
+            spec_d, violations = apply_steering(
+                spec.to_dict(), self.steering, champ)
+            if violations:
+                return self._reject_invalid(
+                    spec_d, list(spec.diff_fields(self.best_spec)),
+                    "; ".join(violations))
+            try:
+                spec = ModelSpec.from_dict(spec_d)
+            except SpecError as exc:
+                return self._reject_invalid(
+                    spec_d, list(spec.diff_fields(self.best_spec)), str(exc))
         fp = spec.fingerprint()
 
         # R3: duplicates are rejected without spending budget; reported as a
@@ -656,8 +717,9 @@ class AutoRefineEnv:
         # harder level would reject every candidate against a stale
         # easy-level champion.
         if self.screen_active:
+            # SPEC.md 59.2.3 (v0.45): a pinned baseline is a pinned champion
             sc = train(
-                self._subsample(self.dataset), DEFAULT_SPEC, self.seed,
+                self._subsample(self.dataset), self._base_spec(), self.seed,
                 time_limit_seconds=self.bm.train_time_limit(),
                 n_out=self.task.n_outputs, head=self.task.head,
             )

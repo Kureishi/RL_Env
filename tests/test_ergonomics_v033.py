@@ -243,7 +243,7 @@ def test_version_flag(capsys):
             rc = exc.code
     assert rc == 0
     assert buf.getvalue().strip() == f"autorefine {autorefine.__version__}"
-    assert buf.getvalue().strip() == "autorefine 0.42.0"
+    assert buf.getvalue().strip() == "autorefine 0.46.0"
 
 
 def test_help_exit_table_and_examples():
@@ -392,7 +392,7 @@ def test_version_round_v033():
     """A37 (SPEC.md 47.5, 33.1): the version stepped to `0.39.0` in
     both sources (v0.39 ⇒ `0.39.0`, M42)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.42.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.46.0"
 
 
 def test_spec_cites_a37_and_round():

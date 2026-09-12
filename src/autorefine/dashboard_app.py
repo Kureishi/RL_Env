@@ -19,7 +19,20 @@ from pathlib import Path
 import streamlit as st
 import streamlit.components.v1 as components  # 52.4 (v0.38): the keyboard JS
 
-from autorefine import __version__
+from autorefine import (
+    __version__,
+    SteeringState,          # 59.2 (v0.45): the steering rules (pin/bias/constrain)
+    manual_spec,            # 59.3 (v0.45): the manual/expert-mode spec
+    parameter_inspection,   # 59.1 (v0.45): the parameter inspector's data
+    train_manual,           # 59.3 (v0.45): train + report one exact spec
+    fingerprint_diff,       # 60.2 (v0.46): the spec fingerprint diff
+    interaction_matrix,     # 60.3 (v0.46): the co-mutation joint effects
+    spec_fingerprint,       # 60.2 (v0.46): the spec "DNA" bars
+    whatif_preview,         # 60.1 (v0.46): the live what-if preview
+    weighted_reslice,       # 60.4 (v0.46): the objective-weight re-gate
+)
+from autorefine.config import DEFAULT_SPEC  # 59.3 (v0.45): manual defaults
+from autorefine.improver.specspace import SPEC_FIELDS  # 59 (v0.45) the registry
 from autorefine.accounting import candidate_reason  # 51.3.2 (v0.37)
 from autorefine.dashboard import (
     DashboardRunner,
@@ -46,6 +59,7 @@ from autorefine.onboarding import (
 # renderer over these pure functions (49.4).
 from autorefine.advanced import opposite_policy, retrain_spec
 from autorefine.gate import Objective, model_size
+from autorefine.dossier import build_dossier  # 58.3 (v0.44): the run dossier
 from autorefine.runconfig import RunConfig, fit_recipe  # 50.1.5/50.2 (v0.36)
 from autorefine.narrate import narrate_baseline, narrate_run, narrate_step
 from autorefine.simulate import what_if_block
@@ -66,10 +80,17 @@ from autorefine.plotting import (
     svg_action_probabilities,  # noqa: F401 (D2 view, SPEC.md 29.2)
     svg_architecture,  # C4 (28.4) + 53.3 (v0.39) the champion spec card
     svg_audio_waveform,
+    svg_bandit_beliefs,  # 57.4 (v0.43) the bandit belief bars
     svg_gate_line,  # 53.1 (v0.39) the per-candidate gate number-line
+    svg_gate_region,  # 57.3 (v0.43) the gate-decision region plot
     svg_live_frontier,  # 53.2 (v0.39) the live Pareto frontier
     svg_score_curve,  # 51.4.4 (v0.37): the palette/dark result re-render
     svg_field_value_matrix,  # V2 view (SPEC.md 30.2)
+    svg_whatif_effect,  # 60.1 (v0.46) the what-if estimated effect
+    svg_spec_fingerprint,  # 60.2 (v0.46) the spec fingerprint ("DNA")
+    svg_interaction_heatmap,  # 60.3 (v0.46) the interaction heatmap
+    svg_weighted_reslice,  # 60.4 (v0.46) the objective-weight reslice
+    svg_field_response,  # 57.2 (v0.43) the per-field response surfaces
     svg_frontier_overlay,  # A/B view (SPEC.md 49.3.3)
     svg_loss_curves,
     svg_mutation_timeline,
@@ -81,6 +102,7 @@ from autorefine.plotting import (
     svg_time_strip,  # B2 (SPEC.md 54.2) the wall-time cost strip
     svg_seed_curves,  # V1 view (SPEC.md 30.1)
     svg_seed_variance,  # D1 view (SPEC.md 29.1)
+    svg_spec_lineage,  # 57.1 (v0.43) the spec-lineage DAG
     svg_task_returns,  # noqa: F401 (D2 view, SPEC.md 29.2)
 )
 # SPEC.md 56.1 (v0.42): the provenance certificate — the app's Provenance
@@ -90,6 +112,14 @@ from autorefine.provenance import (
     provenance_card,
     provenance_payload,
     svg_provenance,
+)
+# SPEC.md 57 (v0.43): the research decision surfaces — the app is a thin
+# renderer over these pure derivations (57.5); no new logged data.
+from autorefine.research import (
+    bandit_beliefs,  # 57.4 (v0.43) the belief bars' data (Wilson CI + UCB)
+    field_response_stats,  # 57.2 (v0.43) per-field value -> mean score
+    gate_region_candidates,  # 57.3 (v0.43) the (score, gap) verdict points
+    spec_lineage,  # 57.1 (v0.43) the spec-lineage graph
 )
 from autorefine.tasks import CsvTask
 
@@ -233,6 +263,42 @@ def _spec_v(v) -> str:
     if isinstance(v, (list, tuple)):
         return ",".join(str(x) for x in v)
     return str(v)
+
+
+def _inspector_field(r: dict) -> None:
+    """SPEC.md 59.1: one parameter-inspector row — a compact, read-only
+    block. Architecture rows (the `SPEC_FIELDS` registry, 36.2) carry the
+    families, the current / baseline / best-seen values, the measured Δ,
+    the win-rate (a progress bar), and the 95% CI; loop rows (the `KNOBS`
+    registry, 33.2) carry the knob's CLI flags + app widget. Display-only
+    (no interactive widget — AppTest-safe, 59.4)."""
+    cur, base = r.get("current"), r.get("baseline")
+    if r["layer"] == "architecture":
+        fams = ", ".join(r.get("families") or []) or "—"
+        st.markdown(
+            f"**{r['name']}** · `{r.get('kind') or '—'}` · {fams} · "
+            f"§{r.get('spec_ref')}")
+        delta = r.get("delta")
+        st.caption(
+            f"current `{_spec_v(cur)}` · baseline `{_spec_v(base)}` · "
+            f"best-seen `{_spec_v(r.get('best_seen'))}`"
+            + (f" (Δ {float(delta):+.2f})" if delta is not None else ""))
+        wr = r.get("win_rate")
+        if wr is not None:  # a bandit-policy run (field_stats present)
+            lo, hi = r.get("ci_lo"), r.get("ci_hi")
+            ci = (f" · 95% CI [{lo:.2f}–{hi:.2f}]"
+                  if lo is not None and hi is not None else "")
+            st.progress(float(wr), text=f"win-rate {float(wr):.0%}{ci}")
+        space = r.get("space")
+        if space:
+            st.caption("space: " + " · ".join(_spec_v(v) for v in space))
+    else:  # loop (KNOBS, 33.2) — no win-rate (not bandit arms)
+        cli = (", ".join("--" + c.replace("_", "-")
+                         for c in (r.get("cli") or [])) or "—")
+        st.markdown(f"**{r['name']}** · §{r.get('spec_ref')}")
+        st.caption(
+            f"current `{_spec_v(cur)}` · baseline `{_spec_v(base)}` · "
+            f"cli {cli} · widget `{r.get('app_widget') or '—'}`")
 
 
 def _drill_body(u: dict, gm: dict, reason: str,
@@ -770,7 +836,8 @@ def _run(csv_path: str, label: str, target: float, policy: str, seed: int,
          experiments: int, max_train: float, runs_dir: str,
          quality: str = "v04", narrate: bool = False,
          initial_stop: bool = False,
-         stream_mode: bool = False) -> None:
+         stream_mode: bool = False,
+         steering: "SteeringState | None" = None) -> None:
     """Start the live loop (SPEC.md 51.2.3): build the runner, launch the
     daemon worker, then drain its messages synchronously into the live UI.
 
@@ -785,6 +852,7 @@ def _run(csv_path: str, label: str, target: float, policy: str, seed: int,
         csv_path=csv_path, label=label or None, target=target, policy=policy,
         seed=seed, experiments=experiments, max_train_seconds=max_train,
         runs_dir=runs_dir, search_quality=quality,
+        steering=steering,  # SPEC.md 59.2 (v0.45): the steering rules (None = off)
     )
     record = {
         "thread": None,
@@ -980,11 +1048,151 @@ def _render_result(res: dict) -> None:
     if res.get("ladder_svg"):  # G3: curriculum ladder (SPEC.md 27.3)
         st.markdown(res["ladder_svg"], unsafe_allow_html=True)
 
+    # SPEC.md 57 (v0.43): the research decision surfaces — pure derivations
+    # over the run's experiments.jsonl (57.5); no new logged data, no new
+    # widget (AppTest-safe), and outside the byte-identity-pinned report.
+    st.subheader("Research views")
+    try:
+        _ren = _load_entries(res["run_dir"])
+    except (ValueError, OSError) as exc:  # 49.4.3: a friendly error, not a crash
+        st.error(f"research views unavailable: {exc} (SPEC.md 57.5)")
+        _ren = []
+    st.markdown(svg_spec_lineage(spec_lineage(_ren), **pal),
+                unsafe_allow_html=True)
+    st.markdown(svg_field_response(field_response_stats(_ren), **pal),
+                unsafe_allow_html=True)
+    st.markdown(svg_gate_region(gate_region_candidates(_ren), **pal),
+                unsafe_allow_html=True)
+    _fs = res.get("field_stats")
+    if isinstance(_fs, dict) and _fs:
+        _ups = res.get("updates") or []
+        _ucb = (_ups[-1].get("ucb") or {}) if _ups else {}
+        st.markdown(svg_bandit_beliefs(bandit_beliefs(_fs, _ucb), **pal),
+                    unsafe_allow_html=True)
+    else:
+        st.caption("bandit belief bars need a bandit-policy run (field_stats) "
+                   "— SPEC.md 57.4")
+
+    # SPEC.md 59.1 (v0.45): the parameter inspector — the two real layers
+    # (architecture `SPEC_FIELDS` + loop `KNOBS`) as one read-only block
+    # each. Pure derivation over the run's data (59.1); display-only
+    # (AppTest-safe); a friendly caption on failure (the 49.4.3 pattern),
+    # never a page crash.
+    st.subheader("Parameter inspector (SPEC.md 59.1)")
+    try:
+        _ins_entries = _ren  # the entries loaded in the Research views above
+        _ins_best = res.get("best_spec")
+        _ins_cfg = (res.get("summary") or {}).get("run_config")
+        _ins_fs = res.get("field_stats")
+        _ups_i = res.get("updates") or []
+        _ins_ucb = (_ups_i[-1].get("ucb") or {}) if _ups_i else {}
+        _rows = parameter_inspection(_ins_entries, _ins_best, _ins_cfg,
+                                     _ins_fs, _ins_ucb)
+    except (ValueError, TypeError, KeyError) as exc:  # 49.4.3
+        st.error(f"parameter inspector unavailable: {exc} (SPEC.md 59.1)")
+    else:
+        _ca, _cb = st.columns(2)
+        with _ca:
+            st.markdown("**Architecture** (the `SPEC_FIELDS` registry, 36.2)")
+            for r in _rows:
+                if r["layer"] == "architecture":
+                    _inspector_field(r)
+        with _cb:
+            st.markdown("**Loop** (the `KNOBS` registry, 33.2)")
+            for r in _rows:
+                if r["layer"] == "loop":
+                    _inspector_field(r)
+
+    # SPEC.md 60 (v0.46): what-if & comparison — the spec space *steered*,
+    # not just read: the live what-if preview (60.1), the spec fingerprint
+    # "DNA" (60.2), the interaction heatmap (60.3), and the objective-
+    # weight reslice (60.4). Pure derivations over the run's data (60.5);
+    # display-only (AppTest-safe); a friendly caption on failure (the
+    # 49.4.3 pattern), never a page crash.
+    st.subheader("What-if & comparison (SPEC.md 60)")
+    try:
+        # 60.1 — the live what-if preview: one field, one value from its
+        # registry space, zero retraining
+        _wf_field = st.selectbox("What-if field", list(SPEC_FIELDS),
+                                 key="wf_field", index=3)
+        _wf_space = list(SPEC_FIELDS[_wf_field].space)
+        _wf_value = st.selectbox(
+            f"what-if value ({_wf_field})", _wf_space, key="wf_value",
+            index=min(2, len(_wf_space) - 1),
+            format_func=lambda v: ", ".join(str(x) for x in v)
+            if isinstance(v, (list, tuple)) else str(v))
+        try:
+            _wf = whatif_preview(_ren, res.get("best_spec"), _wf_field,
+                                 _wf_value)
+        except ValueError as exc:  # 49.4.3: a friendly error, not a crash
+            st.error(f"what-if preview: {exc} (SPEC.md 60.1)")
+        else:
+            _wfl, _wfr = st.columns(2)
+            with _wfl:
+                st.markdown("**Would-be candidate**")
+                if _wf["valid"]:
+                    st.markdown(svg_architecture(
+                        _wf["candidate"], res.get("state_dim"),
+                        res.get("n_out"), highlight=_wf_field),
+                        unsafe_allow_html=True)
+                else:
+                    st.error(f"invalid combination: {_wf['error']} "
+                             f"(SPEC.md 60.1)")
+            with _wfr:
+                st.markdown("**Estimated effect (logged surface, 57.2)**")
+                st.markdown(svg_whatif_effect(_wf, **pal),
+                            unsafe_allow_html=True)
+        # 60.2 — the spec fingerprint ("DNA"); optional A-vs-B compare
+        _fp_a = (res.get("best_spec") if isinstance(res.get("best_spec"),
+                                                    dict)
+                 else DEFAULT_SPEC.to_dict())
+        if st.checkbox("Compare champion vs baseline fingerprint",
+                       value=False, key="fp_compare"):
+            st.markdown(svg_spec_fingerprint(_fp_a, DEFAULT_SPEC.to_dict(),
+                                             **pal),
+                        unsafe_allow_html=True)
+        else:
+            st.markdown(svg_spec_fingerprint(_fp_a, **pal),
+                        unsafe_allow_html=True)
+        # 60.3 — the interaction heatmap (co-mutated field pairs)
+        st.markdown(svg_interaction_heatmap(interaction_matrix(_ren), **pal),
+                    unsafe_allow_html=True)
+        # 60.4 — the objective-weight reslice (interactive re-gater)
+        _wsc = st.slider("Objective weight: score", 0.0, 1.0, 0.5, 0.05,
+                         key="wobj_score")
+        _wtc = st.slider("Objective weight: train-time", 0.0, 1.0, 0.25, 0.05,
+                         key="wobj_train")
+        _wzc = st.slider("Objective weight: model-size", 0.0, 1.0, 0.25, 0.05,
+                         key="wobj_size")
+        _wtg = st.slider("Composite target", 0.5, 1.0, 0.75, 0.01,
+                         key="wobj_target")
+        try:
+            _wr2 = weighted_reslice(_ren, _wsc, _wtc, _wzc, _wtg,
+                                    state_dim=res.get("state_dim"),
+                                    n_out=res.get("n_out"),
+                                    grid=res.get("grid"))
+        except ValueError as exc:  # 49.4.3
+            st.error(f"objective reslice: {exc} (SPEC.md 60.4)")
+        else:
+            st.markdown(svg_weighted_reslice(_wr2, **pal),
+                        unsafe_allow_html=True)
+            if _wr2["pass"]:
+                st.success(f"{_wr2['passing']}/{_wr2['pool']} logged "
+                           f"candidate(s) pass the weighted gate; "
+                           f"counterfactual final = candidate "
+                           f"{_wr2['final']['cand']} (SPEC.md 60.4)")
+            else:
+                st.warning("no logged candidate passes the weighted gate "
+                           "(SPEC.md 60.4)")
+    except (ValueError, TypeError, KeyError) as exc:  # 49.4.3
+        st.error(f"what-if & comparison unavailable: {exc} (SPEC.md 60)")
+
     # learning views (SPEC.md 28): computed once in finish(), re-rendered
     # here from the stored result — the restored view shows the same views
     if any(res.get(k) for k in ("loss_curves", "per_class_svg",
-                                "confusion_svg", "boundary_svg",
-                                "error_gallery", "arch_svg")):
+                                "confusion_svg", "difficulty_svg",
+                                "boundary_svg", "error_gallery",
+                                "arch_svg")):
         st.subheader("Learning views")
         curves = res.get("loss_curves") or {}
         if curves:  # C1 (SPEC.md 28.1): pick an experiment's train/holdout curves
@@ -996,6 +1204,8 @@ def _render_result(res: dict) -> None:
             st.markdown(res["per_class_svg"], unsafe_allow_html=True)
         if res.get("confusion_svg"):  # C2 (SPEC.md 28.2)
             st.markdown(res["confusion_svg"], unsafe_allow_html=True)
+        if res.get("difficulty_svg"):  # 58.1 (v0.44): easiest -> hardest
+            st.markdown(res["difficulty_svg"], unsafe_allow_html=True)
         if res.get("boundary_svg"):  # V3 (SPEC.md 30.3): where it fails on a 2-D plane
             st.markdown(res["boundary_svg"], unsafe_allow_html=True)
         gallery = res.get("error_gallery")
@@ -1010,7 +1220,7 @@ def _render_result(res: dict) -> None:
     _render_advanced(res)
 
     st.subheader("Artifacts")
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.download_button("report.html", res["report_html"], mime="text/html",
                        file_name="report.html")
     c2.download_button("best_spec.json", res["artifacts"]["best_spec.json"],
@@ -1019,6 +1229,25 @@ def _render_result(res: dict) -> None:
                        mime="application/octet-stream", file_name="best_model.npz")
     c4.download_button("experiments.jsonl", res["artifacts"]["experiments.jsonl"],
                        mime="application/jsonlines", file_name="experiments.jsonl")
+    # 58.3 (v0.44): the run dossier — the whole story of this run, one
+    # self-contained HTML file; a build failure is a friendly caption
+    # (the 49.4.3 pattern), never a page crash
+    try:
+        dossier = build_dossier(
+            res["run_dir"],
+            state_dim=res.get("state_dim"),
+            n_out=res.get("n_out"),
+            grid=res.get("grid"),
+            difficulty=res.get("difficulty"),
+            gallery=res.get("error_gallery"),
+            per_class_svg=res.get("per_class_svg"),
+            confusion_svg=res.get("confusion_svg"),
+        ).encode("utf-8")
+    except (ValueError, FileNotFoundError, OSError) as exc:
+        st.caption(f"dossier unavailable: {exc} (SPEC.md 58.3/49.4.3)")
+    else:
+        c5.download_button("dossier.html", dossier, mime="text/html",
+                           file_name="dossier.html")
     st.caption(
         f"run dir: `{res['run_dir']}` — or CLI: "
         f"`python -m autorefine report --run {res['run_dir']} --html`"
@@ -1219,6 +1448,61 @@ def _render_advanced(res: dict) -> None:
                             f"final scores — {cur}: {fa:.2f} vs {other}: {fb:.2f} "
                             f"→ **{winner}** wins by {abs(fa - fb):.2f}")
                     st.caption(f"the {other} run: `{res2['run_dir']}` (SPEC.md 49.3.4)")
+
+    # --- 59.3 (v0.45): manual/expert mode — set the exact spec, train once --
+    with st.expander("Manual mode — train this exact spec (59.3)"):
+        st.caption(
+            "Override the search entirely (SPEC.md 59.3): set each field to "
+            "the exact value you want, then train one pass — the loop "
+            "validates + reports, it does not discover. Starts from this "
+            "run's best spec; override any field below. Nothing is written "
+            "to the run dir (49.2.1).")
+        _rcfg = (res.get("summary") or {}).get("run_config") or {}
+        _mseed = int(_rcfg.get("seed", 7))
+        _mtask = _rcfg.get("task")
+        _mtaskcfg = _rcfg.get("task_config") or {}
+        st.caption(
+            f"seed **{_mseed}** · task **{_mtask or '—'}** (this run's "
+            f"run_config, SPEC.md 59.3.2)")
+        _mdefaults = dict(DEFAULT_SPEC.to_dict())
+        _mdefaults.update(res.get("best_spec") or {})
+        _mvals = {}
+        for _fname in SPEC_FIELDS:
+            _fsp = list(SPEC_FIELDS[_fname].space)
+            _flab = [_spec_v(v) for v in _fsp]
+            _dv = _spec_v(_mdefaults.get(_fname))
+            _idx = _flab.index(_dv) if _dv in _flab else 0
+            _pick = st.selectbox(_fname, _flab, index=_idx,
+                                 key=f"manual_{_fname}")
+            _mvals[_fname] = _fsp[_flab.index(_pick)]
+        if st.button("Train this exact spec", key="manual_button",
+                     type="primary"):
+            try:
+                manual_spec(_mvals)  # validate early (loud per-field / combo)
+            except ValueError as exc:  # SpecError is a ValueError
+                st.error(str(exc))
+            else:
+                try:
+                    _mout = train_manual(
+                        _mtask or "cartpole-v1", _mvals, seed=_mseed,
+                        task_config=_mtaskcfg or None)
+                except (ValueError, OSError) as exc:  # unknown task / no data
+                    st.error(str(exc))
+                else:
+                    st.dataframe([{
+                        "score": round(_mout["score"], 4),
+                        "gen score": round(_mout["gen_score"], 4),
+                        "gen gap": round(_mout["gen_gap"], 4),
+                        "train s": round(_mout["train_seconds"], 3),
+                        "final loss": round(_mout["final_loss"], 6),
+                        "time capped": _mout["time_capped"],
+                    }])
+                    _mbest = res.get("final_best_score")
+                    if isinstance(_mbest, (int, float)):
+                        st.caption(
+                            f"vs this run's final {float(_mbest):.2f}: "
+                            f"{_mout['score'] - float(_mbest):+.2f} "
+                            f"(SPEC.md 59.3.2)")
 
 
 def _render_gallery(items: list[dict]) -> None:
@@ -1590,6 +1874,66 @@ def main() -> None:
             st.dataframe(
                 [{"token": k, "value": v} for k, v in _tok.items()],
                 width="stretch")
+        # SPEC.md 59.2 (v0.45): the human-in-the-loop steering verbs —
+        # pin (freeze a field), bias (redirect a mutation), constrain
+        # (allowed set). Opt-in: an empty rule list is the pre-v0.45
+        # byte-identical path (59.2). A Setup-side configuration, not a
+        # run knob (the 48.1 knob invariant — `ALL_KNOBS` is untouched).
+        with st.expander("Steer the search — pin / bias / constrain (59.2)",
+                         expanded=False):
+            st.caption(
+                "Human-in-the-loop over the spec space (SPEC.md 59.2): "
+                "**pin** a field to a value (the improver won't mutate it), "
+                "**bias** a mutation of a field toward a value, or "
+                "**constrain** a field to an allowed set (a candidate "
+                "outside it is rejected as `invalid_spec`). All opt-in — "
+                "leave empty for the default loop.")
+            _rules = st.session_state.get("steering_rules") or {
+                "pins": [], "biases": [], "constraints": []}
+            _verb = st.selectbox("Verb", ("pin", "bias", "constrain"),
+                                 key="stg_verb")
+            _f = st.selectbox("Field", list(SPEC_FIELDS), key="stg_field")
+            _fsp = list(SPEC_FIELDS[_f].space)
+            _flab = [_spec_v(v) for v in _fsp]
+            if _verb == "constrain":
+                _sel = st.multiselect(
+                    "Allowed values", _flab, default=_flab[:1],
+                    key=f"stg_vals_{_f}")
+                _val = [_fsp[_flab.index(x)] for x in _sel] or _fsp[:1]
+            else:
+                _sel = st.selectbox("Value", _flab, key=f"stg_val_{_f}")
+                _val = _fsp[_flab.index(_sel)]
+            if st.button("Add rule", key="stg_add"):
+                if _verb == "pin":
+                    _rules["pins"] = [[ff, vv] for ff, vv in _rules["pins"]
+                                      if ff != _f] + [[_f, _val]]
+                elif _verb == "bias":
+                    _rules["biases"] = [[ff, vv] for ff, vv in _rules["biases"]
+                                        if ff != _f] + [[_f, _val]]
+                else:
+                    _rules["constraints"] = \
+                        [[ff, vvs] for ff, vvs in _rules["constraints"]
+                         if ff != _f] + [[_f, list(_val)]]
+                st.session_state["steering_rules"] = _rules
+                st.rerun()
+            _n = (len(_rules["pins"]) + len(_rules["biases"])
+                  + len(_rules["constraints"]))
+            if _n:
+                st.markdown(f"**{_n} active rule(s)**")
+                for ff, vv in _rules["pins"]:
+                    st.caption(f"pin `{ff}` = {_spec_v(vv)}")
+                for ff, vv in _rules["biases"]:
+                    st.caption(f"bias `{ff}` → {_spec_v(vv)}")
+                for ff, vvs in _rules["constraints"]:
+                    st.caption(
+                        f"constrain `{ff}` ∈ "
+                        + ", ".join(_spec_v(x) for x in vvs))
+                if st.button("Clear all steering rules", key="stg_clear"):
+                    st.session_state["steering_rules"] = {
+                        "pins": [], "biases": [], "constraints": []}
+                    st.rerun()
+            else:
+                st.caption("No rules — the default loop runs unchanged.")
 
     with t_run:  # 51.1.1: the Run button, the live loop, the Stop button
         stop_pressed = st.button(
@@ -1614,11 +1958,22 @@ def main() -> None:
             if path is None:
                 st.error("Choose a CSV (upload or path) to start a new run.")
             else:
+                # SPEC.md 59.2 (v0.45): build the steering rules (None = off,
+                # the pre-v0.45 path); an invalid rule is a friendly stop.
+                _stg_rules = st.session_state.get("steering_rules") or {}
+                _stg = None
+                if (_stg_rules.get("pins") or _stg_rules.get("biases")
+                        or _stg_rules.get("constraints")):
+                    try:
+                        _stg = SteeringState.from_dict(_stg_rules)
+                    except ValueError as exc:
+                        st.error(f"invalid steering rule: {exc} (SPEC.md 59.2)")
+                        st.stop()
                 _run(path, label.strip() or None, float(target), policy,
                      int(seed), int(experiments), float(max_train),
                      runs_dir.strip() or "runs", quality,
                      narrate=narrate, initial_stop=stop_pressed,
-                     stream_mode=live_mode)
+                     stream_mode=live_mode, steering=_stg)
         elif result is not None:
             # widget-triggered re-run (download click, sidebar change) — the
             # last completed result stays on screen (SPEC.md 23.2 persistence)

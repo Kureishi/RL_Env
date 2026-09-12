@@ -6,8 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "autorefine"
 # SPEC.md 33.1 (C1): the single version source — must equal
 # autorefine.__version__ (enforced by the A23 test); one step per round
-# (v0.39 ⇒ 0.39.0, M42, SPEC.md 53)
-version = "0.42.0"
+# (v0.46 ⇒ 0.46.0, M49, SPEC.md 60)
+version = "0.46.0"
 description = "Environment for autonomous iterative ML model improvement"
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.26"]

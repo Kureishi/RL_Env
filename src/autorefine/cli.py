@@ -21,7 +21,7 @@ import zipfile
 from pathlib import Path
 
 from .config import Budget, ModelSpec
-from .diagnostics import holdout_diagnostics
+from .diagnostics import holdout_difficulty, holdout_diagnostics
 from .gate import (
     actuals_from_run,
     default_objectives,
@@ -36,6 +36,7 @@ from .runconfig import (
 )
 from .dashboard import diff_n_summaries, diff_two_summaries, field_stats  # 42.2/42.3 (v0.28) + 50.1.4 (v0.36)
 from .sharing import share_payload, write_share_zip  # 47.4/50.2 (v0.36)
+from .dossier import build_dossier  # 58.3 (v0.44): the run dossier
 from .improver.meta_env import AutoRefineEnv, search_quality_v04
 from .improver.bandit import BanditPolicy
 from .improver.curriculum import (  # 46.2 (v0.32): the three ladders
@@ -45,6 +46,7 @@ from .improver.curriculum import (  # 46.2 (v0.32): the three ladders
 )
 from .improver.policy import SearchPolicy
 from .improver.rl_policy import MetaRLPolicy, train_policy
+from .steering import SteeringState, train_manual  # 59 (v0.45)
 from .accounting import account_run  # 39.2 (T4): decision accounting
 from .memory import KIND_BASELINE, KIND_EXPERIMENT, RunMemory
 from .simulate import (  # 40 (v0.26) + 41 (v0.27): simulation
@@ -132,8 +134,12 @@ def _drive(args: argparse.Namespace, env: AutoRefineEnv) -> None:
             print(f"baseline: {state['baseline_score']:.2f}")
 
         # SPEC.md 17: the UCB field-bandit is a second reference policy
-        policy = (SearchPolicy(seed=args.seed) if args.policy == "search"
-                  else BanditPolicy(seed=args.seed))
+        # SPEC.md 59.2 (v0.45): steering pins drop their field from the
+        # proposal pool (the env's force-set in step() is the backstop)
+        excl = tuple(f for f, _v in env.steering.pins) if env.steering else ()
+        policy = (SearchPolicy(seed=args.seed, exclude_fields=excl)
+                  if args.policy == "search"
+                  else BanditPolicy(seed=args.seed, exclude_fields=excl))
         while not env.done:
             action = policy.propose(state)
             state, reward, done, info = env.step(action)
@@ -148,11 +154,76 @@ def _drive(args: argparse.Namespace, env: AutoRefineEnv) -> None:
     return _print_summary(args, env, summary)
 
 
+def _steering_value(text: str):
+    """SPEC.md 59.4 (v0.45): one steering value from the CLI — a JSON token
+    (a number, ``[2]``, ``[16, 8]``, a quoted string) parses to that value;
+    a bare word (e.g. ``mlp``, ``cosine``) stays the raw string."""
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return text
+
+
+def _steering_token(raw: str, verb: str) -> "tuple[str, object]":
+    """SPEC.md 59.4 (v0.45): ``FIELD=VALUE`` → ``(field, value)``; a missing
+    ``=`` or an empty field name is a `ValueError` naming the flag (loud)."""
+    if "=" not in raw:
+        raise ValueError(
+            f"--{verb} {raw!r}: expected FIELD=VALUE (SPEC.md 59.2)")
+    field, value = raw.split("=", 1)
+    field = field.strip()
+    if not field:
+        raise ValueError(
+            f"--{verb} {raw!r}: the field name is empty (SPEC.md 59.2)")
+    return field, _steering_value(value)
+
+
+def _steering_constrain_token(raw: str) -> "tuple[str, list]":
+    """SPEC.md 59.4 (v0.45): ``FIELD=V1,V2`` → ``(field, [v1, v2])``; the set
+    is comma-split into scalar values (architecture-tuple values are the
+    app/Python API surface — the comma split cannot express them, 59.4)."""
+    field, value = _steering_token(raw, "constrain")
+    if isinstance(value, str):
+        vs = [_steering_value(v) for v in value.split(",") if v.strip() != ""]
+    else:  # a single JSON value (a number or a list)
+        vs = [value]
+    return field, vs
+
+
+def _steering_from_args(args: argparse.Namespace):
+    """SPEC.md 59.4 (v0.45): the `SteeringState` from the CLI's repeatable
+    ``--pin`` / ``--bias`` / ``--constrain`` lists; `None` when all three are
+    empty (the pre-v0.45 path, G2). A bad token is a `ValueError` (the
+    caller prints it + exits 1)."""
+    pins = list(getattr(args, "pin", None) or [])
+    biases = list(getattr(args, "bias", None) or [])
+    constrains = list(getattr(args, "constrain", None) or [])
+    if not (pins or biases or constrains):
+        return None
+    state = SteeringState()
+    for raw in pins:
+        f, v = _steering_token(raw, "pin")
+        state = state.pin(f, v)
+    for raw in biases:
+        f, v = _steering_token(raw, "bias")
+        state = state.bias(f, v)
+    for raw in constrains:
+        f, vs = _steering_constrain_token(raw)
+        state = state.constrain(f, vs)
+    return state
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     # SPEC.md 41.3 (v0.27, S5): the narrated demo — parity-v1, a tiny fixed
     # budget; the other `run` flags are ignored (41.3.1)
     if args.demo:
         return _cmd_demo(args)
+    # SPEC.md 59.2 (v0.45): the steering rules (None = off, pre-v0.45 path)
+    try:
+        steering = _steering_from_args(args)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     # SPEC.md 18.6: the v0.4 search-quality preset is the CLI default;
     # `--search-quality legacy` opts out (v0.3 behavior, exactly)
     quality = {} if args.search_quality == "legacy" else search_quality_v04()
@@ -184,6 +255,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         policy=args.policy,
         target=None,  # `run` is ungated (SPEC.md 37.2.3)
         rl_episodes=args.rl_episodes if args.policy == "rl" else None,
+        steering=steering,  # SPEC.md 59.2 (v0.45)
         **quality,
     )
     _drive(args, env)
@@ -340,6 +412,53 @@ def _cmd_fit(args: argparse.Namespace) -> int:
     if not getattr(args, "quiet", False):  # 47.3.2: the diagnostics block
         _print_fit_diagnostics(env)
     return rc
+
+
+def _cmd_manual(args: argparse.Namespace) -> int:
+    """SPEC.md 59.3 (v0.45): manual/expert mode — set the exact spec over the
+    field registry and train it once (validate + report, not discover).
+
+    ``--data`` resolves a data task (csv/image/audio/text) via the same
+    `_resolve_fit_task` the fit command uses (it wins over `--task`);
+    otherwise `--task` is a built-in task. The ``--set FIELD=VALUE`` pairs
+    (last one wins per field) are registry-validated (`manual_spec`,
+    59.3.1) and trained once (`train_manual`, 59.3.2). The result is printed
+    as JSON (the `retrain_spec` shape). rc 0 on success; rc 1 on a bad
+    task/field/value (loud, stderr)."""
+    task_name = args.task
+    task_config: dict | None = None
+    if getattr(args, "data", None) is not None:
+        data = Path(args.data)
+        try:
+            task_name = _resolve_fit_task(data, "auto")
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        task_config = {"path": str(data)}
+        if args.label is not None:
+            task_config["label"] = args.label
+    values: dict = {}
+    for raw in (args.set or []):
+        if "=" not in raw:
+            print(f"--set {raw!r}: expected FIELD=VALUE (SPEC.md 59.3.1)",
+                  file=sys.stderr)
+            return 1
+        f, v = raw.split("=", 1)
+        f = f.strip()
+        if not f:
+            print(f"--set {raw!r}: the field name is empty (SPEC.md 59.3.1)",
+                  file=sys.stderr)
+            return 1
+        values[f] = _steering_value(v)
+    try:
+        out = train_manual(task_name, values, seed=args.seed,
+                           task_config=task_config,
+                           max_train_seconds=args.max_train)
+    except ValueError as exc:  # unknown task / field / value (loud, 59.3)
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(json.dumps(out, indent=2))
+    return 0
 
 
 def _portfolio_paths(args: argparse.Namespace) -> list[str] | int:
@@ -595,6 +714,12 @@ def _fit_data(args: argparse.Namespace) -> tuple:
     # SPEC.md 36.1.5 (v0.22, G1): the gate line names the task's declared
     # `metric` — read, not inferred
     metric = getattr(probe, "metric", None) or "score"
+    # SPEC.md 59.2 (v0.45): the steering rules (None = off, pre-v0.45 path)
+    try:
+        steering = _steering_from_args(args)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return None, None, None
     quality = {} if args.search_quality == "legacy" else search_quality_v04()
     args.task = task_name  # _drive's print lines
     env = AutoRefineEnv(
@@ -608,6 +733,7 @@ def _fit_data(args: argparse.Namespace) -> tuple:
         # v0.23 (SPEC.md 37.1.3): driver metadata for the canonical recipe
         policy=args.policy, target=args.target,
         rl_episodes=args.rl_episodes if args.policy == "rl" else None,
+        steering=steering,  # SPEC.md 59.2 (v0.45)
         **quality,
     )
     return env, args.target, metric
@@ -655,6 +781,15 @@ def _fit_from_run(args: argparse.Namespace) -> tuple:
                         if config.rl_episodes is not None else args.rl_episodes)
     args.task = config.task
     args.ensemble_final = config.ensemble_top_k > 0
+    # SPEC.md 59.4 (v0.45): the recipe's steering rules (empty = pre-v0.45)
+    try:
+        steering = (SteeringState.from_dict({
+            "pins": config.pins, "biases": config.biases,
+            "constraints": config.constraints})
+            if (config.pins or config.biases or config.constraints) else None)
+    except ValueError as exc:
+        print(f"invalid steering in run_config: {exc}", file=sys.stderr)
+        return None, None
     env = AutoRefineEnv(
         task=config.task, seed=config.seed,
         budget=Budget(config.max_experiments, config.max_wall_seconds,
@@ -670,6 +805,7 @@ def _fit_from_run(args: argparse.Namespace) -> tuple:
         screen_frac=config.screen_frac,  # v0.18 (SPEC.md 32.2)
         kfold=config.kfold,  # v0.30 (SPEC.md 44.1): the recipe's kfold
         policy=config.policy, target=bar, rl_episodes=config.rl_episodes,
+        steering=steering,  # SPEC.md 59.4 (v0.45): the recipe's steering rules
         # SPEC.md 38.2 (v0.24, T2): lineage — this run re-executes that one
         parent_run=run_dir.name,
     )
@@ -1912,6 +2048,61 @@ def _cmd_share(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_dossier(args: argparse.Namespace) -> int:
+    """`dossier` (SPEC.md 58.3, v0.44): the run dossier — one scrollable,
+    self-contained HTML file (inline ``<style>``, no external assets,
+    22.2) combining the whole story of a finished run:
+
+    1. **Summary** — the headline numbers (the report's table, 22.1).
+    2. **Recipe** — the canonical `run_config.json` (37.1) as the
+       copy-pasteable `format_recipe` line (33.2/47.1).
+    3. **Provenance** — the `svg_provenance` certificate (56.1).
+    4. **Frontier** — the 2-objective `svg_pareto` (25.5) plus the
+       3-objective `svg_frontier3` (58.2) score × time × size view.
+    5. **Lineage** — the spec-lineage graph (57.2).
+    6. **Sensitivity** — the per-field response surfaces (57.2).
+    7. **Error analysis** — the per-class bars + confusion matrix (28.2),
+       the per-input difficulty ranking (58.1), and the media error
+       gallery (28.3) when the task supports it.
+
+    Pure rendering of artifacts already on disk (zero new training, G2):
+    a re-render of the same run dir is byte-identical (no timestamps in
+    the output). The task/model geometry (state_dim, n_out, the conv
+    grid) comes from the reconstructed task — the
+    `_run_task_and_model` contract (42).
+
+    rc 0 with the written path; rc 1 when the run dir is missing or has
+    no `summary.json` (the `_cmd_share` contract, 47.4.4).
+    """
+    run_dir = Path(args.run)
+    try:
+        _summary, task, model = _run_task_and_model(run_dir)
+    except (ValueError, FileNotFoundError) as exc:
+        print(f"dossier: {exc} (SPEC.md 58.3/42)", file=sys.stderr)
+        return 1
+    diag = holdout_diagnostics(task, model)
+    gallery: list | None = None
+    hold_errors = getattr(task, "holdout_errors", None)
+    if callable(hold_errors):  # 28.3: media tasks only
+        g = hold_errors(model)
+        gallery = g if g else None  # no misclassifications -> no gallery
+    out = (Path(args.out) if args.out is not None
+           else run_dir / "dossier.html")
+    html_text = build_dossier(
+        run_dir,
+        state_dim=task.state_dim,
+        n_out=task.n_outputs,
+        grid=getattr(task, "feature_grid", None),
+        difficulty=holdout_difficulty(task, model),
+        gallery=gallery,
+        per_class_svg=svg_per_class_bars(diag) if diag else None,
+        confusion_svg=svg_confusion_matrix(diag) if diag else None,
+    )
+    out.write_text(html_text, encoding="utf-8")
+    print(f"dossier : {out}")
+    return 0
+
+
 # --- v0.33 (SPEC.md 47.2): help polish ----------------------------------------
 
 def _version_string() -> str:
@@ -1993,6 +2184,16 @@ _EP_POLICY = """examples:
 _EP_SHARE = """examples:
   autorefine share --run runs/<run_id>
   autorefine share --run runs/<run_id> --out archive.zip
+"""
+_EP_DOSSIER = """examples:
+  autorefine dossier --run runs/<run_id>
+  autorefine dossier --run runs/<run_id> --out dossier.html
+"""
+_EP_MANUAL = """examples (manual/expert mode, SPEC.md 59.3):
+  autorefine manual --task parity-v1 \\
+      --set architecture=[16,8] --set model_family=mlp --set train_steps=400
+  autorefine manual --data sales.csv --label churn \\
+      --set model_family=mlp --set architecture=[32,16]
 """
 
 
@@ -2081,6 +2282,22 @@ def build_parser() -> argparse.ArgumentParser:
                        help="v0.33 (SPEC.md 47.3): suppress the per-experiment "
                             "loop output (keep the === summary === block); "
                             "--demo ignores it (already minimal, 41.3)")
+    # SPEC.md 59.2 (v0.45): the human-in-the-loop steering verbs
+    p_run.add_argument("--pin", action="append", default=[],
+                       metavar="FIELD=VALUE",
+                       help="v0.45 (SPEC.md 59.2): freeze a spec field to a value "
+                            "(every candidate + the baseline); e.g. "
+                            "--pin architecture=[16,8] (repeatable)")
+    p_run.add_argument("--bias", action="append", default=[],
+                       metavar="FIELD=VALUE",
+                       help="v0.45 (SPEC.md 59.2): redirect a mutation of a spec "
+                            "field to a value; e.g. --bias learning_rate=1e-3 "
+                            "(repeatable)")
+    p_run.add_argument("--constrain", action="append", default=[],
+                       metavar="FIELD=V1,V2",
+                       help="v0.45 (SPEC.md 59.2): reject candidates outside an "
+                            "allowed value set (invalid_spec); e.g. "
+                            "--constrain train_steps=200,400 (repeatable)")
     _add_config_flag(p_run)  # 47.1.2
     p_run.set_defaults(func=_cmd_run)
 
@@ -2249,8 +2466,52 @@ def build_parser() -> argparse.ArgumentParser:
                             "loop output and the per-class diagnostics (keep "
                             "the gate verdict + the === summary === block); "
                             "--dry-run ignores it (already minimal, 40.1)")
+    # SPEC.md 59.2 (v0.45): the human-in-the-loop steering verbs
+    p_fit.add_argument("--pin", action="append", default=[],
+                       metavar="FIELD=VALUE",
+                       help="v0.45 (SPEC.md 59.2): freeze a spec field to a value "
+                            "(every candidate + the baseline); e.g. "
+                            "--pin architecture=[16,8] (repeatable)")
+    p_fit.add_argument("--bias", action="append", default=[],
+                       metavar="FIELD=VALUE",
+                       help="v0.45 (SPEC.md 59.2): redirect a mutation of a spec "
+                            "field to a value; e.g. --bias learning_rate=1e-3 "
+                            "(repeatable)")
+    p_fit.add_argument("--constrain", action="append", default=[],
+                       metavar="FIELD=V1,V2",
+                       help="v0.45 (SPEC.md 59.2): reject candidates outside an "
+                            "allowed value set (invalid_spec); e.g. "
+                            "--constrain train_steps=200,400 (repeatable)")
     _add_config_flag(p_fit)  # 47.1.2
     p_fit.set_defaults(func=_cmd_fit)
+
+    # SPEC.md 59.3 (v0.45): manual/expert mode — train one exact spec
+    p_man = sub.add_parser(
+        "manual", help="v0.45 (SPEC.md 59.3): manual/expert mode — set the exact "
+                       "spec over the field registry and train it once "
+                       "(validate + report, not discover)",
+        epilog=_EP_MANUAL,  # 47.2.2
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p_man.add_argument("--task", default="cartpole-v1",
+                       choices=sorted(TASKS),
+                       help="built-in task (default cartpole-v1); or pass --data "
+                            "for a data task (SPEC.md 59.3)")
+    p_man.add_argument("--data", default=None,
+                       help="a CSV file / media directory → a data task "
+                            "(csv/image/audio/text), like fit --data (overrides "
+                            "--task when both are given)")
+    p_man.add_argument("--label", default=None,
+                       help="label column (data tasks; default: auto-detect)")
+    p_man.add_argument("--set", action="append", default=[],
+                       metavar="FIELD=VALUE",
+                       help="a spec field override (repeatable); the value is "
+                            "registry-validated — e.g. --set architecture=[16,8] "
+                            "--set model_family=mlp (SPEC.md 59.3.1)")
+    p_man.add_argument("--seed", type=int, default=7)
+    p_man.add_argument("--max-train", type=float, default=None,
+                       help="per-train wall-time cap in seconds (default: none)")
+    _add_config_flag(p_man)  # 47.1.2
+    p_man.set_defaults(func=_cmd_manual)
 
     p_dash = sub.add_parser(
         "dashboard", help="v0.9 (SPEC.md 23.4): launch the Streamlit app "
@@ -2429,6 +2690,19 @@ def build_parser() -> argparse.ArgumentParser:
                               "next to the run dir)")
     _add_config_flag(p_share)  # 47.1.2
     p_share.set_defaults(func=_cmd_share)
+
+    p_dossier = sub.add_parser(
+        "dossier", help="v0.44 (SPEC.md 58.3): render the run dossier — one "
+                        "self-contained HTML file combining the whole story "
+                        "of a finished run (recipe, provenance, frontier, "
+                        "lineage, sensitivity, error analysis)",
+        epilog=_EP_DOSSIER,  # 47.2.2
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p_dossier.add_argument("--run", required=True, help="path to a run directory")
+    p_dossier.add_argument("--out", default=None, metavar="FILE",
+                           help="output .html path (default: <run_dir>/dossier.html)")
+    _add_config_flag(p_dossier)  # 47.1.2
+    p_dossier.set_defaults(func=_cmd_dossier)
 
     return parser
 

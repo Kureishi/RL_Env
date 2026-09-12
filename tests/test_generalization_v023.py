@@ -606,4 +606,4 @@ def test_version_round_v023():
     """A27 (SPEC.md 37, 33.1): the round assertion advanced in place with
     each round (v0.23 ⇒ `0.23.0`; now v0.39 ⇒ `0.39.0`, M42, SPEC.md 53)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.42.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.46.0"

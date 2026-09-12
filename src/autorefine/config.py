@@ -219,6 +219,80 @@ class ModelSpec:
         return tuple(k for k in a if a[k] != b[k])
 
 
+def spec_n_params(spec, state_dim: int | None, n_out: int | None,
+                  grid: tuple | None = None) -> int | None:
+    """SPEC.md 58.2 (v0.44): the parameter count of one spec — the size axis
+    of the 3-objective frontier.
+
+    `spec` is a `ModelSpec` or its dict form; `state_dim` and `n_out` come
+    from the task (the spec JSON does not carry them — the same contract as
+    `plotting.svg_architecture`); `grid` is the task's `feature_grid`
+    (`(C, H, W)`, e.g. `(1, 8, 8)`) — required for convnets, ignored
+    otherwise. Counts weights + biases exactly (the npz value count, the
+    `gate.model_size` semantic, SPEC.md 25.5):
+
+    * **mlp**: `sizes = [state_dim, *architecture, n_out]`; each layer
+      contributes `fan_in·fan_out + fan_out` (a depth-0 spec is one linear
+      layer — still countable).
+    * **convnet**: mirrors `models.convnet.ConvNet.__init__` exactly —
+      `conv1: c1·C·9 + c1`, `conv2: c2·c1·9 + c2`,
+      `fc: flat·FC_HIDDEN + FC_HIDDEN` (with the same `h1 = H−2`,
+      `h1p = max(1, h1//2)` — needs `h1p ≥ 3` — `h2p = max(1, (h1p−2)//2)`,
+      `flat = c2·h2p·w2p`), `head: FC_HIDDEN·n_out + n_out`.
+    * **tree / boost / knn**: `None` — their "size" is data-dependent
+      (bagged tree shapes, k at inference) and not a parameter count; the
+      58.2 size axis is incomparable for those candidates (documented).
+
+    `None` (not an error) when the inputs are missing, non-finite, or the
+    grid is too small for a valid convnet pipeline (the `ConvNet` would
+    raise `SpecError` — the count degrades instead). A leaf function: the
+    `FC_HIDDEN` constant is lazy-imported inside the function so this
+    module never imports `models` at top level (models import config,
+    SPEC.md 3 leaf rule)."""
+    d = (spec.to_dict() if isinstance(spec, ModelSpec)
+         else spec if isinstance(spec, dict) else None)
+    if d is None:
+        return None
+    family = str(d.get("model_family", "mlp"))
+    arch = d.get("architecture") or []
+    if (not isinstance(state_dim, (int, float)) or isinstance(state_dim, bool)
+            or not isinstance(n_out, (int, float)) or isinstance(n_out, bool)
+            or state_dim < 1 or n_out < 1):
+        return None
+    in_dim, n_outputs = int(state_dim), int(n_out)
+    if family == "mlp":
+        if any(not isinstance(h, (int, float)) or isinstance(h, bool) or h < 1
+               for h in arch):
+            return None
+        sizes = [in_dim, *[int(h) for h in arch], n_outputs]
+        return int(sum(sizes[i] * sizes[i + 1] + sizes[i + 1]
+                       for i in range(len(sizes) - 1)))
+    if family == "convnet":
+        if len(arch) != 2:
+            return None
+        c1, c2 = int(arch[0]), int(arch[1])
+        if grid is None:
+            return None
+        try:
+            C, H, W = (int(v) for v in grid)
+        except (TypeError, ValueError):
+            return None
+        if C < 1 or H < 3 or W < 3:
+            return None
+        h1, w1 = H - 2, W - 2
+        h1p, w1p = max(1, h1 // 2), max(1, w1 // 2)  # the convnet's _pool_dim
+        if h1p < 3 or w1p < 3:
+            return None  # the second conv layer needs pooled dims >= 3
+        h2p, w2p = max(1, (h1p - 2) // 2), max(1, (w1p - 2) // 2)
+        flat = c2 * h2p * w2p
+        from .models.convnet import FC_HIDDEN  # lazy: models import config
+        return int(c1 * C * 9 + c1
+                   + c2 * c1 * 9 + c2
+                   + flat * FC_HIDDEN + FC_HIDDEN
+                   + FC_HIDDEN * n_outputs + n_outputs)
+    return None  # tree / boost / knn: data-dependent size (58.2)
+
+
 def default_spec() -> ModelSpec:
     """Intentionally un-tuned starting point (SPEC.md 7 baseline target)."""
     return ModelSpec(
