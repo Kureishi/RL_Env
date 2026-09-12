@@ -64,6 +64,7 @@ from .watch import (  # 39.1 (T3): watch mode / live progress
 from .plotting import (
     ascii_pareto,
     ascii_score_curve,
+    html_cover,  # 56.2 (v0.42): the report cover block
     html_report,
     svg_architecture,
     svg_confusion_matrix,
@@ -78,6 +79,11 @@ from .predict import (  # 42.1 (v0.28): the predict leaf
     predict_features,
     row_to_features,
     standardize,
+)
+from .provenance import (  # 56.1 (v0.42): the provenance certificate
+    env_provenance,
+    provenance_card,
+    provenance_payload,
 )
 from .preflight import (  # 43.1 (v0.29): the data-health preflight leaf
     _SMOKE_WALL_SECONDS,
@@ -994,6 +1000,19 @@ def _cmd_report(args: argparse.Namespace) -> int:
                   "--json/--history/--what-if/--project/--trace "
                   "(SPEC.md 44.2.2)", file=sys.stderr)
             return 1
+    # SPEC.md 56.1.1 (v0.42): --certificate is a human view — the
+    # provenance card on stdout + the cover in report.html (with --html) —
+    # mutually exclusive with the machine path (--json) and --history (it
+    # needs a run dir). The default path (no flag) is byte-identical (56.6).
+    if getattr(args, "certificate", False):
+        if args.json:
+            print("--certificate and --json are mutually exclusive "
+                  "(SPEC.md 56.1.1)", file=sys.stderr)
+            return 1
+        if args.history:
+            print("--certificate and --history are mutually exclusive "
+                  "(SPEC.md 56.1.1)", file=sys.stderr)
+            return 1
     # SPEC.md 41.1.1/41.2.1 (v0.27): --project / --trace are human views,
     # mutually exclusive with the machine (--json), the history path, and
     # the what-if path (A11 untouched).
@@ -1030,6 +1049,30 @@ def _cmd_report(args: argparse.Namespace) -> int:
         return 1
     entries = mem.load_experiments()
     run_dir = Path(args.run)
+    # SPEC.md 56.1.1 (v0.42): the provenance certificate — the text card on
+    # stdout + (with --html) the cover block in report.html. The payload is
+    # pure over the run's identity + the env facts (56.1); `target` comes
+    # from the summary or the canonical run_config (37.1); the run-config
+    # hash is the 56.1 canonical hash of `run_config.json`.
+    cert_cover = None
+    cert_payload = None
+    if getattr(args, "certificate", False):
+        rc_cfg = None
+        rc_path = run_dir / "run_config.json"
+        if rc_path.is_file():
+            try:
+                rc_cfg = json.loads(rc_path.read_text(encoding="utf-8"))
+            except Exception:
+                rc_cfg = None
+        _rcd = summary.get("run_config")
+        _target = summary.get("target")
+        if _target is None and isinstance(_rcd, dict):
+            _target = _rcd.get("target")
+        cert_payload = provenance_payload(
+            env_provenance(), seed=summary.get("seed"),
+            task=summary.get("task"), target=_target, run_config=rc_cfg)
+        cert_cover = html_cover(summary, cert_payload)
+        print(provenance_card(cert_payload))
     extras = _report_extras(summary, run_dir)  # SPEC.md 28.2-28.4 (None-safe)
     if args.plot:  # SPEC.md 21.2: SVG files always land in the run dir
         pareto_pts = summary.get("pareto_frontier") or [
@@ -1054,9 +1097,12 @@ def _cmd_report(args: argparse.Namespace) -> int:
             (run_dir / "architecture.svg").write_text(extras["arch_svg"],
                                                       encoding="utf-8")
     if args.html:  # SPEC.md 22.2: one self-contained file in the run dir
+        # 56.2 (v0.42): the brand masthead + provenance cover — present only
+        # with --certificate (cert_cover is None otherwise; byte-identical)
         (run_dir / "report.html").write_text(
             html_report(summary, entries, diagnostics=extras["diagnostics"],
-                        gallery=extras["gallery"], arch_svg=extras["arch_svg"]),
+                        gallery=extras["gallery"], arch_svg=extras["arch_svg"],
+                        cover=cert_cover),
             encoding="utf-8")
     if args.json:  # SPEC.md 21.2: stdout is pure machine-readable JSON
         print(json.dumps(summary, indent=2, sort_keys=True))
@@ -2086,6 +2132,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_rep.add_argument("--importance-repeats", type=int, default=5,
                        help="with --importance: shuffles per column "
                             "(default 5, SPEC.md 44.2)")
+    p_rep.add_argument("--certificate", action="store_true",
+                       help="v0.42 (SPEC.md 56.1): the provenance certificate "
+                            "— the text card on stdout (config hash, version, "
+                            "seed, dep pins, git sha) + the cover block in "
+                            "report.html (with --html); mutually exclusive "
+                            "with --json/--history")
     p_rep.add_argument("--plot", action="store_true",
                        help="v0.7 (SPEC.md 21.2): ASCII charts on stdout + "
                             "score_curve.svg / pareto_frontier.svg in the run dir")

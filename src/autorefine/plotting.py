@@ -87,6 +87,67 @@ _STYLE_KEYS = (
     "_FRONTIER_PALETTE", "_CLASS_PALETTE",
 )
 
+# --- SPEC.md 56.3 (v0.42): the formal design-token block ----------------------
+# The color system, formalized as one documented registry. `TOKENS` maps
+# each canonical token name to its default (light) value (the module
+# constants above); `_TOKEN_TO_KEY` binds each token to the module-global
+# name it aliases, so the `okabe` / `dark` override sets (keyed by those
+# global names — `_OKABE` / `_DARK`) merge back onto the canonical names
+# with no case/name guessing. `resolve_tokens(palette, dark)` is the pure
+# read: a NEW dict of resolved values (never mutating the module globals,
+# unlike the `_styled` render context), validating exactly like `_styled`
+# (51.4.1: unknown palette -> `ValueError`; 51.4.2: `dark` must be a bool),
+# deterministic (G2) — the A46 test pins the default set to the module
+# constants and the okabe/dark sets to `_OKABE` / `_DARK`, so the registry
+# and the live tokens can never drift apart.
+_TOKEN_TO_KEY = {
+    "bg": "_BG",
+    "axis": "_AXIS",
+    "line": "_LINE",
+    "baseline": "_BASELINE",
+    "accepted": "_ACCEPTED",
+    "rejected": "_REJECTED",
+    "scored_rejected": "_SCORED_REJ",
+    "band": "_BAND",
+    "ladder": "_LADDER",
+    "lane_bg": "_LANE_BG",
+    "noscore_bg": "_NOSCORE_BG",
+    "frontier_palette": "_FRONTIER_PALETTE",
+    "class_palette": "_CLASS_PALETTE",
+}
+_TOKENS_FROM_KEY = {key: token for token, key in _TOKEN_TO_KEY.items()}
+TOKENS: dict = {token: globals()[key]
+                for token, key in _TOKEN_TO_KEY.items()}
+
+
+def resolve_tokens(palette: str = "default", dark: bool = False) -> dict:
+    """SPEC.md 56.3 (v0.42): the resolved design-token dict — `TOKENS`
+    with the `okabe` / `dark` overrides applied per the active theme
+    (the same two-set model as `_styled`, 51.4.1/51.4.2), returned as a
+    NEW dict (the module globals are never touched, so it is safe to
+    call from anywhere — the app's Design-tokens expander renders this).
+    Validation mirrors `_styled` exactly: an unknown palette is a
+    `ValueError` (51.4.1); `dark` must be a bool (51.4.2). The default
+    call is byte-identical to `dict(TOKENS)` (G2); deterministic."""
+    if palette not in ("default", "okabe"):
+        raise ValueError(f"palette must be 'default' or 'okabe', got "
+                         f"{palette!r} (SPEC.md 51.4.1/56.3)")
+    if not isinstance(dark, bool):
+        raise ValueError(f"dark must be a bool, got {type(dark).__name__} "
+                         f"(SPEC.md 51.4.2/56.3)")
+    out = dict(TOKENS)
+    # dark first, then okabe on top (the same two-set order as `_styled`,
+    # 51.4); a theme only overrides the tokens it defines (the okabe set is
+    # a subset of the full set — the `.get` keeps the rest at the default)
+    for active, overrides in ((dark, _DARK), (palette == "okabe", _OKABE)):
+        if not active:
+            continue
+        for key, value in overrides.items():
+            token = _TOKENS_FROM_KEY.get(key)
+            if token is not None:
+                out[token] = value
+    return out
+
 
 @contextmanager
 def _styled(palette: str = "default", dark: bool = False):
@@ -349,7 +410,8 @@ def _fmt(v) -> str:
 
 
 def html_report(summary: dict, entries, diagnostics: dict | None = None,
-                gallery: list | None = None, arch_svg: str | None = None) -> str:
+                gallery: list | None = None, arch_svg: str | None = None,
+                cover: str | None = None) -> str:
     """One self-contained HTML5 run report (SPEC.md 22.2).
 
     Hand-written, no new dependency, no JS, no external assets: the summary
@@ -368,7 +430,10 @@ def html_report(summary: dict, entries, diagnostics: dict | None = None,
       (a text-list fallback when PIL is absent or a decode fails) and
       inline waveform SVGs, each captioned true -> predicted;
     * any entry with a non-empty `loss_history` (C1) — the Experiments
-      table gains a per-row curve SVG column (old runs: no column).
+      table gains a per-row curve SVG column (old runs: no column);
+    * `cover` (SPEC.md 56.2, v0.42) — the brand masthead + provenance
+      cover block (caller-injected, like `arch_svg`), rendered at the top
+      of the body; a call without it stays byte-identical (28.5).
     """
     summary = summary or {}
     entries = list(entries or [])
@@ -396,6 +461,11 @@ def html_report(summary: dict, entries, diagnostics: dict | None = None,
     a("pre{background:#f0f4f8;border:1px solid #cbd2d9;padding:10px;overflow:auto;}")
     a(".foot{color:#6b7280;font-size:12px;margin-top:32px;}")
     a("</style></head><body>")
+    # 56.2 (v0.42): the brand masthead + provenance cover — only when the
+    # caller supplies one (the `report --certificate` path, 56.1.1); calls
+    # without a cover stay byte-identical (28.5).
+    if cover:
+        a(cover)
     a(f"<h1>AutoRefine report — {esc(task)} (seed {esc(_fmt(summary.get('seed')))})</h1>")
 
     a("<h2>Summary</h2>")
@@ -488,6 +558,52 @@ def html_report(summary: dict, entries, diagnostics: dict | None = None,
       "assets (SPEC.md 22.2).</p>")
     a("</body></html>")
     return "\n".join(L) + "\n"
+
+
+def html_cover(summary: dict, payload: dict | None = None) -> str:
+    """SPEC.md 56.2 (v0.42): the report cover block — the brand masthead
+    (the `AutoRefine` wordmark + the report title) and the provenance
+    table (one row per `provenance.provenance_payload` entry, in payload
+    order; `extras` as indented rows; None reads as `—`), rendered as a
+    self-contained `<header>` + `<table>` with inline styles (no external
+    assets, 22.2; no timestamps — a re-render is byte-identical, G2).
+    `payload=None` renders the masthead only (the brand chrome without the
+    certificate). All dynamic text is HTML-escaped. Pure, deterministic."""
+    summary = summary if isinstance(summary, dict) else {}
+    esc = html.escape
+    task = summary.get("task", "?")
+    seed = summary.get("seed")
+    import autorefine  # the version is read at call time (33.1)
+    L: list[str] = []
+    a = L.append
+    a("<style>")
+    a(".cover{border:1px solid #cbd2d9;border-left:6px solid #1a66c2;"
+      "border-radius:8px;padding:14px 18px;margin:0 0 18px;background:#f7f9fc;}")
+    a(".cover .brand{font-size:19px;font-weight:700;color:#0f172a;}")
+    a(".cover .tag{color:#6b7280;font-size:12px;margin-top:2px;}")
+    a(".cover table{border-collapse:collapse;margin:10px 0 0;}")
+    a(".cover td{padding:2px 14px 2px 0;font-size:13px;color:#1f2933;}")
+    a(".cover td.k{color:#6b7280;white-space:nowrap;}")
+    a("</style>")
+    a("<header class=\"cover\">")
+    a("<div class=\"brand\">AutoRefine</div>")
+    a(f"<div class=\"tag\">autonomous model improvement — report · "
+      f"task {esc(str(task))} · seed {esc(str(seed)) if seed is not None else '—'} "
+      f"· v{esc(autorefine.__version__)}</div>")
+    if payload is not None:
+        p = payload if isinstance(payload, dict) else {}
+        a("<table>")
+        for key, value in p.items():
+            if key == "extras" and isinstance(value, dict):
+                for dist, version in value.items():
+                    a(f"<tr><td class=\"k\">  {esc(str(dist))}</td>"
+                      f"<td>{esc(str(version)) if version is not None else '—'}</td></tr>")
+            else:
+                text = value if value is not None else "—"
+                a(f"<tr><td class=\"k\">{esc(str(key))}</td><td>{esc(str(text))}</td></tr>")
+        a("</table>")
+    a("</header>")
+    return "\n".join(L)
 
 
 def _strip_rows(rows) -> list[tuple[int, bool, float | None, str | None]]:
@@ -1105,14 +1221,17 @@ def _svg_run_curves(named, target=None, width: int = 640, height: int = 360):
 
 
 def _svg_live_sparkline(best_series, target=None, width: int = 220, height: int = 48,
-                        live: bool = True) -> str:
-    """55.1 (v0.41): the live best-score sparkline. `best_series` is the
-    running-best series (the baseline seeds point 0, like `running_best_curve`);
-    the last point is drawn as a *pulse* — a larger flash dot with a soft
-    halo — when `live=True`, a plain dot when `live=False` (55.1.2). An
-    optional horizontal target line (inside the y-range only). Empty input
-    renders the empty header + message (the 21.2 convention). Valid XML,
-    pure, deterministic (G2); ASCII-only text."""
+                        live: bool = True, reduced_motion: bool = False) -> str:
+    """55.1 (v0.41) + 56.5 (v0.42): the live best-score sparkline.
+    `best_series` is the running-best series (the baseline seeds point 0,
+    like `running_best_curve`); the last point is drawn as a *pulse* — a
+    larger flash dot with a soft halo — when `live=True` and
+    `reduced_motion=False`, a plain dot otherwise (55.1.2; the
+    reduced-motion pass, 56.5 — the pulse is the app's one animated
+    affordance, and this flag is its accessibility opt-out). An optional
+    horizontal target line (inside the y-range only). Empty input renders
+    the empty header + message (the 21.2 convention). Valid XML, pure,
+    deterministic (G2); ASCII-only text."""
     pts = [float(v) for v in (best_series or []) if _finite(v)]
     if not pts:
         parts = _svg_header(width, height, "best score (empty)")
@@ -1148,7 +1267,7 @@ def _svg_live_sparkline(best_series, target=None, width: int = 220, height: int 
                  f'points="{line}"/>')
     lx, ly = x(len(pts) - 1), y(pts[-1])
     last = f"current best {pts[-1]:.2f}" + (" (live)" if live else "")
-    if live:
+    if live and not reduced_motion:  # 56.5: the reduced-motion pass
         parts.append(f'<circle cx="{lx:.1f}" cy="{ly:.1f}" r="7" '
                      f'fill="{_ACCEPTED}" opacity="0.28"><title>{last}'
                      f'</title></circle>')
@@ -1160,14 +1279,17 @@ def _svg_live_sparkline(best_series, target=None, width: int = 220, height: int 
 
 def svg_live_sparkline(best_series, target=None, width: int = 220, height: int = 48,
                        live: bool = True, palette: str = "default",
-                       dark: bool = False) -> str:
-    """55.1 (v0.41): the live best-score sparkline with a pulsing last
-    point (a flash when `live=True`, a static dot when `live=False`).
-    `palette`/`dark` per SPEC.md 51.4; the default call is byte-identical
-    to an explicit one (G2); ARIA always on (51.4.3). Pure, valid XML."""
+                       dark: bool = False, reduced_motion: bool = False) -> str:
+    """55.1 (v0.41) + 56.5 (v0.42): the live best-score sparkline with a
+    pulsing last point (a flash when `live=True`, a static dot when
+    `live=False` — and a static dot when `reduced_motion=True`, the
+    accessibility opt-out for the pulse, 56.5). `palette`/`dark` per
+    SPEC.md 51.4; the default call is byte-identical to an explicit one
+    (G2); ARIA always on (51.4.3). Pure, valid XML."""
     with _styled(palette, dark):
         return _svg_live_sparkline(best_series, target=target, width=width,
-                                   height=height, live=live)
+                                   height=height, live=live,
+                                   reduced_motion=reduced_motion)
 
 
 def _svg_reference_curve(current, reference, target=None, width: int = 640,

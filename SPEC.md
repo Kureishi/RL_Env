@@ -62,6 +62,7 @@ numbers and carry none.)
 | M42 | v0.39   | 53     | A43 | tests/test_decisions_v039.py |
 | M43 | v0.40   | 54     | A44 | tests/test_progress_v040.py |
 | M44 | v0.41   | 55     | A45 | tests/test_live_v041.py |
+| M45 | v0.42   | 56     | A46 | tests/test_polish_v042.py |
 
 ---
 
@@ -5961,3 +5962,61 @@ app is a thin renderer (23.1).
 freshness caption + the pulsing best-score sparkline, 55.1), the mid-run
 status snapshot (55.2), and the reference-run overlay (55.3) — all opt-in /
 default-no-op, byte-identical under defaults (55.4) (A45).
+
+---
+
+## 56. Professional polish (v0.42)
+
+A finished run already carries everything needed to say *what produced this result* — the config, the seed, the dependency pins, the repository commit — but the app and the report surfaced none of it, and the app's empty / loading / error states were implicit (a blank panel, a silent block, a raw traceback). v0.42 adds a professional surface, in the app (23.1) and the pure core (`provenance.py`, `plotting.py`); the run semantics in `dashboard.DashboardRunner` are unchanged. Every new surface is opt-in / default-no-op, so the pre-v0.42 call paths stay byte-identical (56.6) and the A-pins stay green (G2).
+
+### 56.1 The provenance / "certificate" card
+
+A new core module `provenance.py` (stdlib + numpy only, import-cycle-free, streamlit-free — 3 / 23.1) owns the "what produced this result" block as pure functions:
+
+- **`canonical_hash(payload)`** — sha256 of the canonical JSON encoding (`sort_keys=True`, compact separators, `default=str` for non-JSON types). The same payload hashes to the same digest everywhere; key order and whitespace never change it (G2).
+- **`env_provenance()`** — the environment facts: `python`, `numpy`, the `extras` dict (version or `None` per the three optional packages — streamlit / pillow / soundfile — in fixed order), and `git_sha` (the short `HEAD` of the repository the source tree lives in; `None` when there is no repository or git is unavailable). Never raises — every probe degrades to `None`.
+- **`provenance_payload(env, seed=None, task=None, target=None, run_config=None)`** — the certificate payload, a pure merge of the environment facts with the run's identity in a fixed key order: `tool`, `version`, `python`, `numpy`, `extras`, `task`, `seed`, `target`, `config_hash` (the run-config canonical hash, or `None` when the run carries no `run_config.json`), and `git_sha`. A non-dict `env` degrades to the empty facts.
+- **`provenance_card(payload)`** — the plain-text certificate: the header line, one `key: value` line per payload entry in order, `extras` as indented lines, and a `None` reading `—`. A non-dict payload renders the header alone.
+- **`svg_provenance(payload)`** — the SVG certificate card: a bordered panel with the brand line and one `key: value` row per entry (the long `config_hash` / `git_sha` rows truncate to 16 chars with the full value in a `<title>`); palette (51.4), dark (51.4.2), and ARIA (51.4.3) apply; the default call is byte-identical (G2); valid XML; the empty payload renders the header + `no provenance payload` (21.2).
+
+**56.1.1 the CLI.** `report --certificate` (a human view, mutually exclusive with `--json` and `--history`) prints `provenance_card` on stdout and, with `--html`, renders `plotting.html_cover` into `report.html`. The default `report` (no flag) is byte-identical — the certificate path is gated on the flag (56.6). The share bundle (47.4) is unchanged.
+
+### 56.2 Brand chrome + the report cover
+
+`plotting.html_cover(summary, payload=None)` renders the brand masthead (the `AutoRefine` wordmark + the `autonomous model improvement — report · task … · seed … · v<version>` tag) and, when `payload` is present, the provenance table (one row per `provenance_payload` entry, `extras` indented, `None` → `—`) as a self-contained `<header>` + `<table>` with inline styles (no external assets, 22.2; no timestamps — a re-render is byte-identical, G2). `payload=None` renders the masthead only. All dynamic text is HTML-escaped.
+
+`html_report` gains an optional `cover: str | None = None` (caller-injected, like `arch_svg`) rendered at the top of the body — before the `<h1>`. A call without a `cover` is byte-identical (28.5).
+
+### 56.3 The design-token registry
+
+The color system is formalized as one documented registry in `plotting.py`: `TOKENS` maps each canonical token name (`bg`, `axis`, `line`, `baseline`, `accepted`, `rejected`, `scored_rejected`, `band`, `ladder`, `lane_bg`, `noscore_bg`, `frontier_palette`, `class_palette`) to its default (light) value — the same 13 tokens the `_styled` render context swaps (51.4.4). `_TOKEN_TO_KEY` / `_TOKENS_FROM_KEY` bind each token to the module-global name it aliases, so the `okabe` / `dark` override sets (keyed by those globals — `_OKABE` / `_DARK`) merge back onto the canonical names with no case/name guessing. `resolve_tokens(palette="default", dark=False)` is the pure read: a NEW dict of resolved values (never mutating the module globals), with dark applied first and okabe on top (a theme only overrides the tokens it defines — the okabe set is a subset, so `bg` / `axis` keep the theme default); validation mirrors `_styled` exactly (an unknown palette is a `ValueError`, 51.4.1; `dark` must be a bool, 51.4.2). The default call is byte-identical to `dict(TOKENS)` (G2), so the registry and the live tokens can never drift apart.
+
+### 56.4 The app: explicit states + expanders
+
+The app (a thin renderer, 23.1) gains three explicit states and two expanders:
+
+- **empty** (Setup tab) — when no data is loaded, an `st.info` pointing to the upload / path controls instead of a blank panel;
+- **loading** (Run tab) — while a run is live, an `st.info` ("RUNNING — the improvement loop is in progress") instead of a silent block;
+- **error** (the drain) — on a run error, a friendly `st.caption` pointing at `autorefine doctor` + `fit --dry-run` before the raw traceback;
+- **Provenance (certificate)** (Results view) — an expander rendering `svg_provenance` + `st.code(provenance_card(...))` computed from the run dir's `summary.json` + `run_config.json` at render time (nothing is written into the runs tree — the 47.4 file-producing surface stays `autorefine share`);
+- **Design tokens** (Setup tab) — an expander rendering the 56.3 registry (`resolve_tokens()`) as a table.
+
+`st.expander` in this Streamlit build has no `key` param, so the new expanders carry none (matching the pre-v0.42 expanders); the new controls otherwise use distinct Streamlit keys (the AppTests are key-based, no total-widget counts).
+
+### 56.5 Reduced motion
+
+The live best-score sparkline (55.1.2) is the app's one animated affordance — the pulsing halo. `svg_live_sparkline` gains an opt-in `reduced_motion: bool = False`: when `True` the halo (`r="7"`, `opacity 0.28`) is suppressed and only the plain dot + `current best` title render. The app's **Reduce motion** checkbox (`reduce_motion`, default off, Setup tab) feeds both sparkline sites; the default call is byte-identical to the pre-v0.42 one (56.6).
+
+### 56.6 Acceptance (A46)
+
+- **provenance core (56.1)** — `canonical_hash` is hand-computed (the fixed digest, key-order independence, `default=str` for a non-JSON value); `env_provenance` is shape-checked (the four keys, a string `python` / `numpy`, the fixed-order `extras` dict, a hex-or-`None` `git_sha`); `provenance_payload` is hand-computed (the fixed key order, the run identity, `config_hash` present only with a `run_config`, a non-dict `env` degrading); `provenance_card` is hand-computed (the header, the ordered `key: value` lines, the indented `extras`, `None` → `—`, a non-dict payload rendering the header alone); `svg_provenance` is valid XML (ARIA, the truncated hash + `<title>`, the okabe/dark re-color, the empty → message).
+- **brand chrome / cover (56.2)** — `html_cover` (the masthead + the provenance table, the `payload=None` masthead-only edge, the int / `None` coercion) and `html_report(..., cover=)` (the `cover=None` byte-identity, the cover after `<body>` and before the `<h1>`, no cover header without it).
+- **design tokens (56.3)** — `resolve_tokens()` equals `dict(TOKENS)` (a fresh dict over the full 13-token set); the okabe / dark override sets merge back onto the canonical names via `_TOKENS_FROM_KEY`; the okabe subset keeps `bg` / `axis` at the theme default; the okabe+dark overlap resolves to okabe; and the `ValueError`s on a bad palette / dark.
+- **reduced motion (56.5)** — `svg_live_sparkline(reduced_motion=True)` suppresses the `r="7"` halo while keeping the dot + title; the default keeps the halo and is byte-identical to an explicit call; a `live=False` sparkline has no halo regardless.
+- **app (56.4)** — the source wires the three explicit states (empty / loading / error → `autorefine doctor`), the two expanders (by label — no `key` on `st.expander`), the `reduce_motion` checkbox + passthrough at both sparkline sites, and the provenance / token renders; the *default* path runs end-to-end (a finished run persists its result and the three new Setup-tab controls are present).
+- **CLI (56.1.1)** — the source wires `report --certificate` (the imports, the `--json` / `--history` mutual exclusivity, the payload build + card print + cover into `html_report`, the parser argument) — all gated on the flag so the default report stays byte-identical.
+- **Regression** — A1–A45 stay green (no default-path behavior change; the pre-v0.42 `html_report` / `svg_live_sparkline` call paths and the 47.4 share-bundle entry list byte-identical); the A25 index advances (42 acceptance rows; `defined == set(range(1, 47))`); the version stepped to `0.42.0` in both sources (33.1).
+
+### 56.7 Milestone (M45)
+
+**M45** — v0.42 "A. Professional polish": the provenance / "certificate" card (56.1, `provenance.py` + the `report --certificate` CLI), the brand chrome + report cover (56.2), the formal design-token registry (56.3), the app's explicit empty / loading / error states + the Provenance and Design-tokens expanders (56.4), and the reduced-motion opt-out (56.5) — all opt-in / default-no-op, byte-identical under defaults (56.6) (A46).

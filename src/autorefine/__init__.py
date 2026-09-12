@@ -31,11 +31,21 @@ from .models.knn import KNN
 from .models.convnet import ConvNet
 from .pareto import ParetoFrontier
 from .plotting import (
+    TOKENS,
     ascii_pareto,
     ascii_score_curve,
+    html_cover,
     html_report,
+    resolve_tokens,
     svg_pareto,
     svg_score_curve,
+)
+from .provenance import (
+    canonical_hash,
+    env_provenance,
+    provenance_card,
+    provenance_payload,
+    svg_provenance,
 )
 from .plugins import PluginError, discover, register_policies, register_tasks
 from .tasks import (
@@ -54,7 +64,7 @@ from .tasks import (
 # SPEC.md 33.1 (C1): single version source — must equal pyproject.toml's
 # [project].version (enforced by the A23 test); one step per feature round
 # (v0.39 ⇒ 0.39.0, M42, SPEC.md 53)
-__version__ = "0.41.0"
+__version__ = "0.42.0"
 
 __all__ = [
     "AutoRefineEnv",
@@ -75,6 +85,14 @@ __all__ = [
     "ascii_pareto",
     "svg_pareto",
     "html_report",
+    "TOKENS",
+    "html_cover",
+    "resolve_tokens",
+    "canonical_hash",
+    "env_provenance",
+    "provenance_card",
+    "provenance_payload",
+    "svg_provenance",
     "PluginError",
     "discover",
     "register_policies",

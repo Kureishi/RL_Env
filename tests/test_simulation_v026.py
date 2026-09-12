@@ -290,4 +290,4 @@ def test_version_026_both_sources():
     """A30 (40.3, 33.1): the version stepped to `0.39.0` in both sources
     (advanced again with v0.39 ⇒ `0.39.0`, M42, SPEC.md 53 — per 33.1)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.41.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.42.0"

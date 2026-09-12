@@ -62,6 +62,7 @@ from autorefine.live import (
 # `autorefine compare` CLI prints it); the app keeps the name importable
 # (SPEC.md 38.4 unchanged) — this *is* `dashboard.diff_two_summaries`.
 from autorefine.plotting import (
+    resolve_tokens,  # 56.3 (v0.42): the design-token registry (tokens expander)
     svg_action_probabilities,  # noqa: F401 (D2 view, SPEC.md 29.2)
     svg_architecture,  # C4 (28.4) + 53.3 (v0.39) the champion spec card
     svg_audio_waveform,
@@ -81,6 +82,14 @@ from autorefine.plotting import (
     svg_seed_curves,  # V1 view (SPEC.md 30.1)
     svg_seed_variance,  # D1 view (SPEC.md 29.1)
     svg_task_returns,  # noqa: F401 (D2 view, SPEC.md 29.2)
+)
+# SPEC.md 56.1 (v0.42): the provenance certificate — the app's Provenance
+# expander (56.4) is a thin renderer over these pure core functions.
+from autorefine.provenance import (
+    env_provenance,
+    provenance_card,
+    provenance_payload,
+    svg_provenance,
 )
 from autorefine.tasks import CsvTask
 
@@ -502,6 +511,10 @@ def _drain_live(record: dict, narrate: bool = False,
     table = chart = bar = note = narr = None
     vbars = vmatrix = vtimeline = vucb = vstrip = vscatter = None
     vfresh = vspark = None  # 55.1 (v0.41): the live freshness + sparkline
+    # 56.5 (v0.42): the reduced-motion opt-out (A.6) — read once here; the
+    # Setup tab renders before the drain, so it is set by the time either
+    # sparkline site runs (default off → byte-identical, 56.6)
+    reduced_motion = st.session_state.get("reduce_motion", False)
 
     while True:
         if idx >= len(msgs):
@@ -571,7 +584,7 @@ def _drain_live(record: dict, narrate: bool = False,
                 vfresh.caption(freshness_caption(0, 0.0, done=False))
                 vspark.markdown(
                     svg_live_sparkline(best_series, info.get("target"),
-                                       live=True),
+                                       live=True, reduced_motion=reduced_motion),
                     unsafe_allow_html=True)
             continue
 
@@ -712,7 +725,7 @@ def _drain_live(record: dict, narrate: bool = False,
                                                  done=False))
                 vspark.markdown(
                     svg_live_sparkline(best_series, info.get("target"),
-                                       live=True),
+                                       live=True, reduced_motion=reduced_motion),
                     unsafe_allow_html=True)
             best_before = u["best_score"]  # the running best for the next row
             continue
@@ -740,6 +753,12 @@ def _drain_live(record: dict, narrate: bool = False,
 
         if kind == "error":
             st.error(str(payload))
+            # 56.4 (v0.42): the friendly next-step hint (A.4) — point the
+            # user at the onboarding commands rather than a raw traceback
+            st.caption(
+                "Next steps: `autorefine doctor` checks versions + a smoke "
+                "train, and `autorefine fit --dry-run` validates your data "
+                "before a full run (SPEC.md 56.4).")
             continue
 
         if kind == "end":
@@ -875,6 +894,32 @@ def _render_result(res: dict) -> None:
         st.download_button("Download share bundle (.zip)", data=bundle,
                            file_name=f"{rd.name}-share.zip",
                            mime="application/zip", key="dl_share")
+
+    # SPEC.md 56.1/56.4 (v0.42): the Provenance (certificate) expander (A.1)
+    # — the "what produced this result" block, rendered at view time from the
+    # run dir (summary.json + run_config.json). Nothing is written into the
+    # runs tree (the 47.4 file-producing surface stays `autorefine share`).
+    with st.expander("Provenance (certificate)", expanded=False):
+        try:
+            _sd = Path(res["run_dir"])
+            _summary = {}
+            _sjson = _sd / "summary.json"
+            if _sjson.is_file():
+                _summary = json.loads(_sjson.read_text(encoding="utf-8"))
+            _rc = {}
+            _rcjson = _sd / "run_config.json"
+            if _rcjson.is_file():
+                _rc = json.loads(_rcjson.read_text(encoding="utf-8"))
+            _payload = provenance_payload(
+                env_provenance(),
+                seed=_summary.get("seed"), task=_summary.get("task"),
+                target=_summary.get("target", _rc.get("target")),
+                run_config=_rc or None)
+            st.markdown(svg_provenance(_payload, **_palette_kwargs()),
+                        unsafe_allow_html=True)
+            st.code(provenance_card(_payload), language="text")
+        except Exception as exc:  # 56.4: a friendly error, not a page crash
+            st.error(f"provenance card unavailable: {exc} (SPEC.md 56.4)")
 
     # SPEC.md 36.2 (v0.22, G2): the app's spec surface reads the field
     # registry — one table for the field list, not a per-surface literal
@@ -1512,6 +1557,11 @@ def main() -> None:
         if path is not None:
             st.subheader("Data")
             _preview(path)
+        else:  # 56.4 (v0.42): the explicit empty state (A.4)
+            st.info(
+                "No data loaded — upload a CSV or set a path in the sidebar "
+                "to begin. A finished run's results are still viewable in "
+                "the Results tab (SPEC.md 56.4).")
         st.caption(f"policy **{policy}** · seed **{seed}** · experiments "
                    f"**{experiments}** · max train **{max_train:g}s** · "
                    f"quality **{quality}** · target **{target:g}** "
@@ -1523,6 +1573,23 @@ def main() -> None:
                     help="Re-renders the result plots colorblind-safe + "
                          "dark-mode-aware (a view preference, not a run "
                          "setting — SPEC.md 51.4.4).")
+        # 56.5 (v0.42): the reduced-motion opt-out (A.6) — a view preference
+        # for the live sparkline's pulsing halo, not a run knob (51.4.4)
+        st.checkbox("Reduce motion", value=False, key="reduce_motion",
+                    help="Render the live best-score sparkline as a static "
+                         "dot instead of the pulsing halo (accessibility "
+                         "opt-out — SPEC.md 56.5).")
+        # 56.3 (v0.42): the design-token registry (A.3) — the single source
+        # of truth for the SVG color/shape tokens, rendered as a table
+        with st.expander("Design tokens", expanded=False):
+            st.caption(
+                "The SVG design-token registry (SPEC.md 56.3) — one row per "
+                "token; the `okabe`/`dark` overrides are applied by the "
+                "active theme.")
+            _tok = resolve_tokens()
+            st.dataframe(
+                [{"token": k, "value": v} for k, v in _tok.items()],
+                width="stretch")
 
     with t_run:  # 51.1.1: the Run button, the live loop, the Stop button
         stop_pressed = st.button(
@@ -1534,6 +1601,9 @@ def main() -> None:
         live = (rec is not None and not rec["drained"]
                 and rec.get("thread") is not None and rec["thread"].is_alive())
         if live:  # 51.2.3 preemption-safe reattach: drain the surviving run
+            # 56.4 (v0.42): the explicit loading state (A.4) — "it's running"
+            st.info("RUNNING — the improvement loop is in progress "
+                    "(SPEC.md 56.4).")
             if stop_pressed:
                 rec["stop"]["flag"] = True
             _drain_live(rec, narrate, stream_mode=live_mode)

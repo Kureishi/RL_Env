@@ -315,4 +315,4 @@ def test_version_round_v025():
     sources (v0.39 ⇒ `0.39.0`, M42, SPEC.md 53 — advanced in place per
     33.1)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.41.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.42.0"

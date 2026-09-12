@@ -1,0 +1,26 @@
+{
+  "autorefine_version": "0.41.0",
+  "block_size": 512,
+  "ci_blocks": 8,
+  "curriculum": false,
+  "dataset_size": 48,
+  "efficiency_weight": 0.5,
+  "ensemble_top_k": 0,
+  "gen_gap_penalty": 0.5,
+  "kfold": 0,
+  "max_experiments": 2,
+  "max_train_seconds": 30.0,
+  "max_wall_seconds": 900.0,
+  "policy": "bandit",
+  "rl_episodes": null,
+  "schema": "autorefine.run_config/1",
+  "screen_frac": 1.0,
+  "seed": 7,
+  "stall_patience": null,
+  "target": 95.0,
+  "task": "csv",
+  "task_config": {
+    "path": "C:\\tmp\\pytest-of-kurei\\pytest-263\\test_app_seed_sweep_progress_s0\\data.csv"
+  },
+  "z_accept": 1.0
+}

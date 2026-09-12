@@ -165,7 +165,7 @@ def test_version_single_source():
     # round label == package version (v0.39 ⇒ 0.39.0, M42 — the round
     # advanced per SPEC.md 33.1 with the v0.31 adapt-to-use-cases batch,
     # SPEC.md 45)
-    assert autorefine.__version__ == "0.41.0"
+    assert autorefine.__version__ == "0.42.0"
     # the app caption is `v{__version__}` — the same number, no third copy
     app_src = (REPO / "src" / "autorefine" / "dashboard_app.py"
                ).read_text(encoding="utf-8")
