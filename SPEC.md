@@ -68,6 +68,9 @@ numbers and carry none.)
 | M48 | v0.45   | 59     | A49 | tests/test_steering_v045.py |
 | M49 | v0.46   | 60     | A50 | tests/test_whatif_v046.py |
 | M50 | v0.47   | 61     | A51 | tests/test_scenarios_v047.py |
+| M51 | v0.48   | 62     | A52 | tests/test_reporting_v048.py |
+| M52 | v0.49   | 63     | A53 | tests/test_reporting_v049.py |
+| M53 | v0.50   | 64     | A54 | tests/test_reporting_v050.py |
 
 ---
 
@@ -6295,3 +6298,176 @@ ECE (expected calibration error) becomes a first-class gate name (61.1) computed
 ### 61.7 Milestone (M50)
 
 **M50** — v0.47 "More specialized scenarios": constraint-aware search (the gate's objective set gains `per_class_f1` / `ece` / `cost` / `monotonic_in` + the richer `compute_actuals`, 61.1); three domain task packs — medical (cost-sensitive imbalanced), finance (temporal horizon), robust (worst-group) — via the §21 loader (61.2); regime/stress scenarios (`fewshot` / `drifting` / `trap`, 61.3); the calibration objective + ensemble-spread predictor (61.4); and the resource-constrained `cost` objective (+ optional frontier `cost_of`, 61.5) — all additive and opt-in, byte-identical under defaults (G2) (A51).
+
+---
+
+## 62. Reporting for a wider range of audiences (v0.48)
+
+Every number a report shows is *already* in `summary.json` / `experiments.jsonl` (or one extra forward pass over the holdout, the §28.2 protocol) — the gap for a wider audience is not more data capture but **reader-facing framing + format breadth**. This round adds an **audience axis** to `report` and one genuinely new bit, `verify`: the same derivations, re-skinned for four readers, plus an independent re-derivation that asserts the reported numbers.
+
+The through-line: *the data is logged; the reader is the variable.* `technical` is the existing report and stays **byte-identical** (the default path, the A52 pin anchor); the other three audiences are pure re-skinning of that same data; `verify` is the chain-of-custody check that an auditor could re-run on the artifacts alone. All additive, opt-in, **no default-path behavior change** (A1–A51 green).
+
+### 62.1 The audience axis (B1)
+
+`report` gains `--audience {exec,domain,technical,regulator}` (62.1.1). `technical` is the default and routes to the existing `_cmd_report` code **unchanged** — `report --run DIR` and `report --run DIR --audience technical` are byte-identical (62.1.4, the pin anchor). The other three dispatch to a new pure module, `audience.py` (62.2–62.4), which is a function only of the already-loaded `summary` / `entries` (+ one holdout pass for `domain`) and never touches the core loop, the gate, or the summary writer.
+
+- **`AUDIENCES`** (62.1.2) — the four reader names, in documented order; the parser's `choices` and `build_view`'s dispatcher share this tuple (one source).
+- **mutual exclusion** (62.1.3) — an audience (other than the default `technical`) is a *human re-skin* and is mutually exclusive with the machine / other-human report paths: `--json`, `--what-if`, `--project`, `--trace`, `--importance`, `--certificate` (rc 1). `--html` is *allowed* and writes `report_<audience>.html`; `--plot` is a no-op for a non-technical audience (the view is a single text/HTML block).
+- **`build_view` / `render_view` / `html_view`** (62.1.4) — the dispatcher and the two renderers. `render_view` is a stable, nested text rendering; `html_view` wraps it in a self-contained `<!DOCTYPE html>…</html>` page. Both are pure and deterministic (G2): a re-render of the same view is byte-identical.
+
+### 62.2 The exec view
+
+`exec_view(summary, entries, diag=None)` (62.2.1) — **one screen**: `what_we_built` (the best spec in plain English via `_spec_in_words` — family + shape, *no hyperparameters*), `target_met` (`target` + `met` + `margin`; `target` may be `None` → `"exploratory — no acceptance target was set"`), `cost` (`wall_seconds` + `experiments_run` + `finished_reason`), `risk` (derived from the logged rejections via `accounting.account_run` + the weakest class when `diag` is present; an all-clear line otherwise), and `go_no_go` (`verdict` ∈ {GO, REVIEW, NO-GO} + a `rationale`).
+
+The **go/no-go rule** (62.2.2) is fixed and hand-computable: no target set → `REVIEW`; no final score → `NO-GO`; final ≥ target → `GO`; final < target but improved on the baseline → `REVIEW` (progress, needs more budget); final < target and not improved → `NO-GO`. No mutation SVGs and no knob values appear (62.2.3).
+
+### 62.3 The domain view
+
+`domain_view(summary, entries, diag=None, extras=None)` (62.3.1) — the clinician/analyst's words: `per_class` (one row per class: label, holdout accuracy %, count, correct), the `weakest_class` ("where it fails"), `calibration` (`ece`, the §61.4 expected-calibration error over the holdout softmax — a single forward pass), and `worked_examples` (the §28.3 error-gallery items, capped at 10). For a regression / non-classification run the absent fields read `None` (rendered as an em-dash / `(none)`) — the view degrades gracefully rather than inventing numbers (62.3.2).
+
+The CLI computes the `domain` extras (`_domain_calibration`) only for a **softmax fitting task with a reconstructible best model** (the `_task_from_summary` / `_best_model_loaders` rule); the ECE is computed inline (a stable softmax, then `calibration.ece`) so `audience.py` never imports a private helper. Any failure degrades to `(None, None)` (None-safe, like `_report_extras`).
+
+### 62.4 The regulator view + data fingerprint
+
+`regulator_view(summary, entries, provenance=None, trace=None, data=None)` (62.4.1) — the **chain of custody**: `tool` / `version`, `task` / `seed` / `target`, the `config_hash` (the §56.1 canonical hash of the run's `run_config`), the `environment` facts (`python` / `numpy` / `extras` / `git_sha`), the `data_fingerprint`, the `chain_of_custody` headline (experiments_run / final_best_score / finished_reason), and the full `decision_trace` (the §41.2 trace). Every field renders even when a source is absent (it reads `None`), so a partial run still yields a legible audit block.
+
+**`data_fingerprint(task_config)`** (62.4.2) — a bounded, pure fingerprint of the run's dataset: a single **file** → its content `sha256` (`kind='file'`); a **directory** (image / audio tasks) → a manifest `sha256` over the sorted `(relpath, size)` pairs — no byte reads, so a large corpus never blocks (`kind='dir'`). Degrades to `None` on a missing / unreadable path or a non-dict config (pure and bounded, G2). The §41.2 `trace_lines` and the §56.1 `provenance_payload` are reused verbatim (one source for the trace and the certificate).
+
+### 62.5 `verify --run DIR`
+
+`verify_run(run_dir)` (62.5.1) — the one genuinely new bit: **independently re-derive every reported number** from `experiments.jsonl` + `summary.json` and assert them (the auditor re-runs the arithmetic from the artifacts alone). Each check is `{name, ok, expected, actual}` and is **included only when both sides are present** (we never assert an unreported number). The checks:
+
+- `experiments_run` — the count of `kind=experiment` rows (== `bm.used_experiments`);
+- `baseline_score` — the first baseline row's `holdout_score`;
+- `final_best_score` — the **sequential running-best reconstruction** (the baseline seeds it, an accepted experiment raises it if higher, a curriculum step-up re-pins it to `new_baseline_score` — the §39.2.2 rule `accounting` / `simulate` both use);
+- `improvement_factor` — final / baseline (when baseline > 0);
+- `mutation_win_rate` — per-field trials/wins, re-derived exactly as `_write_artifacts` builds it (exact equality);
+- `kinds_valid` — every row's `kind` ∈ `LOG_KINDS` (the §35.1 registry);
+- `wall_seconds_consistency` — `sum(train_seconds over baseline+experiment rows) <= wall_seconds`.
+
+**`autorefine verify --run DIR`** (62.5.2) returns **rc 0** when all checks pass, **rc 2** when one or more FAIL (a number the log does not support), and **rc 1** on a missing / invalid run dir. `render_verify` prints a PASS/FAIL headline + one line per check. Pure over the two artifacts; no training, no side effects (G2).
+
+### 62.6 Acceptance (A52)
+
+- **62.1 axis** — `AUDIENCES == ("exec","domain","technical","regulator")`; `build_view` dispatches each and raises `ValueError` on an unknown name; **`report --run DIR --audience technical` is byte-identical to `report --run DIR`** (the pin anchor); `--audience exec` is mutually exclusive with `--json` / `--what-if` / `--project` / `--trace` / `--importance` / `--certificate` (rc 1).
+- **62.2 exec** — `exec_view` on a synthetic summary exposes `what_we_built` / `target_met` (met + margin) / `cost` / `risk` / `go_no_go` (verdict ∈ {GO,REVIEW,NO-GO}); the margin and the go/no-go rule are hand-computed (target-met → GO; improved-but-below → REVIEW; no target → REVIEW); `render_view` is non-empty with the key phrases.
+- **62.3 domain** — `domain_view` with a synthetic `diag` yields the per-class rows, the weakest class, the `ece` (when provided), and the worked examples (when provided); a regression run (no `diag`) degrades to graceful n/a.
+- **62.4 regulator** — `regulator_view` carries the chain-of-custody fields (config_hash, seed, env facts, data fingerprint, decision trace); `data_fingerprint` of a temp file == `hashlib.sha256(bytes)`, of a temp dir == a stable manifest hash, and of a missing path → `None`.
+- **62.5 verify** — `verify_run` on a hand-written, consistent run dir passes all checks; a deliberately mismatched summary (wrong `final_best_score`) fails ≥ 1 check; a bogus `kind` fails `kinds_valid`; a missing artifact returns `error` (rc 1).
+- **renderers** — `html_view` contains `<!DOCTYPE html>` / `</html>` + the audience name and key values; `render_view` / `html_view` are byte-stable (G2).
+- **CLI** — a real run (tiny budget) → `report --audience exec --run DIR` rc 0 + exec phrases; `report --audience technical --run DIR` byte-identical to `report --run DIR`; `report --audience exec --json` rc 1; `verify --run DIR` rc 0 on a consistent run, rc 2 on a mismatched one, rc 1 on a missing dir.
+- **exports (62.6.7)** — the new top-level names (`AUDIENCES`, `exec_view`, `domain_view`, `technical_view`, `regulator_view`, `build_view`, `render_view`, `html_view`, `data_fingerprint`, `verify_run`, `render_verify`) are in `__all__` (33.1).
+- **version + regression** — the version steps to `0.48.0` in both sources (33.1); A1–A51 stay green (no default-path behavior change; the `technical` / default report byte-identity pin untouched); the A25 index advances (48 acceptance rows; `defined == set(range(1, 53))`).
+
+### 62.7 Milestone (M51)
+
+**M51** — v0.48 "Reporting for a wider range of audiences": the `report --audience` axis (62.1) re-skins the already-logged data for `exec` (go/no-go, 62.2), `domain` (per-class / calibration / where-it-fails, 62.3), `regulator` (chain-of-custody + data fingerprint, 62.4), and `technical` (today's report, byte-identical); plus `verify --run DIR` (62.5) — the independent re-derivation that asserts the reported numbers — all additive and opt-in, byte-identical under defaults (G2) (A52).
+
+## 63. Reporting for a wider range of audiences — formats, the user guide, the decision (v0.49)
+
+v0.48 (SPEC.md 62) fixed the **reader** axis (exec / domain / technical / regulator). This round adds three more artifacts for the *same already-logged data*: a **format axis** (`--format md|txt|pdf`, B2), a guide for the person who **consumes** the predictions (`--user`, B3), and a **decision artifact** (`--decision`, B4). All live in one new pure leaf module, `reporting.py`.
+
+The through-line: *the data is logged; the artifact is the variable.* Every view is a pure function of the already-loaded `summary` / `entries` (+ one bounded holdout pass for B3, + the registry for B4's seed spread); `reportlab` is the only new dependency and it is a **lazy optional extra** (PDF only). All additive, opt-in, **no default-path behavior change** — the default `report --run DIR` stays byte-identical (63.5, the A53 pin anchor; A1–A52 green).
+
+### 63.1 Format breadth: `--format md|txt|pdf` (B2)
+
+`report --format {md,txt,pdf}` (63.1.1) re-renders the technical report alongside the existing HTML dossier + zip share — Markdown for wikis / PRs / Slack, plain text for email / terminals, and a self-contained PDF (reportlab) for the "send this to a colleague" case. It is **pure rendering** of the same data the default report already loads; nothing is retrained or re-derived.
+
+- **`REPORT_FORMATS`** (63.1.2) — `("md", "txt", "pdf")` in documented order; the parser's `choices` share this tuple (one source).
+- **`build_report_doc(summary, entries)`** (63.1.4) — the single doc model for all three formats: `title`; `headline` (the eight run key/values in documented order); `win_rate` (the 26.1 per-field trials/wins/win_rate rollup via `dashboard.field_stats`, coerced to ints — one home); `log` (one row per `experiments.jsonl` entry: kind / accepted / score / gen_gap / mutation); `best_spec`.
+- **`render_report_md` / `render_report_txt` / `render_report_pdf`** (63.1.4) — `md`: `#` headings + `|` tables + a fenced `json` block for the spec; `txt`: aligned columns with **no** table pipes and **no** code fences; `pdf`: reportlab platypus tables. All three are **pure and byte-stable** (G2): a re-render of the same doc is byte-identical. `reportlab` is imported **only inside** `render_report_pdf` — a clean `ImportError` ("pip install reportlab") when the extra is absent, so the core stays stdlib+numpy. PDF determinism (G2): the build runs with `invariant=1` and the trailer `/ID` (otherwise random per build) is replaced with the `sha256` of the canonical doc, so a re-render is byte-identical.
+- **`render_report(fmt, doc)`** (63.1.5) — the text dispatcher (`md` / `txt`); `pdf` raises `ValueError` (a file output is served by `render_report_pdf`); an unknown format raises `ValueError`.
+- **CLI rules** (63.1.3) — `--format` is a *self-contained human rendering* and is mutually exclusive with the machine / other-human report paths (`--json`, `--what-if`, `--project`, `--trace`, `--importance`, `--certificate`, `--html`, and a non-technical `--audience` — rc 1, the 62.1.3 pattern); `--plot` is a no-op (the document is self-contained). `md` / `txt` print to stdout (rc 0); `pdf` writes `report.pdf` into the run dir and prints a `pdf : <path>` line (rc 0), or rc 1 with the install hint when reportlab is missing.
+
+### 63.2 The end-user guide: `--user` (B3)
+
+`user_guide_view(summary, entries, task=None, model=None, n_examples=5)` (63.2.1) — "what this model does" for the person who will *consume* the predictions, not the one who trained it: `what_it_predicts` (input / output / metric / direction, from the task's `head` — softmax → accuracy & classes; mse → MSE & outputs), `examples` (the first `n_examples` holdout rows: input / true / predicted / confidence / correct), `confidence` (the softmax max-probability read: `mean_max_prob` + `frac_at_least_0.8` + `n`), `when_to_distrust` (the <80%-confident share + the mispredicted sample rows), `known_limitations` (sample size, `finished_reason`, overfit rejections via `accounting`), and `how_to_read` (the metric in plain words + the target margin + the seed-variance caveat).
+
+- **degradation** (63.2.2) — a task with no `holdout_rows` (episode / synthetic tasks) or an empty / missing split yields `examples=None` + an explanatory `examples_note` ("this task has no per-row holdout split", "no best model to score with", …) — the guide **never invents rows**; `task=None` degrades the whole block to the no-task note while `how_to_read` still renders (it is pure summary data). An mse head yields numeric examples with a 5%-relative tolerance `correct` and `confidence=None`. One bounded holdout pass (28.2); any exception degrades to the note (the run dir / model must not crash the guide).
+- **CLI rules** (63.2.3) — `--user` is mutually exclusive with the machine / other-human report paths (rc 1, the 63.1.3 set + `--format` / `--decision`); the task/model are reconstructed with the `_report_extras` rule (28.2), each degrading independently (`_user_guide_sources`), so a known task with a missing best model still yields the "what it predicts" + "how to read" blocks. Informational, rc 0. `render_user_guide` is byte-stable (G2).
+
+### 63.3 The decision artifact: `--decision` (B4)
+
+`decision_view(summary, entries, proj=None, seed_spread=None, diag=None)` (63.3.1) — the generalized `explain` (result / tried / why / weak / next) as an explicit verdict: `verdict` (**reuses the 62.2.2 go/no-go rule — one home**), `target_met` (`target` / `met` / `margin`), `confidence` (seed variance `n_runs` / `min` / `max` / `spread` + the logged CI / overfit rejection counts + a one-line `assessment`), `failure_modes` (top-3 of: weakest class (28.2 `diag`), overfit rejections, CI rejections, budget-stop-below-target), and `next_step` (`action` / `detail` / `hints`).
+
+- **the next-step rule** (63.3.2) — `GO` → `ship` (confirm with a seed-variance sweep). Otherwise the 41.1 projection (`project_budget` over the registry's same-task points with `--target`) drives it: `more` → `more_budget` ("run ~N more experiment(s) … asymptote Vmax"); `ceiling` → `relax_or_expand` ("relax the target to <= Vmax, or expand the model space"); `insufficient` → `collect_history`; no projection → `investigate` (inspect the trace + the rejection buckets). Targeted `hints` (relax the gen-gap gate when overfits were rejected; add features for a <80% class) ride along. All pure over the already-loaded data (G2); `render_decision` is byte-stable.
+- **CLI rules** (63.3.3) — `--decision` is mutually exclusive with the machine / other-human report paths (rc 1, the 63.1.3 set + `--format` / `--user`). The `proj` / `seed_spread` reuse the 41.1 machinery (registry + `projection_points` + `project_budget`, `--target` as the target — the same defaults as `--project`), degrading to `None` when the registry is absent; `diag` comes from `_report_extras` (None-safe, 28.5). Informational, rc 0.
+
+### 63.4 The shared guard (63.4.1)
+
+The three new human views share one exclusive-flag tuple (`_EXCLUSIVE_FLAGS`: `--json` / `--what-if` / `--project` / `--trace` / `--importance` / `--certificate` / `--html`) + the non-technical-`--audience` rule (63.4.1), so the guard blocks cannot drift — the 62.1.3 pattern, one home. Sibling views (`--user` vs `--format` / `--decision`, and vice versa) are additionally exclusive (63.2.3 / 63.3.3).
+
+### 63.5 The default path is untouched (the A53 pin anchor)
+
+With none of `--format` / `--user` / `--decision` set, `report --run DIR` routes through the existing code **unchanged** — byte-identical to pre-v0.49 (extending the 62.1.4 `technical` anchor). No logged field, gate, summary writer, or default rendering changes (A1–A52 stay green).
+
+### 63.6 Acceptance (A53)
+
+- **63.1 formats** — `REPORT_FORMATS == ("md","txt","pdf")`; `build_report_doc` on a synthetic summary/entries exposes the headline order, the int `win_rate` rollup (hand-computed trials/wins), the per-entry log, and the best spec; `render_report_md` carries the `#` headings, the `|` tables, and the fenced spec; `render_report_txt` has no pipes/fences; all three renderers are byte-stable (G2), including two `render_report_pdf` builds of the same doc (byte-identical, `%PDF` header); `render_report` dispatches md/txt, raises `ValueError` for `pdf` and for an unknown format.
+- **63.2 user guide** — `user_guide_view` over a synthetic softmax task + model: `what_it_predicts` (accuracy / 3 classes, hand-computed from `head`/`class_values`), the examples with hand-computed softmax max-probabilities (e.g. `1/(1+2e^-3)` → 0.9094) and `mean_max_prob` / `frac_at_least_0.8`, the `when_to_distrust` + `known_limitations` lines, and the `how_to_read` margin (97 vs 95 → `+2`); a task without `holdout_rows` degrades to the no-split note (never invented rows); an mse head yields tolerance-`correct` examples with `confidence=None`; `render_user_guide` is byte-stable.
+- **63.3 decision** — `decision_view` hand-computed across the verdict branches: GO → `ship`; below-target + `proj=more` → `more_budget` ("run ~N more", the asymptote); `proj=ceiling` → `relax_or_expand`; `insufficient` / absent → `collect_history` / `investigate`; `target_met` (met + margin), the seed-variance block (n_runs/min/max/spread), the top-3 `failure_modes` cap, and the `render_decision` byte-stability.
+- **CLI** — a real tiny run → `report --run DIR --format md` rc 0 (headings + tables), `--format txt` rc 0 (no fences/pipes), `--format pdf` rc 0 + `report.pdf` in the run dir (byte-identical on re-run, the G2 CLI pin); `--user` rc 0 + the guide phrases (episode task → the no-split note); `--decision` rc 0 + verdict / next-step phrases; mutual exclusion rc 1 (`--format md --json`, `--user --json`, `--decision --what-if …`, `--user --format md`, `--decision --audience exec`); the default `report --run DIR` stays byte-identical (63.5 pin anchor).
+- **exports (63.6.5)** — the ten new top-level names (`REPORT_FORMATS`, `build_report_doc`, `render_report_md`, `render_report_txt`, `render_report_pdf`, `render_report`, `user_guide_view`, `render_user_guide`, `decision_view`, `render_decision`) are in `__all__` (33.1).
+- **version + regression** — the version steps to `0.49.0` in both sources (33.1); A1–A52 stay green (no default-path behavior change; the default / `technical` report byte-identity pins untouched); the A25 index advances (49 acceptance rows; `defined == set(range(1, 54))`).
+
+### 63.7 Milestone (M52)
+
+**M52** — v0.49 "Reporting for a wider range of audiences (formats / user / decision)": `report --format md|txt|pdf` (63.1, one shared doc, byte-stable renderers, lazy optional `reportlab`) re-skins the technical report for wikis / email / PDF; `report --user` (63.2) is the "what this model does" guide for the prediction's consumer (real holdout examples, when to distrust, how to read the number — never inventing rows); and `report --decision` (63.3) is the go/no-go + margin + confidence + top-3 failure-modes + one-concrete-next-step artifact — all additive and opt-in, byte-identical under defaults (G2) (A53).
+
+## 64. Reporting for a wider range of audiences — the benchmark report + uncertainty on headlines (v0.50)
+
+v0.49 (SPEC.md 63) completed the per-run artifacts (formats / user / decision). This round turns "one run" into "a reportable program of runs" and puts the seed variance on every headline number:
+
+- **B5 — the benchmark / longitudinal report** (64.1): `report --benchmark`, a runs-dir-level view (a `--history` sibling) over the run registry — the per-task **leaderboard** (best score × spec fingerprint × gate), the **generalization matrix** (same spec across tasks), and the **trend** (best score across runs).
+- **B6 — uncertainty on every headline number** (64.2): the existing same-task seed spread (the 41.1 machinery) re-skinned as `"96.4 ± 0.8, 5 runs"` on the headline figures of the audience views, the decision artifact, and the user guide — one new pure leaf, `uncertainty.py`, as the single home for the statistics.
+
+The through-line: *the data is logged; the scope is the variable.* B5 reads only `registry.json` + each run's `summary.json` (None-safe); B6 is a pure function of the summary's `final_best_score` + the same-task finals. No training, no new logged fields, no new dependencies. All additive, opt-in, **no default-path behavior change** — the default `report --run DIR` stays byte-identical (64.4, the A54 pin anchor; A1–A53 green).
+
+### 64.1 The benchmark / longitudinal report: `report --benchmark` (B5)
+
+`report --benchmark` (64.1.1) renders the program-of-runs view from the run registry (`--runs-dir`, default `./runs` — the same flag the 36.2 `--history` path uses): which tasks have been attacked, how well each stands now, which specs travel across tasks, and how the best score moved over the run history. It is **pure derivation** over `registry.load_registry` rows (append order = chronological) + an optional `run_id -> best_spec` map; nothing is retrained.
+
+- **flag + renderer** (64.1.1) — text rendering (`render_benchmark`) on stdout by default; `--json` prints the view model (the `benchmark_view` dict). `render_benchmark_md` is the library / app form (Markdown tables) and is deliberately **not** a CLI flag (scope trim, 64.1.4).
+- **`spec_fingerprint(spec)`** (64.1.2) — the spec's identity: the first 12 hex chars of the SHA-256 of the canonical (`sort_keys`, compact separators) JSON of a spec dict — the 38.1.3 `config_fingerprint` rule applied to a *model spec*. Same spec → same fp regardless of key order; a non-dict or empty spec → `None` (rendered as an em-dash, never invented). Naming: the top-level `autorefine.spec_fingerprint` remains the v0.46 whatif "DNA" bars (one name, one binding); this identity hash lives in `reporting` (64.1.2) and is consumed by `benchmark_view` internally.
+- **`benchmark_view(entries, spec_map=None)` — the view rules** (64.1.3) —
+  - `leaderboard` — per task (sorted by name): `n_runs`; `best_score` (max finite final); `best_run` (the run id achieving it — **ties keep the first in append order**, i.e. chronological); `spec_fp` (the best run's fingerprint); `met_target` (the best run's gate, PASS/MISS/— via `registry.gate_label`). A task with no finite scores degrades to all-`None` + the `—` gate.
+  - `generalization` — fingerprint → `{spec_fp, tasks: {task: best score}, runs, n_tasks}`, **only** fingerprints seen on ≥ 2 distinct tasks (a spec on one task is not a generalization signal); runs with an unknown spec fall into one shared `"?"` bucket so the matrix groups them honestly; sorted by `spec_fp`.
+  - `trend` — per task (sorted) + a `global` chain of `{run_id, seed, score, best_so_far}`: `best_so_far` is the running max of finite scores, and a non-finite score **carries the previous best forward** (`None` until the first finite one).
+- **renderers** (64.1.4) — `render_benchmark` (aligned columns, **no** table pipes — terminal friendly) and `render_benchmark_md` (`#` headings + `|` tables). Both are **pure and byte-stable** (G2): a re-render of the same view is byte-identical; an empty view renders `(no runs)` without crashing.
+- **CLI rules** (64.1.5) — `--benchmark` is a **runs-dir-level** view: it is mutually exclusive with `--run`, `--history`, and every single-run view flag (`--what-if`, `--project`, `--trace`, `--importance`, `--certificate`, `--format`, `--user`, `--decision`) and with a non-technical `--audience` (rc 1, the 62.1.3 pattern; the table is symmetric — 64.3.1). It shares `--runs-dir` and `--json` with `--history`. An empty registry is rc 1 + a "finish at least one run" hint (the 38.3.3 rule). The `spec_map` is loaded None-safe — an unreadable / missing run dir degrades to an em-dash fingerprint, never a crash.
+
+### 64.2 Uncertainty on every headline number (B6)
+
+`uncertainty.py` (64.2.1) is the **single home** for the seed-spread statistics so the audience views, the decision / user-guide views, and the CLI all agree — the `accounting` / `memory` one-constant pattern. Stdlib only; pure and deterministic (G2): same inputs, same dict / string; `bool` excluded from the numeric population (the 62.5 / 63 `_num` convention); non-finite values are skipped, never propagated.
+
+- **the helpers** (64.2.1) —
+  - `seed_spread_stats(scores)` → `{n_runs, min, max, mean, spread}` (arithmetic mean; `spread = max − min`) over the finite non-bool values; `None` on an empty population. A **single run is a valid one-point population** (spread 0) — the caller decides whether to show it.
+  - `format_pm(value, plus_minus)` → the compact `"97 ± 0.8"` read (`%g` — no trailing zeros; U+00B1).
+  - `headline_uncertainty(best_score, seed_spread)` → `{value, plus_minus, n_runs, text}` where `plus_minus` is the **half-spread** (`(max − min) / 2`) and `text` is the ready-to-print `"<value> ± <half-spread> (N runs)"` line. **`None` when there is no finite headline value, no spread population, or fewer than 2 runs** — a single run has no variance to display; the views then render the block as `—` (64.2.3).
+- **the integration points** (64.2.2) —
+  - `audience` — a shared `_uncertainty_block` (one home; wraps `headline_uncertainty` on the summary's `final_best_score`); `exec_view` / `domain_view` / `regulator_view` / `technical_view` each gain a `seed_spread=None` kwarg + an `"uncertainty"` key (`None` → rendered as `—`); `build_view(..., seed_spread=None)` forwards to all four.
+  - `reporting` — `decision_view`'s result dict gains `"headline_uncertainty"` (None-safe, purely additive — the A53 pins assert specific keys and stay intact); `user_guide_view(..., headline=None)` appends `" Across same-task runs the final score reads <text>"` to `how_to_read` when given.
+  - `cli` — `_seed_spread_for(run_dir, summary)` reuses the **41.1 machinery** (`load_registry` + `projection_points`) one home for the three human views: the same-task final scores, or `None` on a missing registry / any failure (the views then render the block as `—`). Wired into `_cmd_report_audience` (→ `build_view`) and `_cmd_report_user` (→ `user_guide_view.headline`); `_cmd_report_decision` already carries the spread (63.3.3) and now also gets the `headline_uncertainty` read from the view itself.
+- **pins** (64.2.3) — absent spread → every `uncertainty` block renders `—`, the guide omits the extra line, `headline_uncertainty` is `None`; the A52/A53 asserted output (key sets, substrings, byte-identity of the default report) is **unchanged**.
+
+### 64.3 The shared guard (64.3.1)
+
+`--benchmark` is added to **every** single-run guard block — the `_EXCLUSIVE_FLAGS` tuple (the 63.4.1 home covering the `--format` / `--user` / `--decision` guards), the `--what-if` block (40.2.1), the `--importance` block (44.2.2), the `--certificate` block (56.1.1), the `--project` / `--trace` block (41.1.1 / 41.2.1), and the `_cmd_report_audience` guard (62.1.3) — so the table stays symmetric: `--benchmark X` and `X --benchmark` are both rc 1, and no guard block can drift. `--benchmark` vs `--run` / `--history` (scope mismatch: one is a run-dir view, the other runs-dir-level) is the same class of rule as `--history` vs `--run` (38.3.1).
+
+### 64.4 The default path is untouched (the A54 pin anchor)
+
+With `--benchmark` unset, `report` routes through the existing code **unchanged** — `report --run DIR` (the technical / default report) stays byte-identical (extending the 63.5 anchor); the audience / user / decision views without a spread render exactly as pre-v0.50 (the A52/A53 anchors). No logged field, gate, summary writer, or default rendering changes (A1–A53 stay green).
+
+### 64.5 Acceptance (A54)
+
+- **64.2.1 uncertainty** — `seed_spread_stats` hand-computed (e.g. `[95.6, 97.2, 96.4]` → `n_runs` 3, `min` 95.6, `max` 97.2, mean, `spread` 1.6; `None` / empty → `None`; a single value → spread 0; bools skipped, never averaged); `format_pm(97.0, 0.8)` → `"97 ± 0.8"`; `headline_uncertainty` → `None` when the headline is absent, the population empty, or 1 run; with ≥ 2 runs the `{value, plus_minus, n_runs, text}` shape (half-spread `plus_minus`, `text == "97 ± 0.8 (2 runs)"`).
+- **64.1.2 fingerprint** — `spec_fingerprint` is 12 hex chars; key-order invariant (the same spec in two orderings → one fp); a different spec → a different fp; `None` / `{}` → `None`.
+- **64.1.3 view** — `benchmark_view` on a synthetic registry: the per-task leaderboard (best + `best_run` with the tie-goes-to-first rule, the gate label via `gate_label`), the generalization matrix (only ≥ 2 tasks, the `"?"` bucket for unknown specs, sorted by fp), and the trend `best_so_far` chains (a non-finite score carrying the previous best forward; the `global` chain). `render_benchmark` + `render_benchmark_md` carry the section headers, are byte-stable (G2), and `render_benchmark({})` does not crash.
+- **64.2.2 views** — `exec_view` / `domain_view` / `technical_view` / `regulator_view` with `seed_spread` → the correct hand-computed `uncertainty` block; without → `None` (the A52 pin shape: the pre-v0.50 keys unchanged); `decision_view(..., seed_spread=...)` gains a correct `headline_uncertainty` (`None` with no spread — the A53 pin intact); `user_guide_view(..., headline=...)` appends the spread line to `how_to_read` (`headline=None` → byte-identical to pre-v0.50).
+- **CLI** — a real tiny run → `report --benchmark --runs-dir DIR` rc 0 + the leaderboard / generalization / trend headers; `--benchmark --json` parses as JSON with the view keys; an empty registry dir → rc 1 + the hint; symmetric exclusions rc 1 (`--benchmark --run DIR`, `--benchmark --history`, `--benchmark --user`, `--benchmark --format md`, `--benchmark --decision`, `--benchmark --what-if score>=90`, `--benchmark --audience exec`, and the reverse `--user --benchmark`, `--audience exec --benchmark`, `--what-if … --benchmark`); the default `report --run DIR` stays byte-identical to `--audience technical` (64.4 pin anchor).
+- **exports (64.5.5)** — the new top-level names (`benchmark_view`, `render_benchmark`, `render_benchmark_md`, `seed_spread_stats`, `format_pm`, `headline_uncertainty`) are in `__all__` (33.1); the B5 spec-identity hash is `autorefine.reporting.spec_fingerprint` (64.1.2).
+- **version + regression** — the version steps to `0.50.0` in both sources (33.1); A1–A53 stay green (no default-path behavior change; the A52/A53 byte-identity pins untouched); the A25 index advances (50 acceptance rows; `defined == set(range(1, 55))`).
+
+### 64.6 Milestone (M53)
+
+**M53** — v0.50 "Reporting for a wider range of audiences (benchmark + uncertainty)": `report --benchmark` (64.1, the runs-dir-level longitudinal view — per-task leaderboard with spec fingerprints, the same-spec-across-tasks generalization matrix, and the best-score trend — pure derivation over the registry, byte-stable renderers, symmetric guards) turns one run into a reportable program of runs; and B6 (64.2) puts the seed variance on every headline number — `"96.4 ± 0.8, 5 runs"` on the audience views, the decision artifact, and the user guide — with `uncertainty.py` as the single home for the statistics (≥ 2 runs to display a spread, so single-run output is untouched). All additive and opt-in, byte-identical under defaults (G2) (A54).

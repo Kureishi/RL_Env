@@ -20,6 +20,8 @@ import time
 import zipfile
 from pathlib import Path
 
+import numpy as np  # core dependency (used by the 62.3 domain ECE path)
+
 from .config import Budget, ModelSpec
 from .diagnostics import holdout_difficulty, holdout_diagnostics
 from .gate import (
@@ -87,6 +89,30 @@ from .provenance import (  # 56.1 (v0.42): the provenance certificate
     provenance_card,
     provenance_payload,
 )
+from .audience import (  # 62 (v0.48, B1): the audience axis + verify
+    AUDIENCES,
+    build_view,
+    data_fingerprint,
+    html_view,
+    render_verify,
+    render_view,
+    verify_run,
+)
+from .reporting import (  # 63 (v0.49, B2/B3/B4) + 64.1 (v0.50, B5)
+    REPORT_FORMATS,
+    benchmark_view,
+    build_report_doc,
+    decision_view,
+    render_benchmark,
+    render_benchmark_md,
+    render_decision,
+    render_report,
+    render_report_pdf,
+    render_user_guide,
+    user_guide_view,
+)
+from .uncertainty import headline_uncertainty  # 64.2 (v0.50, B6): the ± read
+from .calibration import ece as _ece  # 61.4: the domain-view calibration metric
 from .preflight import (  # 43.1 (v0.29): the data-health preflight leaf
     _SMOKE_WALL_SECONDS,
     data_health,
@@ -1011,6 +1037,55 @@ def _cmd_report_history(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_report_benchmark(args: argparse.Namespace) -> int:
+    """SPEC.md 64.1 (v0.50, B5): `report --benchmark` — the benchmark /
+    longitudinal report across the run registry: the per-task leaderboard
+    (best score + spec fingerprint + gate), the same-spec-across-tasks
+    generalization matrix, and the best-score trend across runs. The
+    ``spec_map`` (run id -> best_spec) is loaded None-safe from each run
+    dir's ``summary.json`` (64.1.5 — an unreadable dir degrades to an
+    em-dash fingerprint, never a crash). ``--json`` prints the view model;
+    otherwise the text rendering (``render_benchmark_md`` is the library /
+    app form). Empty registry -> rc 1 + hint (the 38.3.3 rule)."""
+    runs_dir = Path(args.runs_dir)
+    entries = load_registry(runs_dir)
+    if not entries:
+        print(f"no runs registered in {runs_dir} — finish at least one run "
+              f"first (SPEC.md 64.1.5)", file=sys.stderr)
+        return 1
+    spec_map: dict = {}
+    for e in entries:  # bounded: one small summary.json per registered run
+        rid = e.get("run_id")
+        if not isinstance(rid, str) or not rid or rid in spec_map:
+            continue
+        try:
+            s = json.loads(
+                (runs_dir / rid / "summary.json").read_text(encoding="utf-8"))
+            spec_map[rid] = s.get("best_spec")
+        except (OSError, ValueError):
+            continue  # 64.1.5: an unreadable / missing run dir degrades
+    view = benchmark_view(entries, spec_map)
+    if args.json:
+        print(json.dumps(view, indent=2))
+        return 0
+    print(render_benchmark(view))
+    return 0
+
+
+def _seed_spread_for(run_dir: Path, summary: dict) -> list | None:
+    """SPEC.md 64.2.2 (v0.50, B6): the same-task final-score spread the
+    audience / guide views attach to the headline number — the 41.1
+    machinery (``load_registry`` + ``projection_points``) reused one home
+    for the three human views; degrades to ``None`` on a missing registry
+    or any failure (the views then render the block as ``—``)."""
+    try:
+        reg = load_registry(run_dir.parent)
+        pts = projection_points(reg, summary, run_dir.name)
+        return [s for _e, s in pts] if pts else None
+    except Exception:
+        return None
+
+
 def _print_accounting(acc: dict) -> None:
     """SPEC.md 39.2 (T4): render the \"what happened\" block in the human
     report (pure — a function of the `account_run` result, 39.2.3)."""
@@ -1113,12 +1188,309 @@ def _report_project(args: argparse.Namespace, summary: dict,
               f"experiments total (this run: {e_cur:g}) (SPEC.md 41.1.4)")
 
 
+def _cmd_report_audience(args, audience: str, summary: dict, entries, run_dir):
+    """SPEC.md 62.1 (v0.48, B1): the exec / domain / regulator report.
+
+    Re-skins the already-loaded summary + log (no training, no new capture).
+    The three human-only machine paths (--json / --what-if / --project /
+    --trace / --importance / --certificate) are mutually exclusive with an
+    audience (rc 1); ``--html`` writes ``report_<audience>.html`` and
+    ``--plot`` is a no-op (the audience view is a single text/HTML block)."""
+    for flag, why in (
+        ("json", "--json"), ("what_if", "--what-if"),
+        ("project", "--project"), ("trace", "--trace"),
+        ("importance", "--importance"), ("certificate", "--certificate"),
+        ("fmt", "--format"), ("user", "--user"), ("decision", "--decision"),
+        ("benchmark", "--benchmark"),  # 64.3.1 (v0.50)
+    ):
+        if getattr(args, flag, None):
+            print(f"--audience {audience} is mutually exclusive with {why} "
+                  f"(SPEC.md 62.1.3 / 63.4.1)", file=sys.stderr)
+            return 1
+    base_extras = _report_extras(summary, run_dir)  # diagnostics / gallery
+    if audience == "domain":
+        extras = dict(base_extras)
+        ece, diff = _domain_calibration(summary, run_dir)
+        if ece is not None:
+            extras["ece"] = ece
+        if diff is not None:
+            extras["difficulty"] = diff
+    else:
+        extras = None
+    provenance = trace = data = None
+    if audience == "regulator":
+        provenance, trace, data = _regulator_sources(summary, entries, run_dir)
+    # 64.2.2 (B6): the ± read on the headline number — the same-task seed
+    # spread (the 41.1 machinery), degrading to None (renders as —).
+    seed_spread = _seed_spread_for(run_dir, summary)
+    view = build_view(audience, summary, entries, diag=base_extras["diagnostics"],
+                      extras=extras, provenance=provenance, trace=trace,
+                      data=data, seed_spread=seed_spread)
+    print(render_view(view, audience))
+    if getattr(args, "html", False):
+        out = run_dir / f"report_{audience}.html"
+        out.write_text(html_view(audience, view), encoding="utf-8")
+        print(f"html    : {out}")
+    return 0
+
+
+# --- 63 (v0.49, B2/B3/B4): formats + the end-user guide + the decision -------
+
+# 63.4.1 (B2/B3/B4): the machine / other-human report paths each new view is
+# mutually exclusive with — one shared tuple so the three guard blocks cannot
+# drift (the 62.1.3 pattern, extended with the sibling human views).
+_EXCLUSIVE_FLAGS = (
+    ("json", "--json"), ("what_if", "--what-if"),
+    ("project", "--project"), ("trace", "--trace"),
+    ("importance", "--importance"), ("certificate", "--certificate"),
+    ("html", "--html"),
+    ("benchmark", "--benchmark"),  # 64.3.1 (v0.50): runs-dir-level view
+)
+
+
+def _exclusive_guard(name: str, args, spec_ref: str) -> int | None:
+    """63.4.1 (v0.49): print + ``1`` when ``args`` sets any mutually
+    exclusive flag for the human view ``name``; else ``None`` (proceed).
+    A non-technical ``--audience`` is always exclusive too."""
+    for flag, why in _EXCLUSIVE_FLAGS:
+        if getattr(args, flag, None):
+            print(f"{name} is mutually exclusive with {why} ({spec_ref})",
+                  file=sys.stderr)
+            return 1
+    if getattr(args, "audience", "technical") != "technical":
+        print(f"{name} is mutually exclusive with a non-technical "
+              f"--audience ({spec_ref})", file=sys.stderr)
+        return 1
+    return None
+
+
+def _cmd_report_format(args, fmt: str, summary: dict, entries, run_dir: Path):
+    """SPEC.md 63.1 (v0.49, B2): the technical report in another format —
+    ``md`` / ``txt`` to stdout (wikis / PRs / email / terminals), ``pdf``
+    to ``report.pdf`` in the run dir (``reportlab`` is an optional extra;
+    a clean rc 1 with the install hint when it is absent). One shared
+    ``doc`` (``build_report_doc``) feeds all three renderers, so a
+    re-render of the same doc is byte-identical (G2). ``--plot`` is a
+    no-op (the document is self-contained)."""
+    rc = _exclusive_guard(f"--format {fmt}", args, "SPEC.md 63.1.3")
+    if rc is not None:
+        return rc
+    if getattr(args, "user", False) or getattr(args, "decision", False):
+        print("--format is mutually exclusive with --user/--decision "
+              "(SPEC.md 63.1.3)", file=sys.stderr)
+        return 1
+    doc = build_report_doc(summary, entries)
+    if fmt == "pdf":
+        out = run_dir / "report.pdf"
+        try:
+            render_report_pdf(doc, out)
+        except ImportError as exc:  # reportlab is an optional extra
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(f"pdf     : {out}")
+        return 0
+    print(render_report(fmt, doc))
+    return 0
+
+
+def _user_guide_sources(summary: dict, run_dir: Path):
+    """SPEC.md 63.2 (v0.49, B3): the ``(task, model)`` for the end-user
+    guide — each degrades to ``None`` independently (the `_report_extras`
+    rule), so a known task with a missing / unreadable best model still
+    yields the "what it predicts" + "how to read" blocks."""
+    task = None
+    try:
+        task = _task_from_summary(summary)
+    except (ValueError, FileNotFoundError):
+        task = None
+    model = None
+    if task is not None:
+        family = (summary.get("best_spec") or {}).get("model_family", "mlp")
+        loaders = _best_model_loaders()
+        if family in loaders:
+            try:
+                model = loaders[family](str(run_dir / "best_model.npz"))
+            except (ValueError, FileNotFoundError):
+                model = None
+    return task, model
+
+
+def _cmd_report_user(args, summary: dict, entries, run_dir: Path) -> int:
+    """SPEC.md 63.2 (v0.49, B3): the "what this model does" guide for the
+    person who will *consume* the predictions — what it predicts, a few
+    real input->output holdout examples, when to distrust it, known
+    limitations, and how to read the number. One bounded holdout pass
+    (28.2); episode / synthetic tasks degrade to an explanatory note
+    (never invented rows). Informational, rc 0."""
+    rc = _exclusive_guard("--user", args, "SPEC.md 63.2.3")
+    if rc is not None:
+        return rc
+    if getattr(args, "fmt", None) is not None or getattr(args, "decision", False):
+        print("--user is mutually exclusive with --format/--decision "
+              "(SPEC.md 63.2.3)", file=sys.stderr)
+        return 1
+    task, model = _user_guide_sources(summary, run_dir)
+    # 64.2.2 (B6): the ± read on the headline number (None-safe — a single
+    # run has no spread to display; the A53 pin keeps its output intact).
+    hl = headline_uncertainty(
+        summary.get("final_best_score"), _seed_spread_for(run_dir, summary))
+    view = user_guide_view(summary, entries, task=task, model=model,
+                           headline=hl)
+    print(render_user_guide(view))
+    return 0
+
+
+def _cmd_report_decision(args, summary: dict, entries,
+                         run_dir: Path) -> int:
+    """SPEC.md 63.3 (v0.49, B4): the go/no-go decision artifact — verdict
+    (the 62.2.2 rule, one home) + target margin, the confidence read
+    (same-task seed variance + the logged CI / overfit rejections), the
+    top-3 failure modes, and one concrete next step (the 41.1 projection
+    with ``--target`` feeds it: "run ~N more" / "relax or expand" /
+    "collect history"). The ``seed_spread`` is the registry's same-task
+    final scores (the 41.1.2 points). Informational, rc 0."""
+    rc = _exclusive_guard("--decision", args, "SPEC.md 63.3.3")
+    if rc is not None:
+        return rc
+    if getattr(args, "fmt", None) is not None or getattr(args, "user", False):
+        print("--decision is mutually exclusive with --format/--user "
+              "(SPEC.md 63.3.3)", file=sys.stderr)
+        return 1
+    proj = None
+    pts: list = []
+    try:  # the 41.1 machinery — degrade to None on a missing registry
+        reg = load_registry(run_dir.parent)
+        pts = projection_points(reg, summary, run_dir.name)
+        e_cur = summary.get("experiments_run")
+        if not (isinstance(e_cur, (int, float))
+                and not isinstance(e_cur, bool)):
+            e_cur = 0.0
+        proj = project_budget(pts, args.target, e_cur)
+    except Exception:
+        proj = None
+    seed_spread = [s for _e, s in pts] if pts else None
+    diag = _report_extras(summary, run_dir)["diagnostics"]  # None-safe (28.5)
+    view = decision_view(summary, entries, proj=proj,
+                         seed_spread=seed_spread, diag=diag)
+    print(render_decision(view))
+    return 0
+
+
+def _domain_calibration(summary: dict, run_dir):
+    """SPEC.md 62.3 (A52): the domain calibration / difficulty extras — the
+    holdout ECE (the 61.4 ``ece`` over the model's softmax) and the 58.1
+    difficulty ranking, for a softmax fitting task with a reconstructible
+    best model. Degrades to ``(None, None)`` on any failure (None-safe, like
+    ``_report_extras``)."""
+    try:
+        task = _task_from_summary(summary)
+        family = (summary.get("best_spec") or {}).get("model_family", "mlp")
+        loaders = _best_model_loaders()
+        if task is None or family not in loaders \
+                or getattr(task, "head", None) != "softmax":
+            return None, None
+        model = loaders[family](str(run_dir / "best_model.npz"))
+        x, y = task.holdout_rows(200, model)
+        if len(x) == 0:
+            return None, None
+        logits = np.asarray(model.forward(x), dtype=np.float64)
+        probs = _softmax(logits)
+        labels = np.asarray(y, dtype=np.int64).ravel()
+        e = float(_ece(probs, labels))
+        diff = holdout_difficulty(task, model)
+        return e, diff
+    except (FileNotFoundError, ValueError, Exception):
+        return None, None
+
+
+def _regulator_sources(summary: dict, entries, run_dir):
+    """SPEC.md 62.4 (A52): the regulator chain-of-custody sources — the
+    56.1 provenance payload, the 41.2 decision trace, and the 62.4 data
+    fingerprint. The ``target`` follows the ``_cmd_report --certificate``
+    rule (the summary, else the canonical run_config)."""
+    rc_cfg = None
+    rc_path = run_dir / "run_config.json"
+    if rc_path.is_file():
+        try:
+            rc_cfg = json.loads(rc_path.read_text(encoding="utf-8"))
+        except Exception:
+            rc_cfg = None
+    _target = summary.get("target")
+    if _target is None and isinstance(summary.get("run_config"), dict):
+        _target = summary["run_config"].get("target")
+    provenance = provenance_payload(
+        env_provenance(), seed=summary.get("seed"),
+        task=summary.get("task"), target=_target, run_config=rc_cfg)
+    trace = trace_lines(entries)
+    data = data_fingerprint(summary.get("task_config"))
+    return provenance, trace, data
+
+
+def _softmax(logits) -> "np.ndarray":
+    """A stable softmax (the 61.4 ECE needs probabilities; we compute it
+    inline rather than importing ``calibration``'s private helper)."""
+    z = np.asarray(logits, dtype=np.float64)
+    if z.ndim == 1:
+        z = z.reshape(1, -1)
+    z = z - z.max(axis=1, keepdims=True)
+    e = np.exp(z)
+    return e / e.sum(axis=1, keepdims=True)
+
+
+def _cmd_verify(args: argparse.Namespace) -> int:
+    """SPEC.md 62.5 (A52): ``autorefine verify --run DIR`` — independently
+    re-derive every reported number from the run's artifacts and assert
+    them. rc 0 = all checks pass; rc 2 = one or more checks FAIL (a number
+    the log does not support); rc 1 = a missing / invalid run dir."""
+    run_dir = Path(args.run)
+    if not run_dir.is_dir():
+        print(f"verify: no such run dir: {run_dir}", file=sys.stderr)
+        return 1
+    result = verify_run(run_dir)
+    print(render_verify(result, run_dir))
+    if result.get("error"):
+        return 1
+    return 0 if result["passed"] else 2
+
+
 def _cmd_report(args: argparse.Namespace) -> int:
+    # SPEC.md 64.1 (v0.50, B5): --benchmark is a runs-dir-level view (like
+    # --history): mutually exclusive with --run, --history, and every
+    # single-run human view (64.3.1 — the guard table is symmetric); it
+    # shares --runs-dir (and --json) with --history.
+    if getattr(args, "benchmark", False):
+        if args.run is not None:
+            print("--run and --benchmark are mutually exclusive "
+                  "(SPEC.md 64.1.5)", file=sys.stderr)
+            return 1
+        if args.history:
+            print("--history and --benchmark are mutually exclusive "
+                  "(SPEC.md 64.1.5)", file=sys.stderr)
+            return 1
+        for flag, why in (
+            ("what_if", "--what-if"), ("project", "--project"),
+            ("trace", "--trace"), ("importance", "--importance"),
+            ("certificate", "--certificate"), ("fmt", "--format"),
+            ("user", "--user"), ("decision", "--decision"),
+        ):
+            if getattr(args, flag, None):
+                print(f"--benchmark is mutually exclusive with {why} "
+                      f"(SPEC.md 64.1.5)", file=sys.stderr)
+                return 1
+        if getattr(args, "audience", "technical") != "technical":
+            print("--benchmark is mutually exclusive with a non-technical "
+                  "--audience (SPEC.md 64.1.5)", file=sys.stderr)
+            return 1
+        return _cmd_report_benchmark(args)
     # SPEC.md 40.2.1 (v0.26, S2): --what-if is a human counterfactual view,
     # mutually exclusive with the machine (--json) and history paths.
     if getattr(args, "what_if", None):
         if args.history:
             print("--what-if and --history are mutually exclusive "
+                  "(SPEC.md 40.2.1)", file=sys.stderr)
+            return 1
+        if getattr(args, "benchmark", False):
+            print("--what-if and --benchmark are mutually exclusive "
                   "(SPEC.md 40.2.1)", file=sys.stderr)
             return 1
         if args.json:
@@ -1131,9 +1503,10 @@ def _cmd_report(args: argparse.Namespace) -> int:
     if getattr(args, "importance", False):
         if (args.history or args.json or getattr(args, "what_if", None)
                 or getattr(args, "project", False)
-                or getattr(args, "trace", False)):
+                or getattr(args, "trace", False)
+                or getattr(args, "benchmark", False)):
             print("--importance is mutually exclusive with "
-                  "--json/--history/--what-if/--project/--trace "
+                  "--json/--history/--what-if/--project/--trace/--benchmark "
                   "(SPEC.md 44.2.2)", file=sys.stderr)
             return 1
     # SPEC.md 56.1.1 (v0.42): --certificate is a human view — the
@@ -1149,12 +1522,20 @@ def _cmd_report(args: argparse.Namespace) -> int:
             print("--certificate and --history are mutually exclusive "
                   "(SPEC.md 56.1.1)", file=sys.stderr)
             return 1
+        if getattr(args, "benchmark", False):
+            print("--certificate and --benchmark are mutually exclusive "
+                  "(SPEC.md 56.1.1)", file=sys.stderr)
+            return 1
     # SPEC.md 41.1.1/41.2.1 (v0.27): --project / --trace are human views,
     # mutually exclusive with the machine (--json), the history path, and
     # the what-if path (A11 untouched).
     if getattr(args, "project", False) or getattr(args, "trace", False):
         if args.history:
             print("--project/--trace and --history are mutually exclusive "
+                  "(SPEC.md 41.1.1/41.2.1)", file=sys.stderr)
+            return 1
+        if getattr(args, "benchmark", False):
+            print("--project/--trace and --benchmark are mutually exclusive "
                   "(SPEC.md 41.1.1/41.2.1)", file=sys.stderr)
             return 1
         if args.json:
@@ -1185,6 +1566,22 @@ def _cmd_report(args: argparse.Namespace) -> int:
         return 1
     entries = mem.load_experiments()
     run_dir = Path(args.run)
+    # SPEC.md 62.1 (v0.48, B1): the audience axis — exec / domain / regulator
+    # re-skin the same logged data; `technical` (the default) falls through to
+    # the byte-identical path below (62.1.4 / the A52 pin anchor).
+    audience = getattr(args, "audience", "technical")
+    if audience in ("exec", "domain", "regulator"):
+        return _cmd_report_audience(args, audience, summary, entries, run_dir)
+    # SPEC.md 63 (v0.49, B2/B3/B4): three more human renderings of the same
+    # logged data — a format (md/txt/pdf), the end-user guide, and the
+    # decision artifact. Each is opt-in; the default path (no new flag)
+    # stays byte-identical (63.5, the A53 pin anchor).
+    if getattr(args, "fmt", None) is not None:
+        return _cmd_report_format(args, args.fmt, summary, entries, run_dir)
+    if getattr(args, "user", False):
+        return _cmd_report_user(args, summary, entries, run_dir)
+    if getattr(args, "decision", False):
+        return _cmd_report_decision(args, summary, entries, run_dir)
     # SPEC.md 56.1.1 (v0.42): the provenance certificate — the text card on
     # stdout + (with --html) the cover block in report.html. The payload is
     # pure over the run's identity + the env facts (56.1); `target` comes
@@ -2137,6 +2534,7 @@ _EP_REPORT = """examples (README Quickstart):
   autorefine report --run runs/<run_id> --html
   autorefine report --run runs/<run_id> --json
   autorefine report --history
+  autorefine report --benchmark   # v0.50 (SPEC.md 64.1): the longitudinal view
 """
 _EP_WATCH = """examples:
   autorefine watch --run runs/<run_id>
@@ -2361,6 +2759,51 @@ def build_parser() -> argparse.ArgumentParser:
     p_rep.add_argument("--html", action="store_true",
                        help="v0.8 (SPEC.md 22.2): write a self-contained "
                             "report.html (embedded SVGs + tables) into the run dir")
+    p_rep.add_argument("--audience",
+                       choices=AUDIENCES, default="technical",
+                       help="v0.48 (SPEC.md 62.1): the reader the report is "
+                            "written for — exec (go/no-go, one screen), domain "
+                            "(per-class / calibration / where-it-fails), "
+                            "technical (the default, today's report, "
+                            "byte-identical), or regulator (chain-of-custody + "
+                            "decision trace); mutually exclusive with "
+                            "--json/--what-if/--project/--trace/--importance/"
+                            "--certificate; --html writes report_<audience>.html")
+    p_rep.add_argument("--format", dest="fmt", default=None,
+                       choices=REPORT_FORMATS,
+                       help="v0.49 (SPEC.md 63.1): render the technical "
+                            "report in another format — 'md' (Markdown) and "
+                            "'txt' (plain text) to stdout, 'pdf' to "
+                            "report.pdf in the run dir (needs the optional "
+                            "reportlab extra); mutually exclusive with "
+                            "--json/--audience/--what-if/--project/--trace/"
+                            "--importance/--certificate/--html; --plot is a "
+                            "no-op")
+    p_rep.add_argument("--user", action="store_true",
+                       help="v0.49 (SPEC.md 63.2): the end-user guide — what "
+                            "this model does, real input->output holdout "
+                            "examples, when to distrust it, and how to read "
+                            "the number (for the person who consumes the "
+                            "predictions, not the one who trained it); "
+                            "mutually exclusive with the other human views "
+                            "and --json; informational, rc 0")
+    p_rep.add_argument("--decision", action="store_true",
+                       help="v0.49 (SPEC.md 63.3): the go/no-go decision "
+                            "artifact — verdict + margin, confidence (seed "
+                            "variance + the logged CI/overfit rejections), "
+                            "top-3 failure modes, and one concrete next step "
+                            "(--target feeds the 41.1 projection); mutually "
+                            "exclusive with the other human views and --json; "
+                            "informational, rc 0")
+    p_rep.add_argument("--benchmark", action="store_true",
+                       help="v0.50 (SPEC.md 64.1): the benchmark / longitudinal "
+                            "report across the run registry — the per-task "
+                            "leaderboard (best score + spec fingerprint + gate), "
+                            "the same-spec-across-tasks generalization matrix, "
+                            "and the best-score trend across runs; uses "
+                            "--runs-dir (like --history); --json for the "
+                            "machine form; mutually exclusive with --run, "
+                            "--history, and the single-run views")
     _add_config_flag(p_rep)  # 47.1.2
     p_rep.set_defaults(func=_cmd_report)
 
@@ -2703,6 +3146,21 @@ def build_parser() -> argparse.ArgumentParser:
                            help="output .html path (default: <run_dir>/dossier.html)")
     _add_config_flag(p_dossier)  # 47.1.2
     p_dossier.set_defaults(func=_cmd_dossier)
+
+    # SPEC.md 62.5 (v0.48, B1): the one genuinely new bit — independently
+    # re-derive every reported number from the run's artifacts and assert them.
+    p_ver = sub.add_parser(
+        "verify", help="v0.48 (SPEC.md 62.5): independently re-derive every "
+                       "reported number from a run's artifacts (summary.json + "
+                       "experiments.jsonl) and assert them — the auditor / "
+                       "chain-of-custody check; rc 0 PASS / rc 2 FAIL / rc 1 "
+                       "bad run dir",
+        epilog="examples:\n"
+               "  autorefine verify --run runs/<run_id>",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p_ver.add_argument("--run", required=True, help="path to a run directory")
+    _add_config_flag(p_ver)  # 47.1.2
+    p_ver.set_defaults(func=_cmd_verify)
 
     return parser
 

@@ -95,6 +95,39 @@ from .scenarios import (  # 61.3 (v0.47): regime / stress scenarios (pure config
     fewshot,
     trap,
 )
+from .audience import (  # 62 (v0.48, B1): the audience axis + verify
+    AUDIENCES,
+    build_view,
+    data_fingerprint,
+    domain_view,
+    exec_view,
+    html_view,
+    regulator_view,
+    render_verify,
+    render_view,
+    technical_view,
+    verify_run,
+)
+from .reporting import (  # 63 (v0.49, B2/B3/B4): formats + user guide + decision
+    REPORT_FORMATS,
+    benchmark_view,      # 64.1 (v0.50, B5): the longitudinal report
+    build_report_doc,
+    decision_view,
+    render_benchmark,    # 64.1.4 (v0.50, B5)
+    render_benchmark_md,  # 64.1.4 (v0.50, B5)
+    render_decision,
+    render_report,
+    render_report_md,
+    render_report_pdf,
+    render_report_txt,
+    render_user_guide,
+    user_guide_view,
+)
+from .uncertainty import (  # 64.2 (v0.50, B6): uncertainty on headline numbers
+    format_pm,
+    headline_uncertainty,
+    seed_spread_stats,
+)
 from .plugins import PluginError, discover, register_policies, register_tasks
 from .tasks import (
     TASKS,
@@ -114,8 +147,8 @@ from .tasks import (
 
 # SPEC.md 33.1 (C1): single version source — must equal pyproject.toml's
 # [project].version (enforced by the A23 test); one step per feature round
-# (v0.47 ⇒ 0.47.0, M50, SPEC.md 61)
-__version__ = "0.47.0"
+# (v0.50 ⇒ 0.50.0, M53, SPEC.md 64)
+__version__ = "0.50.0"
 
 __all__ = [
     "AutoRefineEnv",
@@ -204,5 +237,21 @@ __all__ = [
     "ensemble_ece", "compute_actuals",
     "MedicalTabularTask", "FinanceForecastTask", "RobustTask",
     "Scenario", "fewshot", "drifting", "trap",
+    # v0.48: the audience axis + verify (SPEC.md 62, A52)
+    "AUDIENCES", "exec_view", "domain_view", "technical_view", "regulator_view",
+    "build_view", "render_view", "html_view", "data_fingerprint",
+    "verify_run", "render_verify",
+    # v0.49: format breadth + the end-user guide + the decision artifact
+    # (SPEC.md 63, A53)
+    "REPORT_FORMATS", "build_report_doc", "render_report_md", "render_report_txt",
+    "render_report_pdf", "render_report", "user_guide_view",
+    "render_user_guide", "decision_view", "render_decision",
+    # v0.50: the benchmark / longitudinal report + uncertainty on headlines
+    # (SPEC.md 64, A54). Note: the top-level `spec_fingerprint` stays the
+    # v0.46 whatif "DNA" bars (one name, one binding); the B5 12-hex spec
+    # identity is `autorefine.reporting.spec_fingerprint` (64.1.2), used
+    # by `benchmark_view` internally.
+    "benchmark_view", "render_benchmark", "render_benchmark_md",
+    "seed_spread_stats", "format_pm", "headline_uncertainty",
     "__version__",
 ]
