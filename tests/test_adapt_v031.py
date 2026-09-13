@@ -130,10 +130,11 @@ class _Const:
 def test_abc_split_mode_defaults_random():
     """A35 (SPEC.md 45.1.2): `split_mode` is a declared `Task` ABC
     property defaulting to "random" — every registered task keeps it at
-    the class level (only CsvTask gains a temporal instance branch)."""
+    the class level (finance-v1 is temporal; CsvTask may branch to it
+    per-instance)."""
     assert Task.split_mode == "random"  # the ABC default
     for name, cls in TASKS.items():
-        assert cls.split_mode == "random", name  # unchanged per task
+        assert cls.split_mode in ("random", "temporal"), name
     assert TextTask.split_mode == "random"
     assert CsvTask.split_mode == "random"  # class default, not "temporal"
 
@@ -271,9 +272,10 @@ def test_text_registered():
     registry shape advanced in place (7 → 8, the v0.8/v0.10 pattern)."""
     assert "text" in TASKS
     assert TASKS["text"] is TextTask
-    assert len(TASKS) == 8  # the registry pins advanced in place (7 → 8)
+    assert len(TASKS) == 10  # the registry pins advanced in place (7 → 8 → 10)
     assert set(TASKS) == {"parity-v1", "sine-v1", "cartpole-v1",
-                          "gridnav-v1", "csv", "image", "audio", "text"}
+                          "gridnav-v1", "csv", "image", "audio", "text",
+                          "medical-v1", "finance-v1"}
 
 
 def test_text_task_softmax_protocol(tmp_path):
@@ -439,7 +441,7 @@ def test_version_round_v031():
     """A35 (SPEC.md 45.4, 33.1): the version stepped to `0.39.0` in
     both sources (v0.39 ⇒ `0.39.0`, M42)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.46.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.47.0"
 
 
 def test_spec_cites_a35_and_round():

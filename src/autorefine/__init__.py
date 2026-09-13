@@ -81,24 +81,41 @@ from .whatif import (  # 60 (v0.46): parameters what-iffed + compared
     whatif_preview,
     weighted_reslice,
 )
+from .calibration import (  # 61.1.3 / 61.4 (v0.47): constraint / calibration metrics
+    coverage_width,
+    ece,
+    ensemble_ece,
+    monotonicity_slope,
+    per_class_f1,
+)
+from .gate import compute_actuals  # 61.1.2 (v0.47): the richer actuals producer
+from .scenarios import (  # 61.3 (v0.47): regime / stress scenarios (pure config)
+    Scenario,
+    drifting,
+    fewshot,
+    trap,
+)
 from .plugins import PluginError, discover, register_policies, register_tasks
 from .tasks import (
     TASKS,
     AudioTask,
     CartPoleV1,
     CsvTask,
+    FinanceForecastTask,
     GridNavV1,
     ImageTask,
+    MedicalTabularTask,
     Parity4V1,
     ParityTask,
+    RobustTask,
     SineRegressionV1,
     TextTask,
 )
 
 # SPEC.md 33.1 (C1): single version source — must equal pyproject.toml's
 # [project].version (enforced by the A23 test); one step per feature round
-# (v0.46 ⇒ 0.46.0, M49, SPEC.md 60)
-__version__ = "0.46.0"
+# (v0.47 ⇒ 0.47.0, M50, SPEC.md 61)
+__version__ = "0.47.0"
 
 __all__ = [
     "AutoRefineEnv",
@@ -182,5 +199,10 @@ __all__ = [
     "ParityTask",
     "SineRegressionV1",
     "TextTask",
+    # v0.47: more specialized scenarios (SPEC.md 61, A51)
+    "per_class_f1", "ece", "coverage_width", "monotonicity_slope",
+    "ensemble_ece", "compute_actuals",
+    "MedicalTabularTask", "FinanceForecastTask", "RobustTask",
+    "Scenario", "fewshot", "drifting", "trap",
     "__version__",
 ]

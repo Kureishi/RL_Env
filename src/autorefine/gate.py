@@ -16,7 +16,15 @@ from pathlib import Path
 
 import numpy as np
 
-OBJECTIVE_NAMES = ("score", "train", "model")
+# SPEC.md 37.2 (v0.23, G4): the original score/train/model set — kept
+# byte-identical (default_objectives / the A1–A50 pins).
+_BASE_OBJECTIVE_NAMES = ("score", "train", "model")
+# SPEC.md 61.1 (v0.47, A1): the constraint-aware names added on top —
+# per_class_f1 / ece / cost / monotonic_in are the same `name op
+# threshold` form (a lower bound on a goodness, or an upper bound on a
+# badness). `default_objectives` still yields only the base score gate.
+OBJECTIVE_NAMES = _BASE_OBJECTIVE_NAMES + (
+    "per_class_f1", "ece", "cost", "monotonic_in")
 GATE_OPS = (">=", "<=")
 
 _OPS = {
@@ -107,6 +115,74 @@ def evaluate(objectives, actuals: dict) -> dict:
         "pass": bool(rows) and all(r["pass"] for r in rows),
         "objectives": rows,
     }
+
+
+def _softmax(logits: np.ndarray) -> np.ndarray:
+    m = logits.max(axis=1, keepdims=True)
+    e = np.exp(logits - m)
+    return e / e.sum(axis=1, keepdims=True)
+
+
+def compute_actuals(env, task, model, entries, extras=None) -> dict:
+    """SPEC.md 61.1.2 (A1): the richer `actuals` producer for the
+    constraint-aware gate. Starts from `actuals_from_run` (score / train /
+    model) and, when `task` and `model` are given, adds the constraint
+    actuals by reusing existing primitives (zero retraining):
+
+    * `per_class_f1` — from the confusion matrix in
+      `diagnostics.holdout_diagnostics` (`calibration.per_class_f1`, the
+      worst non-empty class);
+    * `ece` — over the model's holdout softmax probabilities
+      (`calibration.ece`, 61.4);
+    * `cost` — `task.cost(model, 'holdout', n)` when the task exposes it
+      (61.5);
+    * `monotonic_in` — `task.monotonic_probe(model)` when the task exposes
+      it (61.1.3).
+
+    `extras` (a dict) supplies a precomputed value for any name — a
+    supplied finite number wins over recomputation (the app can pass an
+    ECE it already computed). Any name with no actual stays `None` → its
+    objective fails (the 37.2 rule), never a silent pass. `env` may be
+    `None` (a bare task/model evaluation) — the score/train/model base is
+    simply omitted then. Pure over already-produced data (G2).
+    """
+    from .calibration import ece as _ece
+    from .calibration import per_class_f1 as _pcf1
+
+    if env is None:
+        result: dict = {}
+    else:
+        result = dict(actuals_from_run(env, entries or []))
+
+    if task is not None and model is not None:
+        # per_class_f1 — reuse the §28.2 confusion matrix (61.1.3)
+        if getattr(task, "head", None) == "softmax":
+            try:
+                from .diagnostics import holdout_diagnostics
+                diag = holdout_diagnostics(task, model, n=200)
+            except Exception:  # a task that cannot be diagnosed contributes no actual
+                diag = None
+            if diag is not None:
+                result["per_class_f1"] = _pcf1(diag["confusion"])
+        # ece — over holdout softmax probabilities (61.4)
+        if getattr(task, "head", None) == "softmax" \
+                and callable(getattr(task, "holdout_rows", None)):
+            x, y = task.holdout_rows(200, model)
+            if len(x):
+                logits = np.asarray(model.forward(x), dtype=np.float64)
+                result["ece"] = _ece(_softmax(logits), np.asarray(y).ravel())
+        # cost — task-level per-episode / per-prediction badness (61.5)
+        if callable(getattr(task, "cost", None)):
+            result["cost"] = float(task.cost(model, "holdout", 200))
+        # monotonic_in — task-level finite-difference probe (61.1.3)
+        if callable(getattr(task, "monotonic_probe", None)):
+            result["monotonic_in"] = float(task.monotonic_probe(model))
+
+    if extras:
+        for name, val in extras.items():
+            if isinstance(val, (int, float)) and not isinstance(val, bool):
+                result[name] = float(val)
+    return result
 
 
 def actuals_from_run(env, entries: list[dict]) -> dict:

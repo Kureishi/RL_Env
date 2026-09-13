@@ -8,6 +8,9 @@ from .media import collect_items, detect_modality
 from .parity import Parity4V1, ParityTask, parity_ceiling
 from .sine import SineRegressionV1
 from .text import TextTask, ngram_features
+from .medical import MedicalTabularTask
+from .finance import FinanceForecastTask
+from .robust import RobustTask
 
 # task registry (SPEC.md 15): new tasks register here, zero core-loop changes
 TASKS = {
@@ -21,6 +24,12 @@ TASKS = {
     "audio": AudioTask,
     # v0.31: text modality (SPEC.md 45.2; needs task_config.path dir)
     "text": TextTask,
+    # v0.47: domain task packs (SPEC.md 61.2, A2; additive — the §21 loader
+    # delivers the same registry an external entry-point would use)
+    "medical-v1": MedicalTabularTask,  # imbalanced cost-sensitive binary
+    "finance-v1": FinanceForecastTask,  # temporal horizon forecasting
+    # robust-v1 is a wrapper (needs a base task) — not a bare registry entry,
+    # so it is exported for direct use / plugins rather than the string map.
 }
 
 __all__ = [
@@ -29,4 +38,6 @@ __all__ = [
     "ImageTask", "AudioTask", "log_mel_features", "log_mel_frames",
     "collect_items", "detect_modality",
     "TextTask", "ngram_features",
+    # v0.47: domain task packs (SPEC.md 61.2, A2)
+    "MedicalTabularTask", "FinanceForecastTask", "RobustTask",
 ]

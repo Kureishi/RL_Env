@@ -13,10 +13,27 @@ class ParetoFrontier:
     def __init__(self) -> None:
         self.points: list[dict[str, Any]] = []
 
-    def add(self, score: float, seconds: float, spec_hash: str) -> None:
-        self.points.append(
-            {"score": float(score), "seconds": float(seconds), "spec_hash": spec_hash}
-        )
+    def add(self, score: float, seconds: float, spec_hash: str,
+            cost: float | None = None) -> None:
+        # SPEC.md 61.5.1 (A5, v0.47): an *optional* `cost` (per-episode /
+        # per-prediction badness) rides along when supplied; the default
+        # `cost=None` leaves the (score, seconds) contract byte-identical
+        # (the A1–A50 pins never pass a cost, so this is additive).
+        point = {"score": float(score), "seconds": float(seconds),
+                 "spec_hash": spec_hash}
+        if cost is not None:
+            point["cost"] = float(cost)
+        self.points.append(point)
+
+    def cost_of(self, spec_hash: str) -> float | None:
+        """SPEC.md 61.5.1 (A5): the `cost` recorded for a `spec_hash`, or
+        ``None`` when the point is unknown or was added without a cost —
+        the frontier's default ``(score, train)`` contract is untouched
+        (the cost objective can be satisfied entirely in the gate, 61.5.2)."""
+        for p in self.points:
+            if p.get("spec_hash") == spec_hash:
+                return None if "cost" not in p else float(p["cost"])
+        return None
 
     def frontier(self) -> list[dict[str, Any]]:
         """Undominated points, sorted by training time (cheapest first)."""
@@ -47,6 +64,7 @@ class ParetoFrontier:
         return {
             "pareto_frontier": [
                 {"score": p["score"], "train_seconds": p["seconds"], "spec_hash": p["spec_hash"]}
+                | ({"cost": p["cost"]} if "cost" in p else {})
                 for p in frontier
             ],
             "best_score_at_1s": within,

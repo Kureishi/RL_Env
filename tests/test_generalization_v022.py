@@ -205,8 +205,9 @@ def test_every_task_is_a_task_subclass():
     """A26 (SPEC.md 36.1): every `TASKS` value lists Task as its base —
     the nominal interface the §23 plugin loader targets (frozen
     interface, no duck-typing guess). v0.31 (SPEC.md 45.2): the text
-    modality advances the count 7 -> 8 in place."""
-    assert len(TASKS) == 8
+    modality advances the count 7 -> 8 in place. v0.47 (SPEC.md 61.2):
+    the medical/finance domain packs advance it 8 -> 10."""
+    assert len(TASKS) == 10
     for name, cls in TASKS.items():
         assert issubclass(cls, Task), name
 
@@ -446,4 +447,4 @@ def test_version_round_v022():
     assertion advanced in place per SPEC.md 33.1)."""
     py = tomllib.loads(
         (REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.46.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.47.0"
