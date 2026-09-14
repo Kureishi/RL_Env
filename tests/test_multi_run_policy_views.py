@@ -541,9 +541,9 @@ def _app_setup(tmp_path):
     at.run()
     assert not at.exception
     at.text_input(key="csv_path").set_value(str(csv))
-    at.text_input(key="runs_dir").set_value(str(tmp_path / "runs"))
-    at.number_input(key="experiments").set_value(2)
-    at.number_input(key="max_train").set_value(5.0)
+    at.session_state["runs_dir"] = str(tmp_path / "runs")
+    at.session_state["experiments"] = 2
+    at.session_state["max_train"] = 5.0
     at.run()
     assert not at.exception
     return at

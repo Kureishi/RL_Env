@@ -1835,7 +1835,25 @@ def main() -> None:
                                value=95.0, step=0.5, key="target",
                                help=KNOB_GLOSSARY["target"])
 
-    with side.expander("Advanced", expanded=False):  # 48.1.2
+    # 48.1.2 (UI fix): the Advanced knob set was a collapsed ``st.expander``,
+    # which some Streamlit/theme builds render with its children escaping the
+    # box. It is now a toggle (off by default): when on the six widgets render
+    # and own their values; when off they are NOT rendered, so their values
+    # are read from session_state (defaults materialized here). That keeps the
+    # values always defined, keeps presets working (48.3.3), and lets callers
+    # set the knobs via session_state without the widgets being present.
+    _ADV_DEFAULTS = {  # the six advanced knobs + their widget defaults (48.1.2)
+        "policy": "bandit", "seed": 7, "experiments": 30,
+        "max_train": 30.0, "quality": "v04",
+        "runs_dir": _launcher_runs_dir(),
+    }
+    show_advanced = side.toggle(
+        "Show advanced options", value=False, key="show_advanced",
+        help="Reveal the advanced knobs — policy, seed, experiments (budget), "
+             "max train seconds, search quality, runs dir. Off by default: the "
+             "beginner set above is all you need for a first run "
+             "(SPEC.md 48.1.2).")
+    if show_advanced:
         policy = side.selectbox("Policy (improver)", ("bandit", "search"),
                                 index=0, key="policy",
                                 help=KNOB_GLOSSARY["policy"])
@@ -1853,6 +1871,16 @@ def main() -> None:
                                  key="quality", help=KNOB_GLOSSARY["quality"])
         runs_dir = side.text_input("Runs dir", value=_launcher_runs_dir(),
                                    key="runs_dir", help=KNOB_GLOSSARY["runs_dir"])
+    else:
+        for _k, _d in _ADV_DEFAULTS.items():
+            if _k not in st.session_state:  # never clobber a preset/manual edit
+                st.session_state[_k] = _d
+        policy = st.session_state["policy"]
+        seed = st.session_state["seed"]
+        experiments = st.session_state["experiments"]
+        max_train = st.session_state["max_train"]
+        quality = st.session_state["quality"]
+        runs_dir = st.session_state["runs_dir"]
 
     narrate = side.checkbox("Narrate the loop (plain English)", value=False,
                             key="narrate",

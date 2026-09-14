@@ -306,9 +306,9 @@ def test_app_renders_and_runs_end_to_end(tmp_path):
 
     # widgets exist after the first render; configure, re-render (data preview)
     at.text_input(key="csv_path").set_value(str(csv))
-    at.text_input(key="runs_dir").set_value(str(tmp_path / "runs"))
-    at.number_input(key="experiments").set_value(2)
-    at.number_input(key="max_train").set_value(5.0)
+    at.session_state["runs_dir"] = str(tmp_path / "runs")
+    at.session_state["experiments"] = 2
+    at.session_state["max_train"] = 5.0
     at.run()
     assert not at.exception
 
@@ -391,10 +391,10 @@ def test_app_renders_decision_views(tmp_path):
         at.run()  # first render materializes the sidebar widgets
         assert not at.exception
         at.text_input(key="csv_path").set_value(str(csv))
-        at.text_input(key="runs_dir").set_value(str(tmp_path / f"runs_{policy}"))
-        at.selectbox(key="policy").set_value(policy)
-        at.number_input(key="experiments").set_value(2)
-        at.number_input(key="max_train").set_value(5.0)
+        at.session_state["runs_dir"] = str(tmp_path / f"runs_{policy}")
+        at.session_state["policy"] = policy
+        at.session_state["experiments"] = 2
+        at.session_state["max_train"] = 5.0
         at.run()  # re-render: data preview + the Run button (idle stops earlier)
         assert not at.exception
         at.button(key="run_button").set_value(True).run()
@@ -585,9 +585,9 @@ def test_app_renders_gate_views(tmp_path):
     at.run()  # first render materializes the sidebar widgets
     assert not at.exception
     at.text_input(key="csv_path").set_value(str(csv))
-    at.text_input(key="runs_dir").set_value(str(tmp_path / "runs_gate"))
-    at.number_input(key="experiments").set_value(2)
-    at.number_input(key="max_train").set_value(5.0)
+    at.session_state["runs_dir"] = str(tmp_path / "runs_gate")
+    at.session_state["experiments"] = 2
+    at.session_state["max_train"] = 5.0
     at.run()  # re-render: data preview + the Run button (idle stops earlier)
     assert not at.exception
     at.button(key="run_button").set_value(True).run()

@@ -305,7 +305,7 @@ def test_app_seed_sweep_progress_streams(tmp_path, monkeypatch):
     at.run()  # re-render so the path is picked up and the variance panel shows
     assert not at.exception
     at.number_input(key="var_seeds").set_value(2)
-    at.number_input(key="experiments").set_value(2)  # keep the sweep small
+    at.session_state["experiments"] = 2
     # Streamlit 1.51's AppTest does not expose `st.progress` elements, so we
     # spy on `st.progress` itself and record every update it receives.
     import autorefine.dashboard_app as app_mod

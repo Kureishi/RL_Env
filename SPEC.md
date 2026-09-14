@@ -4746,9 +4746,14 @@ rendered top-level in the sidebar.
 
 **Advanced knob set (48.1.2).** `onboarding.ADVANCED_KNOBS =
 ("policy", "seed", "experiments", "max_train", "quality", "runs_dir")`
-— the same six widgets as before 48.1, same keys, same defaults, now
-collapsed under a closed "Advanced" expander. Grouping only: a run that
-used to work does.
+— the same six knobs as before 48.1, same keys, same defaults. They are
+revealed by a **"Show advanced options" toggle (off by default)** rather than
+a collapsed "Advanced" expander (some Streamlit/theme builds render an
+expander with its children escaping the box). With the toggle off the six
+widgets are not rendered and their values are read from session_state —
+defaults materialized, presets (48.3.3) and manual edits preserved — so the
+knob set, its keys, and a run's behavior are unchanged; only the reveal
+control moves.
 
 **Vocabulary (48.1.3).** `onboarding.ALL_KNOBS` is the full knob
 vocabulary in sidebar display order; the two sets are disjoint and their

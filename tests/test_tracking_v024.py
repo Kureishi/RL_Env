@@ -439,7 +439,7 @@ def test_app_past_runs_section_renders(tmp_path):
     at.run()
     assert not at.exception
     at.text_input(key="csv_path").set_value(str(csv))
-    at.text_input(key="runs_dir").set_value(str(runs))
+    at.session_state["runs_dir"] = str(runs)
     at.run()
     assert not at.exception
     assert any(e.value == "Past runs" for e in at.subheader)

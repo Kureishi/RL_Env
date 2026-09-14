@@ -107,10 +107,10 @@ Once you pick data, the app is a five-tab layout driven from the **sidebar**:
    labelled images/audio also works, v0.10). Leave *Label column* blank to
    auto-detect (`label`/`target`/`y`/`class`, else the last column). Set the
    *Target score* (default 95). Optional: a **Preset** fills a bundle of
-   settings in one click (override any after), and the **Advanced** expander
-   holds the rest (policy `bandit`/`search`, seed, experiments, max train
-   seconds, search quality `v04`/`legacy`, runs dir). Toggle **Narrate the
-   loop** for a plain-English line per experiment.
+   settings in one click (override any after). The **Show advanced options**
+   toggle (off by default) reveals the rest: policy `bandit`/`search`, seed,
+   experiments, max train seconds, search quality `v04`/`legacy`, runs dir.
+   Toggle **Narrate the loop** for a plain-English line per experiment.
 2. **Run — press *Run the improvement loop*.** Every experiment appears as it
    happens (live table + best-score curve). Press **Stop** any time (keyboard
    `S`; `R` = Run) for an honest, partial run with full artifacts. **Copy

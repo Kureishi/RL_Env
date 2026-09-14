@@ -1408,5 +1408,50 @@
     "config_fp": "931aa660af35",
     "parent_run": null,
     "timestamp": "2026-09-14T16:48:50Z"
+  },
+  {
+    "run_id": "csv-seed7-20260914-133014",
+    "task": "csv",
+    "seed": 7,
+    "policy": "bandit",
+    "final_score": 50.0,
+    "target": 95.0,
+    "met_target": false,
+    "finished_reason": "budget_exhausted",
+    "experiments_run": 2,
+    "wall_seconds": 0.194,
+    "config_fp": "26ca978dabad",
+    "parent_run": null,
+    "timestamp": "2026-09-14T17:30:14Z"
+  },
+  {
+    "run_id": "csv-seed8-20260914-133014",
+    "task": "csv",
+    "seed": 8,
+    "policy": "bandit",
+    "final_score": 33.33333333333333,
+    "target": 95.0,
+    "met_target": false,
+    "finished_reason": "budget_exhausted",
+    "experiments_run": 2,
+    "wall_seconds": 0.112,
+    "config_fp": "f27c983f3f45",
+    "parent_run": null,
+    "timestamp": "2026-09-14T17:30:14Z"
+  },
+  {
+    "run_id": "parity-v1-seed7-20260914-140301",
+    "task": "parity-v1",
+    "seed": 7,
+    "policy": "search",
+    "final_score": 53.41796875,
+    "target": null,
+    "met_target": null,
+    "finished_reason": "budget_exhausted",
+    "experiments_run": 3,
+    "wall_seconds": 0.208,
+    "config_fp": "2e5d90e3adf5",
+    "parent_run": null,
+    "timestamp": "2026-09-14T18:03:01Z"
   }
 ]
