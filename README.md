@@ -84,6 +84,62 @@ python -m autorefine dashboard          # or: streamlit run src/autorefine/dashb
 python -m pytest tests/
 ```
 
+## Quickstart: the visual dashboard (UI)
+
+The dashboard is the same improver loop as a web app — no terminal required.
+Install the GUI extra and launch it:
+
+```bash
+pip install autorefine[gui]            # needs streamlit
+python -m autorefine dashboard          # or: streamlit run src/autorefine/dashboard_app.py
+```
+
+Your browser opens at `http://localhost:8501`. **The first screen you see is
+the Quickstart itself** (SPEC.md 65) — the same four steps the CLI and this
+README carry, from one source — with a **Run the demo now** button that runs a
+tiny deterministic parity-v1 loop in a few seconds (no data needed) and shows
+the narrated trace, the best spec, and the summary. A demo run is a real run:
+artifacts + a registry entry, re-openable via `autorefine report --run <dir>`.
+
+Once you pick data, the app is a five-tab layout driven from the **sidebar**:
+
+1. **Setup — pick the data.** Upload a CSV (or type a path; a directory of
+   labelled images/audio also works, v0.10). Leave *Label column* blank to
+   auto-detect (`label`/`target`/`y`/`class`, else the last column). Set the
+   *Target score* (default 95). Optional: a **Preset** fills a bundle of
+   settings in one click (override any after), and the **Advanced** expander
+   holds the rest (policy `bandit`/`search`, seed, experiments, max train
+   seconds, search quality `v04`/`legacy`, runs dir). Toggle **Narrate the
+   loop** for a plain-English line per experiment.
+2. **Run — press *Run the improvement loop*.** Every experiment appears as it
+   happens (live table + best-score curve). Press **Stop** any time (keyboard
+   `S`; `R` = Run) for an honest, partial run with full artifacts. **Copy
+   status** gives a self-contained "how's it going?" card, and the *reference
+   run* picker draws a past run's curve beneath the current one ("am I beating
+   last time?").
+3. **Results — read the verdict.** Target met? by how much? Plus the plots and
+   the downloads: `report.html`, `best_model.npz`, `best_spec.json`,
+   `experiments.jsonl`, `run_config.json` (the copy-pasteable recipe), and a
+   self-contained **share bundle** (`.zip`).
+4. **Compare — put runs side by side.** Seed sweeps, the RL policy view, and
+   the past-runs list (re-open and diff any two runs).
+5. **Experiments — audit every candidate.** The per-candidate table with the
+   *reason* each was kept or rejected, and the best-score curve.
+
+**Steer, don't just watch.** The *Steer the search* expander (Setup tab) adds
+human-in-the-loop rules — **pin** a field to a value, **bias** a mutation
+ toward one, or **constrain** an allowed set — so a researcher can freeze what
+ they already know and let the loop tune the rest (SPEC.md 59.2). All opt-in;
+ leave empty for the default loop. For the full parameter surface, the
+ **Results** tab has a *Parameter inspector* (SPEC.md 59.1) and a *What-if &
+ comparison* panel (SPEC.md 60): live what-if previews, the spec-fingerprint
+ "DNA", the interaction heatmap, and objective-weight sliders.
+
+> The dashboard is a thin renderer over the same core as the CLI (SPEC.md
+> 23); the `rl` policy stays CLI-only (`autorefine fit --policy rl`). The
+> Quickstart panel, `autorefine quickstart`, and this section all read from
+> one source (SPEC.md 65), so they never drift apart.
+
 ## Python API
 
 ```python

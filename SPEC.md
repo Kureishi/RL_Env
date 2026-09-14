@@ -71,6 +71,7 @@ numbers and carry none.)
 | M51 | v0.48   | 62     | A52 | tests/test_reporting_v048.py |
 | M52 | v0.49   | 63     | A53 | tests/test_reporting_v049.py |
 | M53 | v0.50   | 64     | A54 | tests/test_reporting_v050.py |
+| M54 | v0.51   | 65     | A55 | tests/test_quickstart_v051.py |
 
 ---
 
@@ -6471,3 +6472,51 @@ With `--benchmark` unset, `report` routes through the existing code **unchanged*
 ### 64.6 Milestone (M53)
 
 **M53** — v0.50 "Reporting for a wider range of audiences (benchmark + uncertainty)": `report --benchmark` (64.1, the runs-dir-level longitudinal view — per-task leaderboard with spec fingerprints, the same-spec-across-tasks generalization matrix, and the best-score trend — pure derivation over the registry, byte-stable renderers, symmetric guards) turns one run into a reportable program of runs; and B6 (64.2) puts the seed variance on every headline number — `"96.4 ± 0.8, 5 runs"` on the audience views, the decision artifact, and the user guide — with `uncertainty.py` as the single home for the statistics (≥ 2 runs to display a spread, so single-run output is untouched). All additive and opt-in, byte-identical under defaults (G2) (A54).
+
+---
+
+## 65. Quickstart in the UI (v0.51)
+
+The README already carries a *Quickstart* section (CLI commands). This round gives the **UI** (and the terminal) the same onboarding — from one pure core module so it is testable without streamlit, and the three surfaces (README / CLI / app) can never drift apart. All additive: no run semantics, gates, budgets, or default renderings change (A1–A54 stay green; the A41 app assertions keep holding — the new panel renders only on the idle screen, and the pre-v0.51 upload hint stays verbatim below it).
+
+### 65.1 The step model: `quickstart.py` (one home)
+
+`quickstart.py` (65.1.1) is the single source for the onboarding content — the `memory.py` / `accounting.py` one-home pattern applied to *what the first screen says*:
+
+- **`QUICKSTART_INTRO`** (65.1.1) — the one-paragraph "what is this" text: the README's own description (the improver loop, hard budget, reproducible, NumPy-only), so the three surfaces share one sentence instead of three paraphrases.
+- **`QUICKSTART_STEPS`** (65.1.2) — the four onboarding steps in stable order, each a dict with exactly the keys `{id, title, body, app, cli}`: `pick_data` (upload a CSV / media directory — or skip it), `run_loop` (press Run; every experiment shown with its keep/skip reason), `inspect_export` (verdict, plots, downloads, compare past runs), `check_env` (`autorefine doctor`). `body` is the shared plain-English *what/why*; `app` says what to do inside the dashboard; `cli` is the copy-pasteable terminal equivalent (the README Quickstart invocations, read from here rather than re-typed).
+- **`quickstart_steps()` / `quickstart_commands()`** (65.1.3) — the step model as a list (a copy — mutating the result never touches the tuple) and the `cli` column in step order. Pure.
+- **invariant** (65.1.4) — every step dict has exactly the five keys; the `id`s are unique; `quickstart_commands()` equals the steps' `cli` column in order (the C4-registry pattern: a sixth key or a reordered step is a suite failure, not a silent UI drift).
+
+### 65.2 The renderers + the app's first screen
+
+- **`render_quickstart_md()`** (65.2.1) — the Markdown rendering (`#` heading, the intro, one block per step: body, *in the app*, *on the CLI*) — the dashboard's first screen. Pure and byte-stable (G2).
+- **`render_quickstart()`** (65.2.2) — the aligned-columns text rendering (the `autorefine quickstart` command) — **no table pipes** (terminal friendly, the 64.1.4 convention). Pure and byte-stable (G2).
+- **the idle screen** (65.2.3) — the app's pre-run screen (`path is None and result is None`) now *is* the Quickstart: `render_quickstart_md()`, the demo button (65.4), and the pre-v0.51 upload hint kept verbatim below the panel (the A41 app assertions are key-based and keep holding; the new button is uniquely keyed, 49.4.2). The app stays a thin renderer (23.1): no step text is re-typed in `dashboard_app.py`.
+
+### 65.3 The CLI: `autorefine quickstart`
+
+`autorefine quickstart` (65.3.1) prints `render_quickstart()` — the same four steps the README and the app carry (one source, 65.1). `--json` prints the step model (`{"intro": …, "steps": […]}`) as pure JSON. **Zero training, zero writes; rc 0** (65.3.2) — it is documentation, not a run: no run dir, no registry entry, no budget consumed. The `--config` flag is present for parity (47.1.2) though no flag needs it.
+
+### 65.4 The demo action: "Run the demo now"
+
+- **`demo_recipe()`** (65.4.1) — the demo loop's recipe in one home: parity-v1, the **41.3.1 tiny fixed budget** (3 experiments / 60 s wall / 10 s per train), the search policy, the v0.4 quality preset, un-gated — the same recipe `run --demo` (41.3) runs, so the in-app action cannot drift from the CLI demo.
+- **`run_demo(seed=7, runs_dir="runs")`** (65.4.2) — runs that recipe and **returns** the narrated result: `{task, seed, run_dir, budget, summary (the six 41.3 keys), trace (the 41.2 `trace_lines`), best_spec}`. No `print`, no `st.*` — the caller renders (house rule: the core is the only trainer; the CLI the only printer; the app the only UI renderer). **A demo run is a run (41.3.2)**: a normal run dir with the full artifact set + a registry entry; deterministic for a given seed (G2).
+- **the button** (65.4.3) — the idle screen's `Run the demo now — no data needed` (key `demo_button`, the 49.4.2 uniquely-keyed action): one press runs `run_demo` with the sidebar's seed / runs dir and renders the success line (task / seed / run dir), the narrated trace, the best-spec caption, and the summary JSON — then points at `autorefine report --run <dir>` and the Compare tab's past-runs list. Synchronous by design (a few seconds — the CLI demo is synchronous too, 41.3).
+
+### 65.5 Pins and the default path (the A55 anchor)
+
+No run semantics change: the loop, the gates, the budgets, the summary writer, and every existing renderer are untouched (A1–A54 stay green). The app's *data-loaded* path (the five tabs, the run loop, the result view) is byte-identical per interaction — the new panel renders only on the idle screen, and the pre-v0.51 upload hint survives verbatim (65.2.3). `run --demo` (41.3) is untouched — `run_demo` is a parallel core consumer of the same recipe, not a refactor of the pinned CLI path. The new CLI subcommand is additive (an unknown-command test, if any, lists the new name; every existing command's rc/byte output is unchanged) (65.5).
+
+### 65.6 Acceptance (A55)
+
+- **65.1 step model** — `quickstart_steps()` returns four steps in the stable order `pick_data → run_loop → inspect_export → check_env`; every step dict has exactly the keys `{id, title, body, app, cli}` (65.1.4); the `id`s are unique; `quickstart_commands()` equals the `cli` column in order; `QUICKSTART_INTRO` is non-trivial (the "autonomous" loop sentence).
+- **65.2 renderers** — `render_quickstart_md` and `render_quickstart` are byte-stable (G2); both carry the intro, the four step titles, and all four CLI commands; the text rendering has no table pipes (65.2.2); the Markdown rendering is `#`-headed and step-blocked (65.2.1).
+- **65.4 demo** — `demo_recipe()` is exactly the 41.3.1 recipe (parity-v1; 3 experiments / 60 s wall / 10 s per train; search policy; un-gated); `run_demo(seed, runs_dir)` returns the seven-key shape with the six summary keys, a non-empty `trace` of strings, a dict `best_spec`, and a `run_dir` that exists with a registry entry (41.3.2); two calls with the same seed and runs dir give the same summary numbers, the same trace, and the same best spec (G2).
+- **65.3 CLI** — `autorefine quickstart` rc 0 + the four step titles + the intro on stdout; `--json` parses as `{intro, steps}` with the steps equal to `quickstart_steps()`; the `--json` output is byte-stable across calls.
+- **exports** — the new top-level names (`QUICKSTART_INTRO`, `QUICKSTART_STEPS`, `quickstart_steps`, `quickstart_commands`, `render_quickstart`, `render_quickstart_md`, `demo_recipe`, `run_demo`) are in `__all__` (33.1).
+- **version + regression** — the version steps to `0.51.0` in both sources (33.1); A1–A54 stay green (no default-path behavior change; the app's data-loaded path is byte-identical per interaction, 65.5); the A25 index advances (51 acceptance rows; `defined == set(range(1, 56))`).
+
+### 65.7 Milestone (M54)
+
+**M54** — v0.51 "Quickstart in the UI": the README's Quickstart gets its UI twin — `quickstart.py` as the one home for the four onboarding steps (65.1: intro + step model with the in-app action and the CLI equivalent per step), `render_quickstart_md` / `render_quickstart` as the byte-stable renderers (65.2), the dashboard's first screen becomes the Quickstart with a **no-data demo button** that runs the 41.3.1 recipe in-app and narrates the result (65.4), and `autorefine quickstart [--json]` prints the same steps in the terminal (65.3). One source, three surfaces, no run semantics touched (A55).

@@ -513,7 +513,7 @@ def test_version_and_spec_round():
     from pathlib import Path
 
     REPO = Path(__file__).resolve().parents[1]
-    assert autorefine.__version__ == "0.50.0"
+    assert autorefine.__version__ == "0.51.0"
     spec = (REPO / "SPEC.md").read_text(encoding="utf-8")
     assert "### 61.6 Acceptance (A51)" in spec
     assert re.search(r"^\s*\| M50 \| v0\.47\s*\|\s*61\s*\|\s*A51\s*\|",

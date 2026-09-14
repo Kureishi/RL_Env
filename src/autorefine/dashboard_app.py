@@ -62,6 +62,13 @@ from autorefine.gate import Objective, model_size
 from autorefine.dossier import build_dossier  # 58.3 (v0.44): the run dossier
 from autorefine.runconfig import RunConfig, fit_recipe  # 50.1.5/50.2 (v0.36)
 from autorefine.narrate import narrate_baseline, narrate_run, narrate_step
+# SPEC.md 65 (v0.51): the Quickstart core — one source (65.1), the app's
+# first screen (65.2) + the no-data demo action (65.4); the app is a
+# thin renderer (23.1).
+from autorefine.quickstart import (
+    render_quickstart_md,  # 65.2: the byte-stable first-screen markdown
+    run_demo,              # 65.4: the no-data narrated demo action
+)
 from autorefine.simulate import what_if_block
 # SPEC.md 55 (v0.41): "make it feel live" — the three live-view helpers.
 # The app is a thin renderer over these pure core functions (55.x).
@@ -1733,6 +1740,45 @@ _KEYBOARD_HTML = (
 )
 
 
+def _render_quickstart(seed: int, runs_dir: str) -> None:
+    """65.2 (v0.51): the idle-screen Quickstart — the UI's onboarding.
+
+    The same four steps the README and ``autorefine quickstart`` carry
+    (``render_quickstart_md``, one source, 65.1), plus the **no-data
+    demo action** (65.4): one press runs the 41.3.1 recipe in-app and
+    renders the narrated result (the 41.2 trace + the six summary keys
+    + the best spec + the run dir). The app is a thin renderer (23.1);
+    the button is uniquely keyed (49.4.2). The pre-v0.51 upload hint is
+    kept verbatim below the new panel."""
+    st.markdown(render_quickstart_md())
+    if st.button(
+            "Run the demo now — no data needed (parity-v1, 3 experiments, "
+            "a few seconds)",
+            key="demo_button", type="primary",
+            help="The `autorefine run --demo` loop (SPEC.md 41.3) as an "
+                 "in-app action (SPEC.md 65.4): one tiny deterministic "
+                 "parity-v1 loop, then the narrated trace and the "
+                 "summary. A demo run is a run: artifacts + registry "
+                 "entry (41.3.2)."):
+        res = run_demo(seed=seed, runs_dir=runs_dir)
+        st.success(
+            f"Demo finished — task **{res['task']}**, seed **{res['seed']}**, "
+            f"run dir `{res['run_dir']}` (it is a real run: artifacts + "
+            f"registry entry, SPEC.md 65.4.2).")
+        st.code("\n".join(res["trace"]), language="text")
+        st.caption(f"best spec: `{json.dumps(res['best_spec'])}`")
+        st.json(res["summary"])
+        st.caption(
+            f"Re-open it any time: `autorefine report --run "
+            f"{res['run_dir']}` — or find it in the Compare tab's "
+            f"past-runs list.")
+    st.info("Upload a CSV (or give a path — a CSV file, or a directory "
+            "of labelled images/audio, v0.10) to begin. Labels are the "
+            "column (label/target/y/class, else last) or the subfolder "
+            "name / index.csv; the head is inferred: 2–50 integer "
+            "classes → accuracy, otherwise R² (SPEC.md 22.1/24.2).")
+
+
 def main() -> None:
     st.set_page_config(page_title="AutoRefine dashboard", page_icon=":gear:",
                        layout="wide")
@@ -1823,12 +1869,11 @@ def main() -> None:
     path = _resolve_csv(upload, csv_path)
     result = st.session_state.get("result")
     if path is None and result is None:
-        # the idle screen (SPEC.md 23.2) — unchanged by the 51.1 tabs
-        st.info("Upload a CSV (or give a path — a CSV file, or a directory "
-                "of labelled images/audio, v0.10) to begin. Labels are the "
-                "column (label/target/y/class, else last) or the subfolder "
-                "name / index.csv; the head is inferred: 2–50 integer "
-                "classes → accuracy, otherwise R² (SPEC.md 22.1/24.2).")
+        # 65.2 (v0.51): the idle screen *is* the Quickstart — the same
+        # four steps the README/CLI carry (one source, 65.1) + the
+        # no-data demo action (65.4); the pre-v0.51 upload hint stays
+        # below the panel (verbatim).
+        _render_quickstart(int(seed), runs_dir.strip() or "runs")
         st.stop()
 
     # SPEC.md 51.1.1 (v0.37): the five-tab structure — the same functions in

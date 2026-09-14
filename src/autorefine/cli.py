@@ -89,6 +89,11 @@ from .provenance import (  # 56.1 (v0.42): the provenance certificate
     provenance_card,
     provenance_payload,
 )
+from .quickstart import (  # 65 (v0.51): the Quickstart (one source, 65.1)
+    QUICKSTART_INTRO,
+    quickstart_steps,
+    render_quickstart,
+)
 from .audience import (  # 62 (v0.48, B1): the audience axis + verify
     AUDIENCES,
     build_view,
@@ -1782,6 +1787,19 @@ def _dashboard_command(runs_dir: str, port: int) -> list[str]:
     ]
 
 
+def _cmd_quickstart(args: argparse.Namespace) -> int:
+    """SPEC.md 65.3 (v0.51): print the Quickstart — the same steps the
+    README and the dashboard's first screen carry (one source, 65.1).
+    ``--json`` prints the step model (``{intro, steps}``) instead of the
+    text rendering. Zero training, zero writes; rc 0 (65.3.2)."""
+    if getattr(args, "json", False):
+        print(json.dumps({"intro": QUICKSTART_INTRO,
+                          "steps": quickstart_steps()}, indent=2))
+        return 0
+    print(render_quickstart())
+    return 0
+
+
 def _cmd_dashboard(args: argparse.Namespace) -> int:
     """`dashboard` (SPEC.md 23.4): launch the optional Streamlit app.
 
@@ -2587,6 +2605,11 @@ _EP_DOSSIER = """examples:
   autorefine dossier --run runs/<run_id>
   autorefine dossier --run runs/<run_id> --out dossier.html
 """
+_EP_QUICKSTART = """examples (SPEC.md 65.3):
+  autorefine quickstart
+  autorefine quickstart --json
+"""
+
 _EP_MANUAL = """examples (manual/expert mode, SPEC.md 59.3):
   autorefine manual --task parity-v1 \\
       --set architecture=[16,8] --set model_family=mlp --set train_steps=400
@@ -2967,6 +2990,17 @@ def build_parser() -> argparse.ArgumentParser:
                         help="where the dashboard's runs land (default runs)")
     _add_config_flag(p_dash)  # 47.1.2
     p_dash.set_defaults(func=_cmd_dashboard)
+
+    p_qs = sub.add_parser(
+        "quickstart",
+        help="v0.51 (SPEC.md 65.3): print the Quickstart — the same steps "
+             "the README and the dashboard's first screen carry",
+        epilog=_EP_QUICKSTART,  # 47.2.2
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p_qs.add_argument("--json", action="store_true",
+                      help="print {intro, steps} as pure JSON")
+    _add_config_flag(p_qs)  # 47.1.2
+    p_qs.set_defaults(func=_cmd_quickstart)
 
     p_plug = sub.add_parser("plugins", help="plugin entry points (SPEC.md 21.3)",
                             epilog=_EP_PLUGINS,  # 47.2.2

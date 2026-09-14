@@ -128,6 +128,16 @@ from .uncertainty import (  # 64.2 (v0.50, B6): uncertainty on headline numbers
     headline_uncertainty,
     seed_spread_stats,
 )
+from .quickstart import (  # 65 (v0.51): the Quickstart (one source, three surfaces)
+    QUICKSTART_INTRO,
+    QUICKSTART_STEPS,
+    demo_recipe,
+    quickstart_commands,
+    quickstart_steps,
+    render_quickstart,
+    render_quickstart_md,
+    run_demo,
+)
 from .plugins import PluginError, discover, register_policies, register_tasks
 from .tasks import (
     TASKS,
@@ -147,8 +157,8 @@ from .tasks import (
 
 # SPEC.md 33.1 (C1): single version source — must equal pyproject.toml's
 # [project].version (enforced by the A23 test); one step per feature round
-# (v0.50 ⇒ 0.50.0, M53, SPEC.md 64)
-__version__ = "0.50.0"
+# (v0.51 ⇒ 0.51.0, M54, SPEC.md 65)
+__version__ = "0.51.0"
 
 __all__ = [
     "AutoRefineEnv",
@@ -253,5 +263,9 @@ __all__ = [
     # by `benchmark_view` internally.
     "benchmark_view", "render_benchmark", "render_benchmark_md",
     "seed_spread_stats", "format_pm", "headline_uncertainty",
+    # v0.51: the Quickstart — one source, three surfaces (SPEC.md 65, A55)
+    "QUICKSTART_INTRO", "QUICKSTART_STEPS", "quickstart_steps",
+    "quickstart_commands", "render_quickstart", "render_quickstart_md",
+    "demo_recipe", "run_demo",
     "__version__",
 ]
