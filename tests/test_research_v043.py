@@ -166,6 +166,11 @@ def test_svg_spec_lineage_render():
     assert "hidden_dim" in svg  # the edge tooltip's mutated fields
     assert "Δscore 10.00" in svg
     assert "Δscore 3.00" in svg  # the curriculum re-pin
+    # the readability aids: the champion highlight outline + the legend
+    # entries (champion/root) with their tooltips
+    assert "champion (best score of the run)" in svg
+    assert "champion outline — the best-scoring spec of the run" in svg
+    assert "root outline — the run baseline spec" in svg
     empty = svg_spec_lineage({"nodes": {}, "edges": []})
     _parse(empty)
     assert "no logged specs (empty run)" in empty
@@ -225,6 +230,11 @@ def test_svg_field_response_render():
     assert "n=1" in svg
     assert "hidden_dim 128: mean 60.00 (n=1, best 60.00)" in svg
     assert "model_family mlp: mean 58.33 (n=3, best 65.00)" in svg
+    # the readability aids: the per-row 0-100 scale bar and the best-
+    # value-per-field highlight (star + outline + title suffix)
+    assert "scale: bar height = mean holdout score (0-100)" in svg
+    assert "best value for this field" in svg
+    assert "★" in svg
     empty = svg_field_response({})
     _parse(empty)
     assert "no scored specs to aggregate" in empty
@@ -270,8 +280,12 @@ def test_svg_gate_region_render():
     assert "score 55.00 · gen_gap 1.00 · score · best_before 60.00" in svg
     assert "score 65.00 · gen_gap 10.00 · overfit · best_before 62.00" in svg
     # the legend + the 18.6 caption
-    for token in ("accepted", "overfit", "score", "ci"):
+    for token in ("accepted", "overfit", "score", "ci", "other"):
         assert token in svg
+    assert "dot color — gate verdict: accepted" in svg
+    # the readability aids: the champion ring on the best-accepted dot
+    assert "champion — best accepted candidate (score 60.00, gen_gap 1.00)" \
+        in svg
     assert "the per-step CI margin shifts this by z·SE" in svg
     empty = svg_gate_region({"baseline_score": None, "tol": 0.05,
                              "candidates": []})
@@ -327,6 +341,10 @@ def test_svg_bandit_beliefs_render():
         "best-believed (max UCB)" in svg
     assert "b: win 4/10 (0.400)" in svg
     assert "best-believed (max UCB)" in svg
+    # the readability aids: the numeric readouts (win % above the tick,
+    # UCB below the diamond)
+    assert ">50%</text>" in svg
+    assert ">0.70</text>" in svg
     # the flag appears once per best-row element (lane/band/tick/diamond
     # tooltips) and nowhere in the non-best row's title
     assert svg.count("best-believed (max UCB)") == 4
@@ -334,6 +352,10 @@ def test_svg_bandit_beliefs_render():
     assert i >= 0
     b_title = svg[i:svg.find("</title>", i)]
     assert "best-believed" not in b_title
+    # the readability aids stay out of the pinned per-element titles
+    # (the readouts are separate text elements, not title suffixes)
+    assert "best value for this field" not in svg
+    assert "gate verdict" not in svg
     assert "band = 95% Wilson CI · tick = win rate · diamond = UCB " \
         "· ★ = best-believed" in svg
     empty = svg_bandit_beliefs({})

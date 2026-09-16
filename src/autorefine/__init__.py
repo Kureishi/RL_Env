@@ -51,6 +51,10 @@ from .plotting import (
     svg_spec_fingerprint,  # 60.2 (v0.46) the spec fingerprint ("DNA")
     svg_interaction_heatmap,  # 60.3 (v0.46) the interaction heatmap
     svg_weighted_reslice,  # 60.4 (v0.46) the objective-weight reslice
+    svg_run_verdict,  # the run verdict card (target vs final best)
+    svg_knob_signal,  # the decisive-knob ranking (signal vs noise)
+    svg_efficiency_knee,  # the efficiency knee (bang for buck)
+    svg_rejection_anatomy,  # the rejection mix + stall story
 )
 from .dossier import build_dossier  # 58.3 (v0.44) the run dossier
 from .provenance import (
@@ -66,6 +70,10 @@ from .research import (  # 57 (v0.43): the research decision surfaces (pure)
     gate_region_candidates,
     spec_lineage,
     frontier3,  # 58.2 (v0.44) the 3-objective frontier
+    run_verdict,  # the run verdict card's data
+    knob_signal,  # the decisive-knob ranking's data
+    frontier_knee,  # the efficiency knee's data
+    rejection_anatomy,  # the rejection mix + stall story's data
 )
 from .steering import (  # 59 (v0.45): parameters interpreted + modified
     SteeringState,
@@ -206,6 +214,10 @@ __all__ = [
     "svg_spec_fingerprint",
     "svg_interaction_heatmap",
     "svg_weighted_reslice",
+    "svg_run_verdict",
+    "svg_knob_signal",
+    "svg_efficiency_knee",
+    "svg_rejection_anatomy",
     "canonical_hash",
     "env_provenance",
     "provenance_card",
@@ -215,6 +227,10 @@ __all__ = [
     "field_response_stats",
     "gate_region_candidates",
     "spec_lineage",
+    "run_verdict",
+    "knob_signal",
+    "frontier_knee",
+    "rejection_anatomy",
     "PluginError",
     "discover",
     "register_policies",

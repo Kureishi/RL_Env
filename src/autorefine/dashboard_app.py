@@ -111,6 +111,10 @@ from autorefine.plotting import (
     svg_seed_variance,  # D1 view (SPEC.md 29.1)
     svg_spec_lineage,  # 57.1 (v0.43) the spec-lineage DAG
     svg_task_returns,  # noqa: F401 (D2 view, SPEC.md 29.2)
+    svg_run_verdict,  # the run verdict card (target vs final best)
+    svg_knob_signal,  # the decisive-knob ranking (signal vs noise)
+    svg_efficiency_knee,  # the efficiency knee (bang for buck)
+    svg_rejection_anatomy,  # the rejection mix + stall story
 )
 # SPEC.md 56.1 (v0.42): the provenance certificate — the app's Provenance
 # expander (56.4) is a thin renderer over these pure core functions.
@@ -127,6 +131,10 @@ from autorefine.research import (
     field_response_stats,  # 57.2 (v0.43) per-field value -> mean score
     gate_region_candidates,  # 57.3 (v0.43) the (score, gap) verdict points
     spec_lineage,  # 57.1 (v0.43) the spec-lineage graph
+    run_verdict,  # the run verdict card's data (target vs final best)
+    knob_signal,  # the decisive-knob ranking's data (signal vs noise)
+    frontier_knee,  # the efficiency knee's data (bang for buck)
+    rejection_anatomy,  # the rejection mix + stall story's data
 )
 from autorefine.tasks import CsvTask
 
@@ -1161,6 +1169,28 @@ def _render_result(res: dict) -> None:
                     unsafe_allow_html=True)
     else:
         st.caption("bandit belief bars need a bandit-policy run (field_stats)")
+
+    # The conclusion surfaces — four pure derivations over the same run
+    # data (no new logged data, no new widget, AppTest-safe): the verdict
+    # card, the decisive-knob ranking, the efficiency knee, and the
+    # rejection anatomy. A friendly caption on failure (the 49.4.3
+    # pattern), never a page crash.
+    st.subheader("Conclusions")
+    try:
+        _summ_c = res.get("summary") or {}
+        st.markdown(svg_run_verdict(run_verdict(_summ_c, _ren), **pal),
+                    unsafe_allow_html=True)
+        st.markdown(svg_knob_signal(knob_signal(_ren), **pal),
+                    unsafe_allow_html=True)
+        st.markdown(svg_efficiency_knee(
+            frontier_knee(_ren, state_dim=res.get("state_dim"),
+                          n_out=res.get("n_out"), grid=res.get("grid")),
+            **pal), unsafe_allow_html=True)
+        st.markdown(svg_rejection_anatomy(rejection_anatomy(_summ_c, _ren),
+                                          **pal),
+                    unsafe_allow_html=True)
+    except (ValueError, TypeError, KeyError) as exc:  # 49.4.3 pattern
+        st.error(f"conclusions unavailable: {exc}")
 
     # SPEC.md 59.1 (v0.45): the parameter inspector — the two real layers
     # (architecture `SPEC_FIELDS` + loop `KNOBS`) as one read-only block

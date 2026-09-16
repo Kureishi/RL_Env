@@ -17,6 +17,11 @@ from contextlib import contextmanager
 
 from .memory import KIND_BASELINE, KIND_CURRICULUM, KIND_EXPERIMENT  # 35.1 (C4)
 
+# the knob_signal tier thresholds live with the shaper (one home each);
+# importing them here is safe — the research import chain does not
+# come back through plotting
+from .research import KNOB_SPREAD_DECISIVE, KNOB_SPREAD_WEAK
+
 _AXIS = "#333333"
 _LINE = "#1a66c2"
 _BASELINE = "#c2410c"
@@ -2879,6 +2884,11 @@ def _svg_spec_lineage(lineage, width: int, row_h: int) -> str:
     max_x = max(pos.values())
     max_d = max(depth.values())
     L, R, T = 20.0, 20.0, 40.0
+    # a column must stay wide enough for a node box + label ("<family>
+    # <hash6>" ≈ 60px at 11px monospace), otherwise the boxes overlap and
+    # clip each other's text — widen the canvas instead of shrinking nodes
+    min_unit = 96.0
+    width = int(max(width, L + R + min_unit * (max_x + 1.0)))
     unit = (width - L - R) / (max_x + 1.0)
     height = int(T + (max_d + 1) * row_h + 56)
 
@@ -2910,6 +2920,15 @@ def _svg_spec_lineage(lineage, width: int, row_h: int) -> str:
             f'stroke="{stroke}" stroke-width="{dw:.2f}">'
             f'<title>mutation {html.escape(", ".join(e.get("fields") or ["?"]))} '
             f'· {"accepted" if ok else "rejected"} · Δscore {dlabel}</title></path>')
+    # the champion (best-scoring node; ties: first in log order) gets a
+    # highlight outline so "where we ended up" is visible at a glance;
+    # the root (the run baseline) gets the baseline-color outline
+    champion = None
+    best_seen = None
+    for h, n in nodes.items():
+        s = n.get("score")
+        if _finite(s) and (best_seen is None or float(s) > best_seen):
+            champion, best_seen = h, float(s)
     # nodes on top
     box_h = 40.0
     for h, n in nodes.items():
@@ -2920,28 +2939,54 @@ def _svg_spec_lineage(lineage, width: int, row_h: int) -> str:
         slabel = ("—" if not isinstance(score, (int, float))
                   or isinstance(score, bool) else f"{float(score):.1f}")
         node_fill = _ACCEPTED if ok else _REJECTED
+        is_champ = (h == champion)
+        is_root = (h == root)
+        stroke = (f' stroke="{_HIGHLIGHT}" stroke-width="3"' if is_champ
+                  else (f' stroke="{_BASELINE}" stroke-width="2"' if is_root
+                        else ""))
         parts.append(f'<rect x="{x - w / 2:.1f}" y="{y - box_h / 2:.1f}" '
                      f'width="{w:.1f}" height="{box_h:.1f}" rx="8" '
-                     f'fill="{node_fill}" fill-opacity="0.85">')
+                     f'fill="{node_fill}" fill-opacity="0.85"{stroke}>')
         fields = incoming.get(h, {}).get("fields") or []
         title = (f'{n.get("label", h)} · score {slabel} · '
                  f'{"accepted" if ok else "rejected"} · '
-                 f'mutated: {", ".join(fields) if fields else "(root)"}')
+                 f'mutated: {", ".join(fields) if fields else "(root)"}'
+                 + (" · champion (best score of the run)" if is_champ else "")
+                 + (" · root (run baseline)" if is_root else ""))
         parts.append(f'<title>{html.escape(title)}</title></rect>')
         parts.append(f'<text x="{x:.1f}" y="{y - 2:.1f}" text-anchor="middle" '
                      f'font-size="11" fill="white">'
                      f'{html.escape(str(n.get("label", h)))}</text>')
         parts.append(f'<text x="{x:.1f}" y="{y + 13:.1f}" text-anchor="middle" '
                      f'font-size="12" fill="white">{slabel}</text>')
-    # legend + summary
+    # legend + summary (every swatch carries a tooltip explaining it);
+    # the edge caption is its own item with explicit spacing so it can
+    # never collide with the last legend swatch
     ly = height - 34.0
     lx = L
-    for text, fill in (("accepted", _ACCEPTED), ("rejected", _REJECTED)):
-        parts.append(f'<rect x="{lx:.1f}" y="{ly - 9:.1f}" width="10" height="10" '
-                     f'fill="{fill}" fill-opacity="0.85"/>')
+    legend = (("accepted", "fill", _ACCEPTED),
+              ("rejected", "fill", _REJECTED),
+              ("champion", "stroke", _HIGHLIGHT),
+              ("root", "stroke", _BASELINE))
+    for text, kind, color in legend:
+        if kind == "fill":
+            parts.append(f'<rect x="{lx:.1f}" y="{ly - 9:.1f}" '
+                         f'width="10" height="10" fill="{color}" '
+                         f'fill-opacity="0.85">'
+                         f'<title>node fill — {text} candidates</title>'
+                         f'</rect>')
+        else:
+            tip = ("champion outline — the best-scoring spec of the run"
+                   if text == "champion"
+                   else "root outline — the run baseline spec")
+            sw = 2.5 if text == "champion" else 2.0
+            parts.append(f'<rect x="{lx:.1f}" y="{ly - 9:.1f}" '
+                         f'width="10" height="10" fill="none" '
+                         f'stroke="{color}" stroke-width="{sw}">'
+                         f'<title>{tip}</title></rect>')
         parts.append(f'<text x="{lx + 14:.1f}" y="{ly:.1f}" font-size="11" '
                      f'fill="{_AXIS}">{text}</text>')
-        lx += 14 + 7 * len(text) + 20
+        lx += 14 + 7 * len(text) + 24
     parts.append(f'<text x="{lx:.1f}" y="{ly:.1f}" font-size="11" '
                  f'fill="{_AXIS}">edge = one mutation · width ∝ |Δscore|</text>')
     summary = (f"n specs = {len(nodes)} · n mutations = {len(edges)}")
@@ -2977,7 +3022,7 @@ def _svg_field_response(stats, width: int, row_h: int) -> str:
                      f'font-size="13" fill="{_AXIS}">no scored specs to aggregate</text>')
         parts.append("</svg>")
         return "\n".join(parts)
-    L, R, T = 120.0, 24.0, 34.0
+    L, R, T = 120.0, 64.0, 34.0
     n_rows = len(fields)
     max_vals = max(len(stats[f]) for f in fields)
     cell_w = min(110.0, (width - L - R) / max(1, max_vals))
@@ -2986,6 +3031,27 @@ def _svg_field_response(stats, width: int, row_h: int) -> str:
     for fi, field in enumerate(fields):
         vals = stats[field]
         y0 = T + fi * row_h
+        # the best cell of this field (max mean; ties: first in sort order)
+        # gets a highlight outline + a star so the winning value is obvious
+        best_value = None
+        best_mean = None
+        for v in sorted(vals, key=_fv_sort_key):
+            m = float(vals[v].get("mean", 0.0) or 0.0)
+            if best_mean is None or m > best_mean:
+                best_value, best_mean = v, m
+        # a per-row 0-100 scale bar (bar height = mean holdout score)
+        sx = width - 34.0
+        sbase = y0 + row_h - 16.0
+        parts.append(f'<line x1="{sx:.1f}" y1="{sbase:.1f}" '
+                     f'x2="{sx:.1f}" y2="{sbase - (row_h - 32.0):.1f}" '
+                     f'stroke="{_AXIS}" stroke-width="1.5">'
+                     f'<title>scale: bar height = mean holdout score '
+                     f'(0-100)</title></line>')
+        parts.append(f'<text x="{sx + 4:.1f}" y="{sbase + 4:.1f}" '
+                     f'font-size="9" fill="{_AXIS}">0</text>')
+        parts.append(f'<text x="{sx + 4:.1f}" '
+                     f'y="{sbase - (row_h - 32.0) - 2:.1f}" '
+                     f'font-size="9" fill="{_AXIS}">100</text>')
         parts.append(f'<text x="{L - 10:.1f}" y="{y0 + row_h * 0.62:.1f}" '
                      f'text-anchor="end" font-size="12" fill="{_AXIS}">'
                      f'{html.escape(str(field))}</text>')
@@ -3001,6 +3067,9 @@ def _svg_field_response(stats, width: int, row_h: int) -> str:
             frac = min(max(mean, 0.0), 100.0) / 100.0
             bh = max(1.0, frac * bar_max)
             title = f"{field} {value}: mean {mean:.2f} (n={n}, best {best:.2f})"
+            is_best_cell = (value == best_value)
+            best_stroke = (f' stroke="{_HIGHLIGHT}" stroke-width="2"'
+                           if is_best_cell else "")
             parts.append(f'<rect x="{x0 + 2:.1f}" y="{y0 + 2:.1f}" '
                          f'width="{max(1.0, cell_w - 4):.1f}" height="{row_h - 4:.1f}" '
                          f'fill="{_LANE_BG}"><title>{html.escape(title)}</title></rect>')
@@ -3009,10 +3078,17 @@ def _svg_field_response(stats, width: int, row_h: int) -> str:
                          f'stroke="{_AXIS}" stroke-width="1"/>')
             parts.append(f'<rect x="{cx - 12:.1f}" y="{base_y - bh:.1f}" '
                          f'width="24" height="{bh:.1f}" fill="{_LINE}" '
-                         f'fill-opacity="0.85"><title>{html.escape(title)}</title></rect>')
+                         f'fill-opacity="0.85"{best_stroke}>'
+                         f'<title>{html.escape(title)}'
+                         + (' · best value for this field' if is_best_cell else "")
+                         + '</title></rect>')
             parts.append(f'<text x="{cx:.1f}" y="{base_y - bh - 4:.1f}" '
                          f'text-anchor="middle" font-size="11" fill="{_AXIS}">'
                          f'{mean:.1f}</text>')
+            if is_best_cell:
+                parts.append(f'<text x="{cx:.1f}" y="{base_y - bh - 18:.1f}" '
+                             f'text-anchor="middle" font-size="11" '
+                             f'fill="{_HIGHLIGHT}">★</text>')
             parts.append(f'<text x="{cx:.1f}" y="{y0 + row_h - 4:.1f}" '
                          f'text-anchor="middle" font-size="10" fill="{_AXIS}">'
                          f'{value} · n={n}</text>')
@@ -3069,6 +3145,17 @@ def _svg_gate_region(data, width: int, height: int) -> str:
 
     parts = _svg_header(width, height, "gate-decision region (score × gen gap)")
     parts += _svg_axes(L, T, pw, ph, 0.0, ymax, 0.0, xmax, "holdout score")
+    # faint gridlines at the tick positions (readability; the axes already
+    # draw the ticks at these same k/4 fractions)
+    for k in range(1, 4):
+        gy = T + ph * k / 4.0
+        gx = L + pw * k / 4.0
+        parts.append(f'<line x1="{L:.1f}" y1="{gy:.1f}" '
+                     f'x2="{L + pw:.1f}" y2="{gy:.1f}" '
+                     f'stroke="{_AXIS}" stroke-opacity="0.15"/>')
+        parts.append(f'<line x1="{gx:.1f}" y1="{T:.1f}" '
+                     f'x2="{gx:.1f}" y2="{T + ph:.1f}" '
+                     f'stroke="{_AXIS}" stroke-opacity="0.15"/>')
     # the acceptance region vs the run baseline (18.5 penalty, z = 0)
     if B is not None and 0.0 <= B < xmax:
         top_right = min(ymax, (1.0 + tol) * xmax - B)
@@ -3108,12 +3195,28 @@ def _svg_gate_region(data, width: int, height: int) -> str:
                  f"best_before {bbt}")
         parts.append(f'<circle cx="{px(s):.1f}" cy="{py(g):.1f}" r="5" '
                      f'fill="{fill}"><title>{html.escape(title)}</title></circle>')
+    # the champion ring: the best-accepted candidate, marked above the dots
+    champ = None
+    for c in cands:
+        if c.get("accepted"):
+            if champ is None or float(c["score"]) > float(champ["score"]):
+                champ = c
+    if champ is not None:
+        cs = float(champ["score"])
+        cg = float(champ["gen_gap"]) if _finite(champ.get("gen_gap")) else 0.0
+        parts.append(f'<circle cx="{px(cs):.1f}" cy="{py(cg):.1f}" r="8" '
+                     f'fill="none" stroke="{_HIGHLIGHT}" stroke-width="2.5">'
+                     f'<title>champion — best accepted candidate '
+                     f'(score {cs:.2f}, gen_gap {cg:.2f})</title></circle>')
     # legend + caption
     ly = T + ph + 26.0
     lx = L
     for text, fill in (("accepted", _ACCEPTED), ("overfit", _SCORED_REJ),
-                       ("score", _BASELINE), ("ci", _LINE)):
-        parts.append(f'<circle cx="{lx + 5:.1f}" cy="{ly - 4:.1f}" r="5" fill="{fill}"/>')
+                       ("score", _BASELINE), ("ci", _LINE),
+                       ("other", _REJECTED)):
+        parts.append(f'<circle cx="{lx + 5:.1f}" cy="{ly - 4:.1f}" r="5" '
+                     f'fill="{fill}"><title>dot color — gate verdict: '
+                     f'{text}</title></circle>')
         parts.append(f'<text x="{lx + 14:.1f}" y="{ly:.1f}" font-size="11" '
                      f'fill="{_AXIS}">{text}</text>')
         lx += 14 + 7 * len(text) + 16
@@ -3196,12 +3299,20 @@ def _svg_bandit_beliefs(data, width: int, row_h: int) -> str:
         parts.append(f'<rect x="{px(p) - 1.5:.1f}" y="{cy - 8:.1f}" '
                      f'width="3" height="16" fill="{_LINE}">'
                      f'<title>{html.escape(title)}</title></rect>')
+        # a numeric readout above the tick (the win rate as a percentage)
+        parts.append(f'<text x="{px(p):.1f}" y="{cy - 12:.1f}" '
+                     f'text-anchor="middle" font-size="10" fill="{_AXIS}">'
+                     f'{p:.0%}</text>')
         # the UCB diamond
         if _finite(u):
             cx = px(float(u))
             parts.append(f'<path d="M {cx:.1f} {cy - 7:.1f} L {cx + 7:.1f} {cy:.1f} '
                          f'L {cx:.1f} {cy + 7:.1f} L {cx - 7:.1f} {cy:.1f} Z" '
                          f'fill="{_BASELINE}"><title>{html.escape(title)}</title></path>')
+            # a numeric readout below the diamond (the UCB value)
+            parts.append(f'<text x="{cx:.1f}" y="{cy + 18:.1f}" '
+                         f'text-anchor="middle" font-size="10" fill="{_AXIS}">'
+                         f'{float(u):.2f}</text>')
     # x axis + ticks
     ay = T + n * row_h + 8.0
     parts.append(f'<line x1="{L:.1f}" y1="{ay:.1f}" x2="{L + pw:.1f}" y2="{ay:.1f}" '
@@ -3850,5 +3961,478 @@ def _svg_weighted_reslice(data, width: int, height: int) -> str:
                  f'(pool-relative min-max, renormalized over its axes) · '
                  f'{int(d.get("passing", 0) or 0)}/{int(d.get("pool", 0) or 0)} '
                  f'pass the weighted gate</text>')
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+# --- The conclusion surfaces --------------------------------------------------
+# The "so what?" round: the run verdict card, the decisive-knob ranking,
+# the efficiency knee, and the rejection anatomy. All four render the pure
+# data shapes produced by the `research` shapers (run_verdict /
+# knob_signal / frontier_knee / rejection_anatomy) from the history
+# already logged — same house rules as the 57/58/60 renderers: pure,
+# valid XML, deterministic (G2), theme-aware via `_styled`, a <title>
+# tooltip on every data mark, an honest empty state.
+
+
+def svg_run_verdict(v, width: int = 640, height: int = 220,
+                    palette: str = "default", dark: bool = False) -> str:
+    """The run verdict card — target vs final best in one decisive read:
+    a 0–100 axis with the target line (dashed), the baseline diamond,
+    and the final best as a tick with its CI band (best ± z·std), the
+    verdict line ("PASS +3.3 vs target" / "MISS −1.7 vs target" /
+    "no target set"), and the caption (finished reason + improvement
+    factor over the baseline). `research.run_verdict` shape. A <title>
+    per mark. Pure, valid XML, deterministic (G2); no final best →
+    header + message."""
+    with _styled(palette, dark):
+        return _svg_run_verdict(v, width, height)
+
+
+def _svg_run_verdict(v, width: int, height: int) -> str:
+    d = v if isinstance(v, dict) else {}
+    best = d.get("best")
+    if not _finite(best):
+        parts = _svg_header(width, height, "run verdict (empty)")
+        parts.append(f'<text x="{width // 2}" y="{height // 2}" '
+                     f'text-anchor="middle" font-size="13" fill="{_AXIS}">'
+                     f'no scored run yet</text>')
+        parts.append("</svg>")
+        return "\n".join(parts)
+    best = float(best)
+    target = d.get("target")
+    baseline = d.get("baseline")
+    std = d.get("std")
+    z = d.get("z")
+    z = float(z) if _finite(z) else 1.0
+    margin = d.get("margin")
+    verdict = d.get("pass")
+    L, R = 64.0, 40.0
+    pw = width - L - R
+
+    def px(val: float) -> float:
+        return L + pw * min(max(float(val), 0.0), 100.0) / 100.0
+
+    parts = _svg_header(width, height, "run verdict card")
+    # the verdict line
+    if verdict is None:
+        vtxt = (f"no target set — final best {best:.1f}"
+                + (f" (baseline {float(baseline):.1f})" if _finite(baseline)
+                   else ""))
+        vfill = _AXIS
+    else:
+        m = float(margin) if _finite(margin) else 0.0
+        vtxt = (f"PASS — {m:+.1f} vs target {float(target):.1f}"
+                if verdict else
+                f"MISS — {m:+.1f} vs target {float(target):.1f}")
+        vfill = _ACCEPTED if verdict else _SCORED_REJ
+    status = ("met" if verdict else
+              ("not met" if verdict is not None else "no target set"))
+    tgt = target if target is not None else "n/a"
+    title_txt = f"final best {best:.2f}" + " · " + f"target {tgt}"
+    title_txt += " · " + status
+    parts.append(f'<text x="{L:.1f}" y="30" font-size="14" fill="{vfill}">'
+                 f'{html.escape(vtxt)}<title>{title_txt}</title></text>')
+    # the CI band (best ± z·std) — the champion's own uncertainty
+    half = z * float(std) if _finite(std) else None
+    if half is not None:
+        bx0 = px(best - half)
+        bx1 = px(best + half)
+        band_title = (f"final best {best:.2f} · CI ±{half:.2f} "
+                      f"(z = {z:g} × std {float(std):.2f})")
+        parts.append(f'<rect x="{bx0:.1f}" y="112" '
+                     f'width="{max(1.0, bx1 - bx0):.1f}" height="24" '
+                     f'fill="{_BAND}" fill-opacity="0.85">'
+                     f'<title>{html.escape(band_title)}</title></rect>')
+    # the target line (dashed)
+    if _finite(target):
+        tx = px(float(target))
+        t_title = f"target {float(target):.2f}"
+        parts.append(f'<line x1="{tx:.1f}" y1="100" x2="{tx:.1f}" y2="148" '
+                     f'stroke="{_HIGHLIGHT}" stroke-width="2" '
+                     f'stroke-dasharray="5,4"><title>{html.escape(t_title)}</title></line>')
+        parts.append(f'<text x="{tx:.1f}" y="94" text-anchor="middle" '
+                     f'font-size="11" fill="{_HIGHLIGHT}">target '
+                     f'{float(target):g}</text>')
+    # the baseline diamond
+    if _finite(baseline):
+        bx = px(float(baseline))
+        b_title = f"baseline {float(baseline):.2f}"
+        parts.append(f'<path d="M {bx:.1f} 118 L {bx + 6:.1f} 124 L {bx:.1f} '
+                     f'130 L {bx - 6:.1f} 124 Z" fill="{_BASELINE}">'
+                     f'<title>{html.escape(b_title)}</title></path>')
+        parts.append(f'<text x="{bx:.1f}" y="80" text-anchor="middle" '
+                     f'font-size="11" fill="{_BASELINE}">baseline '
+                     f'{float(baseline):g}</text>')
+    # the final-best tick (the verdict color)
+    fx = px(best)
+    ffill = _ACCEPTED if verdict else (_SCORED_REJ if verdict is not None
+                                       else _LINE)
+    f_title = (f"final best {best:.2f}"
+               + (f" · margin {float(margin):+.2f} vs target"
+                  if _finite(margin) else ""))
+    parts.append(f'<line x1="{fx:.1f}" y1="104" x2="{fx:.1f}" y2="144" '
+                 f'stroke="{ffill}" stroke-width="3">'
+                 f'<title>{html.escape(f_title)}</title></line>')
+    parts.append(f'<text x="{fx:.1f}" y="66" text-anchor="middle" '
+                 f'font-size="11" fill="{ffill}">best {best:g}'
+                 + (f" ({float(margin):+.1f})" if _finite(margin) else "")
+                 + "</text>")
+    # the 0–100 axis
+    parts.append(f'<line x1="{L:.1f}" y1="124" x2="{width - R:.1f}" '
+                 f'y2="124" stroke="{_AXIS}" stroke-width="1"/>')
+    for tick in (0.0, 25.0, 50.0, 75.0, 100.0):
+        x = px(tick)
+        parts.append(f'<line x1="{x:.1f}" y1="124" x2="{x:.1f}" y2="130" '
+                     f'stroke="{_AXIS}" stroke-width="1"/>')
+        parts.append(f'<text x="{x:.1f}" y="144" text-anchor="middle" '
+                     f'font-size="10" fill="{_AXIS}">{tick:g}</text>')
+    # the caption: finished reason + improvement over the baseline
+    cap = "holdout score · "
+    fr = d.get("finished_reason")
+    if isinstance(fr, str) and fr:
+        cap += f"finished: {fr} · "
+    imf = d.get("improvement_factor")
+    if _finite(imf):
+        cap += f"improvement ×{float(imf):.2f} (best vs baseline)"
+    else:
+        cap = cap[:-2] + "."
+    parts.append(f'<text x="{L:.1f}" y="{height - 8}" font-size="11" '
+                 f'fill="{_AXIS}">{html.escape(cap)}</text>')
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def svg_knob_signal(data, width: int = 640, row_h: int = 40,
+                    palette: str = "default", dark: bool = False) -> str:
+    """The decisive-knob ranking — one row per spec field, ordered
+    decisive → weak → noise → untried (spread desc within tier, then
+    field name; `research.knob_signal` shape): the [worst mean, best
+    mean] interval of the field's value→mean holdout scores on a 0–100
+    axis (the bar's WIDTH is the score-impact spread), a star at the
+    best value, the mutation wins/trials readout, and a tier chip. The
+    top caption carries the fixed tier thresholds from the data. A
+    <title> per row carries the full numbers. Pure, valid XML,
+    deterministic (G2); empty → header + message."""
+    with _styled(palette, dark):
+        return _svg_knob_signal(data, width, row_h)
+
+
+def _svg_knob_signal(data, width: int, row_h: int) -> str:
+    d = data if isinstance(data, dict) else {}
+    fields = [f for f in (d.get("fields") or [])
+              if isinstance(f, dict) and isinstance(f.get("field"), str)]
+    if not fields:
+        parts = _svg_header(width, height := 120, "decisive-knob ranking (empty)")
+        parts.append(f'<text x="{width // 2}" y="{height // 2}" '
+                     f'text-anchor="middle" font-size="13" fill="{_AXIS}">'
+                     f'no scored specs to rank</text>')
+        parts.append("</svg>")
+        return "\n".join(parts)
+    thr = d.get("thresholds") or {}
+    td = float(thr.get("decisive", KNOB_SPREAD_DECISIVE))
+    tw = float(thr.get("weak", KNOB_SPREAD_WEAK))
+    n = len(fields)
+    # right margin must hold BOTH the readout (right-anchored, ending 8px
+    # before the chip) and the tier chip (chip + label), clear of the lane
+    L, R = 170.0, 210.0
+    T = 34.0
+    height = int(T + n * row_h + 52)
+    pw = width - L - R
+
+    def px(val: float) -> float:
+        return L + pw * min(max(float(val), 0.0), 100.0) / 100.0
+
+    tier_color = {
+        "decisive": _ACCEPTED,
+        "weak": _BASELINE,
+        "noise": _REJECTED,
+        "untried": _AXIS,
+    }
+    parts = _svg_header(width, height, "decisive-knob ranking")
+    parts.append(f'<text x="{width - R:.1f}" y="22" text-anchor="end" '
+                 f'font-size="11" fill="{_AXIS}">impact = best − worst '
+                 f"mean holdout score · decisive ≥ {td:g} · weak ≥ {tw:g} · "
+                 f"noise below</text>")
+    for i, f in enumerate(fields):
+        name = f["field"]
+        tier = str(f.get("tier", "noise"))
+        color = tier_color.get(tier, _REJECTED)
+        y0 = T + i * row_h
+        cy = y0 + row_h * 0.5
+        spread = f.get("spread")
+        n_values = int(f.get("n_values", 0) or 0)
+        best_v = f.get("best_value")
+        worst_v = f.get("worst_value")
+        best_m = f.get("best_mean")
+        worst_m = f.get("worst_mean")
+        trials = int(f.get("trials", 0) or 0)
+        wins = int(f.get("wins", 0) or 0)
+        title = (f"{name}: {n_values} values tried · "
+                 + (f"best {float(best_m):.1f} ({best_v}) · "
+                    f"worst {float(worst_m):.1f} ({worst_v}) · "
+                    f"spread {float(spread):.1f}" if n_values >= 2
+                    else "single value — untried")
+                 + f" · mutated {wins}/{trials} → tier {tier}")
+        parts.append(f'<text x="{L - 10:.1f}" y="{cy + 4:.1f}" '
+                     f'text-anchor="end" font-size="12" fill="{_AXIS}">'
+                     f'{html.escape(name)}</text>')
+        parts.append(f'<rect x="{L:.1f}" y="{y0 + 4:.1f}" width="{pw:.1f}" '
+                     f'height="{row_h - 8:.1f}" fill="{_LANE_BG}">'
+                     f'<title>{html.escape(title)}</title></rect>')
+        if n_values >= 2 and _finite(best_m) and _finite(worst_m):
+            x0 = px(min(float(best_m), float(worst_m)))
+            x1 = px(max(float(best_m), float(worst_m)))
+            parts.append(f'<rect x="{x0:.1f}" y="{cy - 5:.1f}" '
+                         f'width="{max(2.0, x1 - x0):.1f}" height="10" '
+                         f'fill="{color}" fill-opacity="0.85">'
+                         f'<title>{html.escape(title)}</title></rect>')
+            sx = px(float(best_m))
+            parts.append(f'<text x="{sx:.1f}" y="{cy - 9:.1f}" '
+                         f'text-anchor="middle" font-size="12" '
+                         f'fill="{color}">★</text>')
+            parts.append(f'<text x="{width - R - 8:.1f}" y="{cy + 4:.1f}" '
+                         f'text-anchor="end" font-size="10" fill="{_AXIS}">'
+                         f'best {float(best_m):g} ({html.escape(str(best_v))})'
+                         f' · {wins}/{trials}</text>')
+        else:
+            parts.append(f'<text x="{width - R - 8:.1f}" y="{cy + 4:.1f}" '
+                         f'text-anchor="end" font-size="10" fill="{_AXIS}">'
+                         f'untried · {wins}/{trials}</text>')
+        # the tier chip
+        chip = f'<rect x="{L + pw + 8:.1f}" y="{cy - 8:.1f}" width="8" '
+        chip += f'height="16" fill="{color}"/><text x="{L + pw + 22:.1f}" '
+        chip += (f'y="{cy + 4:.1f}" font-size="10" fill="{_AXIS}">'
+                 f'{html.escape(tier)}</text>')
+        parts.append(chip)
+    # the 0–100 axis
+    ay = T + n * row_h + 8.0
+    parts.append(f'<line x1="{L:.1f}" y1="{ay:.1f}" x2="{L + pw:.1f}" '
+                 f'y2="{ay:.1f}" stroke="{_AXIS}" stroke-width="1"/>')
+    for tick in (0.0, 25.0, 50.0, 75.0, 100.0):
+        x = px(tick)
+        parts.append(f'<line x1="{x:.1f}" y1="{ay:.1f}" x2="{x:.1f}" '
+                     f'y2="{ay + 5:.1f}" stroke="{_AXIS}" stroke-width="1"/>')
+        parts.append(f'<text x="{x:.1f}" y="{ay + 18:.1f}" '
+                     f'text-anchor="middle" font-size="10" fill="{_AXIS}">'
+                     f'{tick:g}</text>')
+    parts.append(f'<text x="{width // 2}" y="{height - 8}" '
+                 f'text-anchor="middle" font-size="12" fill="{_AXIS}">'
+                 f'bar width = score-impact spread of the field (partial-'
+                 f'dependence style — co-mutated fields confound) · '
+                 f'★ = best value · wins/trials = mutations</text>')
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def svg_efficiency_knee(data, width: int = 640, height: int = 420,
+                        palette: str = "default", dark: bool = False) -> str:
+    """The efficiency knee — the score × train-time scatter with the
+    frontier polyline, the **best** point (max score, highlighted ring
+    + badge) and the **efficient** knee (max distance from the
+    frontier's endpoint segment, star + badge) marked, and the caption
+    quantifying the trade ("best 98.3 @ 4.90s · efficient 96.4 @ 1.20s
+    (−1.9 score for −75% time)"). `research.frontier_knee` shape (the
+    58.2 point list). Non-frontier points render grey. A <title> per
+    point. Pure, valid XML, deterministic (G2); empty → header +
+    message."""
+    with _styled(palette, dark):
+        return _svg_efficiency_knee(data, width, height)
+
+
+def _svg_efficiency_knee(data, width: int, height: int) -> str:
+    d = data if isinstance(data, dict) else {}
+    pts = [p for p in (d.get("points") or [])
+           if isinstance(p, dict) and _finite(p.get("score"))
+           and _finite(p.get("time"))]
+    if not pts:
+        parts = _svg_header(width, height, "efficiency knee (empty)")
+        parts.append(f'<text x="{width // 2}" y="{height // 2}" '
+                     f'text-anchor="middle" font-size="13" fill="{_AXIS}">'
+                     f'no scored candidates yet</text>')
+        parts.append("</svg>")
+        return "\n".join(parts)
+    best_i = d.get("best")
+    knee_i = d.get("knee")
+    best_i = best_i if isinstance(best_i, int) and 0 <= best_i < len(pts) \
+        else None
+    knee_i = knee_i if isinstance(knee_i, int) and 0 <= knee_i < len(pts) \
+        else None
+    L, R, T, B = 56.0, 24.0, 30.0, 56.0
+    pw = width - L - R
+    ph = height - T - B
+    tmax = max(float(p["time"]) for p in pts)
+    tmax = tmax * 1.08 if tmax > 0.0 else 1.0
+
+    def cx(t: float) -> float:
+        return L + pw * min(max(float(t), 0.0), tmax) / tmax
+
+    def cy(s: float) -> float:
+        return T + ph * (1.0 - min(max(float(s), 0.0), 100.0) / 100.0)
+
+    parts = _svg_header(width, height, "efficiency knee (score vs train time)")
+    # grid + axes
+    for frac in (0.0, 25.0, 50.0, 75.0, 100.0):
+        y = cy(frac)
+        parts.append(f'<line x1="{L:.1f}" y1="{y:.1f}" x2="{L + pw:.1f}" '
+                     f'y2="{y:.1f}" stroke="{_LANE_BG}"/>')
+        parts.append(f'<text x="{L - 8:.1f}" y="{y + 4:.1f}" '
+                     f'text-anchor="end" font-size="10" fill="{_AXIS}">'
+                     f'{frac:g}</text>')
+    for k in range(5):
+        t = tmax * k / 4.0
+        x = cx(t)
+        parts.append(f'<line x1="{x:.1f}" y1="{T:.1f}" x2="{x:.1f}" '
+                     f'y2="{T + ph:.1f}" stroke="{_LANE_BG}"/>')
+        parts.append(f'<text x="{x:.1f}" y="{T + ph + 14:.1f}" '
+                     f'text-anchor="middle" font-size="10" fill="{_AXIS}">'
+                     f'{t:g}s</text>')
+    parts.append(f'<line x1="{L:.1f}" y1="{T + ph:.1f}" '
+                 f'x2="{L + pw:.1f}" y2="{T + ph:.1f}" '
+                 f'stroke="{_AXIS}" stroke-width="1"/>')
+    parts.append(f'<line x1="{L:.1f}" y1="{T:.1f}" x2="{L:.1f}" '
+                 f'y2="{T + ph:.1f}" stroke="{_AXIS}" stroke-width="1"/>')
+    # the frontier polyline (time order)
+    fpts = [p for p in pts if p.get("frontier")]
+    if len(fpts) >= 2:
+        seg = " ".join(f"{cx(p['time']):.1f},{cy(p['score']):.1f}"
+                       for p in sorted(fpts, key=lambda p: (p["time"],
+                                                            -p["score"])))
+        parts.append(f'<polyline points="{seg}" fill="none" '
+                     f'stroke="{_LINE}" stroke-width="1.5" '
+                     f'fill-opacity="0.9"/>')
+    # the points
+    for i, p in enumerate(pts):
+        role = ("best" if i == best_i else
+                "efficient (knee)" if i == knee_i else
+                ("frontier" if p.get("frontier") else "dominated"))
+        size = p.get("size")
+        title = (f"{p.get('label', 'spec')}: score {float(p['score']):.2f} "
+                 f"· {float(p['time']):.2f}s · "
+                 f"size {int(size) if _finite(size) else 'n/a'} · {role}")
+        fill = _ACCEPTED if p.get("frontier") else _REJECTED
+        parts.append(f'<circle cx="{cx(p["time"]):.1f}" '
+                     f'cy="{cy(p["score"]):.1f}" r="4.5" fill="{fill}" '
+                     f'fill-opacity="0.9"><title>{html.escape(title)}</title>'
+                     f'</circle>')
+    # the best badge (ring + label)
+    if best_i is not None:
+        bp = pts[best_i]
+        bx, by = cx(bp["time"]), cy(bp["score"])
+        parts.append(f'<circle cx="{bx:.1f}" cy="{by:.1f}" r="9" '
+                     f'fill="none" stroke="{_HIGHLIGHT}" stroke-width="2">'
+                     f'<title>best: score {float(bp["score"]):.2f} @ '
+                     f'{float(bp["time"]):.2f}s</title></circle>')
+        parts.append(f'<text x="{bx:.1f}" y="{by - 14:.1f}" '
+                     f'text-anchor="middle" font-size="11" '
+                     f'fill="{_HIGHLIGHT}">best</text>')
+    # the knee badge (star + label)
+    if knee_i is not None:
+        kp = pts[knee_i]
+        kx, ky = cx(kp["time"]), cy(kp["score"])
+        parts.append(f'<text x="{kx:.1f}" y="{ky + 22:.1f}" '
+                     f'text-anchor="middle" font-size="14" '
+                     f'fill="{_ACCEPTED}">★<title>efficient (knee): '
+                     f'score {float(kp["score"]):.2f} @ '
+                     f'{float(kp["time"]):.2f}s</title></text>')
+    # the caption
+    cap = ""
+    if best_i is not None:
+        bp = pts[best_i]
+        cap = (f"best {float(bp['score']):.1f} @ {float(bp['time']):.2f}s")
+        if knee_i is not None and knee_i != best_i:
+            kp = pts[knee_i]
+            delta = d.get("delta_score")
+            pct = d.get("time_saving_pct")
+            cap += (f" · efficient {float(kp['score']):.1f} @ "
+                    f"{float(kp['time']):.2f}s"
+                    + (f" (−{float(delta):.1f} score"
+                       if _finite(delta) else "")
+                    + (f" for −{float(pct):.0f}% time)"
+                       if _finite(pct) else ")"))
+        else:
+            cap += " · single frontier point — no trade-off to read"
+    unsized = int(d.get("unsized", 0) or 0)
+    if unsized:
+        cap += f" · {unsized} unsized point(s) (size axis off)"
+    parts.append(f'<text x="{L:.1f}" y="{height - 8}" font-size="11" '
+                 f'fill="{_AXIS}">{html.escape(cap)}</text>')
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def svg_rejection_anatomy(data, width: int = 640, height: int = 190,
+                          palette: str = "default", dark: bool = False) -> str:
+    """The rejection anatomy — the accepted / rejected-by-first-gate mix
+    as one stacked bar (accepted green, score red, overfit orange,
+    ci grey) with count labels + a legend, the deterministic stall story
+    on top (`research.rejection_anatomy` shape), and the honest note
+    that free-duplicate rejections are unspent + unlogged. A <title> per
+    segment. Pure, valid XML, deterministic (G2); empty → header +
+    message."""
+    with _styled(palette, dark):
+        return _svg_rejection_anatomy(data, width, height)
+
+
+def _svg_rejection_anatomy(data, width: int, height: int) -> str:
+    d = data if isinstance(data, dict) else {}
+    accepted = int(d.get("accepted", 0) or 0)
+    buckets = d.get("by_reason") or {}
+    buckets = {k: int(buckets.get(k, 0) or 0)
+               for k in ("score", "overfit", "ci")}
+    total = accepted + sum(buckets.values())
+    if total == 0:
+        parts = _svg_header(width, height, "rejection anatomy (empty)")
+        parts.append(f'<text x="{width // 2}" y="{height // 2}" '
+                     f'text-anchor="middle" font-size="13" fill="{_AXIS}">'
+                     f'no scored candidates yet</text>')
+        parts.append("</svg>")
+        return "\n".join(parts)
+    story = str(d.get("story") or "")
+    L, R = 40.0, 40.0
+    bar_y, bar_h = 58.0, 38.0
+    pw = width - L - R
+    seg_color = {"accepted": _ACCEPTED, "score": _SCORED_REJ,
+                 "overfit": _BASELINE, "ci": _REJECTED}
+    parts = _svg_header(width, height, "rejection anatomy")
+    if story:
+        parts.append(f'<text x="{L:.1f}" y="30" font-size="12" '
+                     f'fill="{_AXIS}">{html.escape(story)}'
+                     f'<title>the stall story — a deterministic summary of '
+                     f'the gate decisions above</title></text>')
+    # the stacked bar
+    x = L
+    for name in ("accepted", "score", "overfit", "ci"):
+        count = accepted if name == "accepted" else buckets[name]
+        if count <= 0:
+            continue
+        w = pw * count / total
+        title = (f"{name} {count} of {total} ({count / total:.0%})")
+        parts.append(f'<rect x="{x:.1f}" y="{bar_y:.1f}" '
+                     f'width="{max(0.5, w):.1f}" height="{bar_h:.1f}" '
+                     f'fill="{seg_color[name]}">'
+                     f'<title>{html.escape(title)}</title></rect>')
+        if w >= 34.0:
+            parts.append(f'<text x="{x + w / 2.0:.1f}" '
+                         f'y="{bar_y + bar_h * 0.62:.1f}" '
+                         f'text-anchor="middle" font-size="11" '
+                         f'fill="{_BG}">{count}</text>')
+        x += w
+    # the legend (swatch + label + count)
+    ly = bar_y + bar_h + 20.0
+    lx = L
+    for name in ("accepted", "score", "overfit", "ci"):
+        count = accepted if name == "accepted" else buckets[name]
+        label = f"{name} {count}"
+        parts.append(f'<rect x="{lx:.1f}" y="{ly - 9:.1f}" width="10" '
+                     f'height="10" fill="{seg_color[name]}"><title>'
+                     f'{html.escape(label)}</title></rect>')
+        parts.append(f'<text x="{lx + 15:.1f}" y="{ly:.1f}" font-size="11" '
+                     f'fill="{_AXIS}">{html.escape(label)}</text>')
+        lx += 15.0 + 9.0 * len(label) + 18.0
+    parts.append(f'<text x="{L:.1f}" y="{height - 8}" font-size="11" '
+                 f'fill="{_AXIS}">bar = scored candidates by first failing '
+                 f'gate (priority: score → overfit → ci) · free-duplicate '
+                 f'rejections are unspent and never logged</text>')
     parts.append("</svg>")
     return "\n".join(parts)
