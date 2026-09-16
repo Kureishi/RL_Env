@@ -93,13 +93,13 @@ def test_gate_line_reason_annotations():
     assert "accepted: +8.00 over best 62.00" in ok
     assert "missed by 2.34" in svg_gate_line(
         60.0, 62.34, 95.0, reason="score")
-    assert "over gen-gap tolerance (18.5)" in svg_gate_line(
+    assert "over gen-gap tolerance" in svg_gate_line(
         70.0, 62.0, 95.0, reason="overfit")
     assert "stopped — final step (+8.00 vs best 62.00)" in svg_gate_line(
         70.0, 62.0, 95.0, reason="stopped")
     # the unscored (dup) case: honest caption, no candidate dot
     dup = svg_gate_line(None, 62.34, 95.0, reason="dup")
-    assert "unscored (dup) — no candidate dot (R3)" in dup
+    assert "unscored (dup) — no candidate dot" in dup
     assert "<circle" not in dup
     _assert_xml(dup)
 
@@ -290,8 +290,8 @@ def test_app_run_decision_views(tmp_path):
     assert res["res"]["best_spec"], "the run produced a best spec"
 
     subs = " | ".join(str(s.value) for s in at.subheader)
-    assert "Decision views (SPEC.md 53.2)" in subs, subs
-    assert "Champion spec (SPEC.md 53.3)" in subs, subs
+    assert "Decision views" in subs, subs
+    assert "Champion spec" in subs, subs
 
     mds = [str(m.value) for m in at.markdown]
     # 53.4.1: one gate number-line per candidate drill-down (at least
@@ -332,8 +332,8 @@ def test_app_source_wires_53():
         "info[\"target\"]",
         "info.get(\"target\")",
         '(payload.get("res") or {}).get("best_spec")',
-        "Decision views (SPEC.md 53.2)",
-        "Champion spec (SPEC.md 53.3)",
+        "Decision views",
+        "Champion spec",
     ):
         assert token in src, token
 

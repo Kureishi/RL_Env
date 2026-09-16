@@ -45,8 +45,10 @@ KNOB_GROUP: dict[str, str] = {
 # for someone who has never seen a bandit or a seed; technical names are
 # only ever shown in parentheses.
 KNOB_GLOSSARY: dict[str, str] = {
-    "data": ("Your input. Upload a CSV (header + rows), or point at a folder "
-             "of labelled images or audio."),
+    "data": ("Your input. Upload a CSV (header + rows), or upload a folder "
+             "of labelled images, audio or text (select all its files, "
+             "including its index.csv) — or enter a local path: a CSV, such "
+             "a folder, or the index.csv that lists its files."),
     "label": ("Which column is the thing you want to predict. Leave blank and "
               "we'll pick the label/target/y/class column (or the last)."),
     "target": ("The score you want to reach on data the model has never seen "

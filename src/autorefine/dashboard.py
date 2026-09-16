@@ -51,7 +51,7 @@ from .tasks.media import class_label_str  # V3 class labels (SPEC.md 30.3)
 _RL_HINT = (
     "policy 'rl' does not map to a live per-experiment stream (it trains over "
     "several full-budget episodes); use `autorefine fit --policy rl` "
-    "(SPEC.md 23.1)"
+    ""
 )
 
 
@@ -77,7 +77,7 @@ class DashboardRunner:
                              f"got {search_quality!r}")
         if modality is not None and modality not in ("auto", "csv", "image", "audio", "text"):
             raise ValueError(f"modality must be one of auto/csv/image/audio/text, "
-                             f"got {modality!r} (SPEC.md 24.5; v0.31 45.2.2)")
+                             f"got {modality!r} ")
         # `csv_path` is the data path (v0.10: a CSV file or a media directory)
         self.csv_path = csv_path
         self.modality = modality or "auto"  # SPEC.md 24.5
@@ -102,7 +102,7 @@ class DashboardRunner:
         if steering is not None and not isinstance(steering, SteeringState):
             raise ValueError(
                 f"steering must be a SteeringState or None, got "
-                f"{type(steering).__name__} (SPEC.md 59.2)")
+                f"{type(steering).__name__} ")
         self.steering = steering
         self.env: AutoRefineEnv | None = None
         self.policy: SearchPolicy | BanditPolicy | None = None
@@ -147,11 +147,11 @@ class DashboardRunner:
             if m == "mixed":
                 raise ValueError(
                     f"{data} holds items of more than one modality: set "
-                    f"modality='image', 'audio', or 'text' (SPEC.md 24.5)")
+                    f"modality='image', 'audio', or 'text' ")
             if m is None:
                 raise ValueError(
                     f"no image, audio, or text items under {data} — one "
-                    f"subfolder per class, or an index.csv (SPEC.md 24.2)")
+                    f"subfolder per class, or an index.csv ")
             return m
         raise ValueError(f"no such CSV file: {data}")
 
@@ -333,13 +333,13 @@ deterministic run, so per-seed results are bit-identical to the serial
         if not isinstance(workers, int) or isinstance(workers, bool) \
                 or workers < 1:
             raise ValueError(f"workers must be an int >= 1, got {workers!r} "
-                             f"(SPEC.md 31.2)")
+                             f"")
         if workers > 1:
             if on_update is not None:
                 raise ValueError(
                     "on_update is a callback and cannot run in worker "
                     "processes — pass workers=1 for the serial loop "
-                    "(SPEC.md 31.2)")
+                    "")
             from concurrent.futures import ProcessPoolExecutor  # stdlib
             params = self._sweep_params()
             with ProcessPoolExecutor(max_workers=workers) as pool:
@@ -623,7 +623,7 @@ def diff_n_summaries(summaries: list[dict]) -> dict:
     if not isinstance(summaries, (list, tuple)) or len(summaries) < 2:
         raise ValueError(
             "diff_n_summaries needs at least two run summaries "
-            "(SPEC.md 50.1.1)")
+            "")
     runs = []
     for s in summaries:
         s = s if isinstance(s, dict) else {}

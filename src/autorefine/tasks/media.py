@@ -32,17 +32,65 @@ _MAX_CLASSES = 50  # §22.1 rule: integer labels with more classes → regressio
 _INDEX_HINTS = ("label", "target", "y", "class")
 
 
+def modality_from_index(index: str | Path) -> str | None:
+    """'image' | 'audio' | 'text' | 'mixed' | None for an `index.csv`.
+
+    Read from the `file`/`path` column's extensions (SPEC.md 24.2), so the
+    modality is decided by the referenced media files even when they are not
+    all present on disk (the app's upload flow rebuilds a directory from the
+    uploaded files). Deterministic, stdlib only; a missing/unreadable index
+    or one without recognizable media rows → None.
+    """
+    try:
+        with open(index, newline="", encoding="utf-8-sig") as fh:
+            rows = list(_csv.reader(fh))
+    except OSError:
+        return None
+    if not rows:
+        return None
+    header = [h.strip().lower() for h in rows[0]]
+    path_i = 0
+    for hint in ("path", "file"):
+        if hint in header:
+            path_i = header.index(hint)
+            break
+    mods: set[str] = set()
+    for row in rows[1:]:
+        if not row or path_i >= len(row):
+            continue
+        ext = Path(row[path_i].strip()).suffix.lower()
+        if ext in _IMAGE_EXTS:
+            mods.add("image")
+        elif ext in _AUDIO_EXTS:
+            mods.add("audio")
+        elif ext in _TEXT_EXTS:
+            mods.add("text")
+    if len(mods) >= 2:
+        return "mixed"
+    if len(mods) == 1:
+        return mods.pop()
+    return None
+
+
 def detect_modality(path: str | Path) -> str | None:
     """'image' | 'audio' | 'text' | 'mixed' | None for a directory
     (SPEC.md 24.5 auto-detect; text per SPEC.md 45.2, v0.31).
 
-    Counts items by extension (subfolders only, plus `index.csv` which
-    labels any modality — in that case the *files* decide). Exactly one
-    modality present → its name; two or more → "mixed" (the caller must
-    ask for an explicit --task); none → None. Image+audio stays
-    "mixed" (the v0.10 pin, SPEC.md 45.2.4).
+    An `index.csv` in the directory is the authoritative label source
+    (SPEC.md 24.2, matching `collect_items`): the modality is decided by the
+    media extensions in its `file`/`path` column. Otherwise items are counted
+    by extension across the one-subfolder-per-class layout. Exactly one
+    modality present → its name; two or more → "mixed" (the caller must ask
+    for an explicit --task); none → None. Image+audio stays "mixed" (the
+    v0.10 pin, SPEC.md 45.2.4).
     """
     d = Path(path)
+    if d.is_dir():
+        index = d / "index.csv"
+        if index.is_file():
+            m = modality_from_index(index)
+            if m is not None:
+                return m
     n_img = n_aud = n_txt = 0
     if d.is_dir():
         for sub in sorted(d.iterdir()):

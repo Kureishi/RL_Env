@@ -633,3 +633,101 @@ def test_import_autorefine_never_pulls_in_streamlit():
             "assert 'streamlit' not in sys.modules")
     root = Path(__file__).resolve().parents[1]
     subprocess.run([sys.executable, "-c", code], check=True, cwd=str(root))
+
+
+# --- drain protocol: stale tokens must never read past the backlog (A13) ---
+
+def test_drain_protocol_never_reads_past_the_backlog():
+    # A13 regression guard for the "press Run → IndexError" crash: every
+    # post() queues one wakeup token, but a drain that reads messages while
+    # *behind* consumes none of them. A token that wakes a caught-up drain
+    # can therefore be STALE (its message already rendered). The protocol
+    # must answer "wait" (re-check) in that case — the pre-fix fall-through
+    # instead indexed `msgs[idx]` past the end and raised IndexError.
+    import queue as _queue
+    import threading
+    import time
+
+    pytest.importorskip("streamlit", reason="dashboard app is optional (SPEC.md 23)")
+    from autorefine.dashboard_app import _next_message
+
+    msgs: list = [("info", {"score": 50.0})]
+    q = _queue.Queue()
+    started = threading.Event()
+
+    def worker():
+        started.set()
+        time.sleep(0.3)  # a fast worker: posts after the drain caught up
+        msgs.append(("update", {"best_score": 60.0}))
+        q.put(True)
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    started.wait()
+    record = {"messages": msgs, "queue": q, "thread": t}
+    q.put(True)  # stale token #1 — "info" was already read
+    q.put(True)  # stale token #2
+
+    assert _next_message(record, 0) == ("msg", "info", {"score": 50.0})
+    # caught up (idx == len) with only stale tokens queued: the old code
+    # read msgs[1] here and raised IndexError
+    assert _next_message(record, 1, timeout=5.0)[0] == "wait"
+    assert _next_message(record, 1, timeout=5.0)[0] == "wait"
+    # stream mode: caught up + alive worker is a tick point, also "wait"
+    assert _next_message(record, 1, stream_mode=True)[0] == "wait"
+    # the worker's message lands shortly — re-check until it is readable
+    deadline = time.monotonic() + 5.0
+    while True:
+        status, kind, payload = _next_message(record, 1, timeout=1.0)
+        if status == "msg":
+            break
+        assert status == "wait" and time.monotonic() < deadline
+    assert (kind, payload) == ("update", {"best_score": 60.0})
+    # backlog exhausted and the worker gone → "done"
+    t.join()
+    assert _next_message(record, 2, timeout=1.0)[0] == "done"
+
+
+# --- data source resolution: CSV vs media folder vs index.csv (A13) ----------
+
+def test_resolve_csv_paths_and_media_index(tmp_path):
+    from autorefine.dashboard_app import _resolve_csv, _resolve_index_to_dir
+    flat = tmp_path / "flat"
+    flat.mkdir()
+    (flat / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    idx = flat / "index.csv"
+    idx.write_text("file,label\na.png,0\nb.png,1\n", encoding="utf-8")
+    tab = tmp_path / "tab.csv"
+    tab.write_text("x,y,label\n1,2,0\n3,4,1\n", encoding="utf-8")
+    # a media index.csv resolves to its parent dir; a tabular CSV stays a file
+    assert _resolve_index_to_dir(idx) == str(flat)
+    assert _resolve_index_to_dir(tab) is None
+    assert _resolve_csv(None, str(idx)) == str(flat)
+    assert _resolve_csv(None, str(tab)) == str(tab)
+    assert _resolve_csv(None, str(flat)) == str(flat)
+    # blank / missing paths stay None (the app shows the idle screen)
+    assert _resolve_csv(None, "") is None
+    assert _resolve_csv(None, str(tmp_path / "nope.csv")) is None
+
+
+def test_app_resolves_a_media_index_csv_path(tmp_path):
+    # A13: the app's sidebar path accepts a flat media dir's index.csv and
+    # previews the index rows instead of failing with "no numeric features"
+    pytest.importorskip("streamlit", reason="dashboard app is optional (SPEC.md 23)")
+    from streamlit.testing.v1 import AppTest
+
+    flat = tmp_path / "flat"
+    flat.mkdir()
+    (flat / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (flat / "index.csv").write_text(
+        "file,label\na.png,0\nb.png,1\nc.png,0\n", encoding="utf-8")
+    at = AppTest.from_file(str(APP), default_timeout=300)
+    at.run()
+    assert not at.exception
+    at.text_input(key="csv_path").set_value(str(flat / "index.csv"))
+    at.run()  # re-render: the preview must not be the tabular error
+    assert not at.exception
+    md = " ".join(m.value for m in at.markdown)
+    warn = " ".join(w.value for w in at.warning)
+    assert "no numeric feature columns" not in warn
+    assert "index.csv" in md or "a.png" in md  # the index rows are previewed

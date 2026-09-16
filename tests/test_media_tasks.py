@@ -333,3 +333,39 @@ def test_dashboard_runner_audio_dir(tmp_path):
     r2 = DashboardRunner(csv_path=csv, modality="audio")
     with pytest.raises(ValueError, match="modality must be 'csv' or 'auto'"):
         r2.start()
+
+
+# --- flat index.csv auto-detect (SPEC.md 24.2, A14) ---------------------------
+
+def test_modality_from_index_reads_the_file_column(tmp_path):
+    from autorefine.tasks import modality_from_index
+    idx = tmp_path / "index.csv"
+    idx.write_text("file,label\na.png,0\nb.png,1\n", encoding="utf-8")
+    assert modality_from_index(idx) == "image"
+    idx.write_text("file,label\na.wav,0\nb.mp3,1\n", encoding="utf-8")
+    assert modality_from_index(idx) == "audio"
+    idx.write_text("file,label\na.txt,0\nb.txt,1\n", encoding="utf-8")
+    assert modality_from_index(idx) == "text"
+    idx.write_text("file,label\na.png,0\nb.wav,1\n", encoding="utf-8")
+    assert modality_from_index(idx) == "mixed"  # two modalities (SPEC.md 24.5)
+    # a plain tabular index has no media rows -> None
+    idx.write_text("x,y,label\n1,2,0\n3,4,1\n", encoding="utf-8")
+    assert modality_from_index(idx) is None
+    # unreadable index -> None, no exception
+    assert modality_from_index(tmp_path / "nope.csv") is None
+
+
+def test_detect_modality_flat_index_dir(tmp_path):
+    # A14 regression guard: a *flat* directory of images + index.csv (no
+    # subfolders) auto-detects as "image"; the subfolder layout is unchanged
+    d = tmp_path / "flat"
+    d.mkdir()
+    _make_image(d / "a.png", "ring", size=32)
+    _make_image(d / "b.png", "cross", size=32)
+    (d / "index.csv").write_text("file,label\na.png,0\nb.png,1\n",
+                                 encoding="utf-8")
+    assert detect_modality(d) == "image"
+    assert detect_modality(_shape_dir(tmp_path / "sub")) == "image"
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert detect_modality(empty) is None

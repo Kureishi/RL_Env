@@ -497,7 +497,7 @@ def test_app_wires_inspector_steering_manual():
         "parameter_inspection",
         "train_manual",
         "def _inspector_field",
-        '"Parameter inspector (SPEC.md 59.1)"',
+        '"Parameter inspector"',
         "key=\"stg_verb\"",
         "key=\"stg_field\"",
         "key=\"manual_button\"",
@@ -539,7 +539,7 @@ def test_app_default_path_renders_inspector(tmp_path):
 
     assert at.session_state["result"] is not None
     sub_headers = [str(s.value) for s in at.subheader]
-    assert "Parameter inspector (SPEC.md 59.1)" in sub_headers, sub_headers
+    assert "Parameter inspector" in sub_headers, sub_headers
 
 
 # --- A49 round regression ------------------------------------------------------

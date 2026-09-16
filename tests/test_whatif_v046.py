@@ -564,7 +564,7 @@ def test_app_wires_whatif_block():
     and calls are present in the app (the thin renderer)."""
     src = APP.read_text(encoding="utf-8")
     for tok in (
-        "What-if & comparison (SPEC.md 60)",
+        "What-if & comparison",
         'key="wf_field"',
         'key="wf_value"',
         'key="fp_compare"',
@@ -614,7 +614,7 @@ def test_app_default_path_renders_whatif(tmp_path):
 
     assert at.session_state["result"] is not None
     sub_headers = [str(s.value) for s in at.subheader]
-    assert "What-if & comparison (SPEC.md 60)" in sub_headers, sub_headers
+    assert "What-if & comparison" in sub_headers, sub_headers
 
 
 def test_all_exports_whatif_round():

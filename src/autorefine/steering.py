@@ -55,7 +55,7 @@ def _spec_field(name: str) -> str:
     if name not in SPEC_FIELDS:
         raise ValueError(
             f"steering field {name!r} is not in the spec registry "
-            f"(available: {', '.join(SPEC_FIELDS)}; SPEC.md 59.2)")
+            f"(available: {', '.join(SPEC_FIELDS)})")
     return name
 
 
@@ -141,12 +141,12 @@ class SteeringState:
         except TypeError:
             raise ValueError(
                 f"constrain({name!r}): values must be an iterable of "
-                f"allowed values, got {type(values).__name__} (SPEC.md 59.2)") \
+                f"allowed values, got {type(values).__name__} ") \
                 from None
         if not vs:
             raise ValueError(
                 f"constrain({name!r}): the allowed set must be non-empty "
-                f"(SPEC.md 59.2)")
+                f"")
         vs = tuple(_validate_value(name, v) for v in vs)
         constraints = tuple((name, vs) if f == name else (f, x)
                             for f, x in self.constraints if f != name) \
@@ -169,7 +169,7 @@ class SteeringState:
         if not isinstance(d, dict):
             raise ValueError(
                 f"steering state must be a JSON object, got "
-                f"{type(d).__name__} (SPEC.md 59.2)")
+                f"{type(d).__name__} ")
         state = cls()
         for pair in d.get("pins") or []:
             f, v = pair
@@ -231,7 +231,7 @@ def manual_spec(values: dict) -> ModelSpec:
     if not isinstance(values, dict):
         raise ValueError(
             f"manual spec values must be a dict of field -> value, got "
-            f"{type(values).__name__} (SPEC.md 59.3)")
+            f"{type(values).__name__} ")
     for k in values:
         _spec_field(k)  # unknown field -> ValueError (loud, 59.2.1)
     d = DEFAULT_SPEC.to_dict()
@@ -240,7 +240,7 @@ def manual_spec(values: dict) -> ModelSpec:
     try:
         return ModelSpec.from_dict(d)
     except (KeyError, TypeError, ValueError) as exc:
-        raise SpecError(f"invalid spec: {exc} (SPEC.md 59.3)") from exc
+        raise SpecError(f"invalid spec: {exc} ") from exc
 
 
 def train_manual(task_name: str, values: dict, seed: int = 7,
@@ -267,7 +267,7 @@ def train_manual(task_name: str, values: dict, seed: int = 7,
     if task_name not in TASKS:
         raise ValueError(
             f"unknown task {task_name!r} (available: {sorted(TASKS)}; "
-            f"SPEC.md 59.3)")
+            f")")
     spec = manual_spec(values)
     cls = TASKS[task_name]
     if task_config:

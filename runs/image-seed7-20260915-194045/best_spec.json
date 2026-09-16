@@ -1,0 +1,20 @@
+{
+  "activation": "relu",
+  "architecture": [
+    8,
+    8
+  ],
+  "batch_size": 32,
+  "early_stopping_patience": 0,
+  "gradient_clipping": 1.0,
+  "init_scale": 1.0,
+  "input_noise": 0.0,
+  "knn_k": 5,
+  "label_smoothing": 0.0,
+  "learning_rate": 0.001,
+  "lr_schedule": "constant",
+  "model_family": "convnet",
+  "optimizer": "momentum",
+  "train_steps": 400,
+  "weight_decay": 0.0
+}

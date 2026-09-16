@@ -141,7 +141,7 @@ def _render_past_runs(runs_dir: str) -> None:
     entries = load_registry(runs_dir)
     if not entries:
         st.caption(f"No finished runs yet in `{runs_dir}` — the registry is "
-                   f"appended when a run finishes (SPEC.md 38.1).")
+                   f"appended when a run finishes.")
         return
     rows = [
         {"run_id": e.get("run_id"), "task": e.get("task"), "seed": e.get("seed"),
@@ -189,21 +189,21 @@ def _render_past_runs(runs_dir: str) -> None:
     # diff above (38.4) to 2-3 runs: overlaid running-best curves (50.1.3),
     # the per-run gate rows + canonical recipes (50.1.1/37.1), and the
     # best_spec union table. Inert data rendering (50.3.1).
-    with st.expander("Compare 2–3 runs — curves, recipes, gates (SPEC.md 50.1)"):
+    with st.expander("Compare 2–3 runs — curves, recipes, gates"):
         sel = st.multiselect("Runs (pick 2–3)", ids, key="nrun_sel")
         if len(sel) > 3:
             st.caption("Comparing the first three selected runs (at most "
-                       "three, SPEC.md 50.1.5).")
+                       "three).")
             sel = sel[:3]
         if len(sel) < 2:
-            st.caption("Pick two or three runs to compare (SPEC.md 50.1.5).")
+            st.caption("Pick two or three runs to compare.")
             return
         tagged = []
         for rid in sel:  # 50.1.4 pattern: tag run_id = dir name (summaries
             p = Path(runs_dir) / rid / "summary.json"  # don't carry it, 50.1.1)
             if not p.is_file():
                 st.warning(f"run {rid!r} has no summary.json — nothing to "
-                           f"compare (SPEC.md 50.1.5).")
+                           f"compare.")
                 return
             s = json.loads(p.read_text(encoding="utf-8"))
             s["run_id"] = rid
@@ -228,7 +228,7 @@ def _render_past_runs(runs_dir: str) -> None:
         ], width="stretch")
         if d["best_run_id"] is not None:
             st.caption(f"best: {d['best_run_id']} "
-                       f"(score span {d['score_span']}) (SPEC.md 50.1.1)")
+                       f"(score span {d['score_span']})")
         for rid in sel:  # the canonical recipe per run (37.1.4)
             cp = Path(runs_dir) / rid / "run_config.json"
             try:
@@ -236,7 +236,7 @@ def _render_past_runs(runs_dir: str) -> None:
                     json.loads(cp.read_text(encoding="utf-8")))
                 recipe = " ".join(fit_recipe(cfg))
             except Exception:
-                recipe = "n/a (no run_config.json — pre-v0.23 run)"
+                recipe = "n/a (no run_config.json — an earlier run)"
             st.caption(f"recipe — {rid}")
             st.code(recipe)
         if d["spec_fields"]:
@@ -283,8 +283,7 @@ def _inspector_field(r: dict) -> None:
     if r["layer"] == "architecture":
         fams = ", ".join(r.get("families") or []) or "—"
         st.markdown(
-            f"**{r['name']}** · `{r.get('kind') or '—'}` · {fams} · "
-            f"§{r.get('spec_ref')}")
+            f"**{r['name']}** · `{r.get('kind') or '—'}` · {fams}")
         delta = r.get("delta")
         st.caption(
             f"current `{_spec_v(cur)}` · baseline `{_spec_v(base)}` · "
@@ -302,7 +301,7 @@ def _inspector_field(r: dict) -> None:
     else:  # loop (KNOBS, 33.2) — no win-rate (not bandit arms)
         cli = (", ".join("--" + c.replace("_", "-")
                          for c in (r.get("cli") or [])) or "—")
-        st.markdown(f"**{r['name']}** · §{r.get('spec_ref')}")
+        st.markdown(f"**{r['name']}**")
         st.caption(
             f"current `{_spec_v(cur)}` · baseline `{_spec_v(base)}` · "
             f"cli {cli} · widget `{r.get('app_widget') or '—'}`")
@@ -337,30 +336,30 @@ def _drill_body(u: dict, gm: dict, reason: str,
         return str(v)
 
     if gm.get("candidate") is None:
-        st.caption("unscored (free duplicate, R3) — the gate math is "
-                   "undefined for this step (SPEC.md 52.1.1)")
+        st.caption("unscored (free duplicate) — the gate math is "
+                   "undefined for this step")
     else:
         st.dataframe([
             {"metric": "candidate score", "value": _fmt(gm.get("candidate")),
-             "gate": "the holdout score (SPEC.md 18.3)"},
+             "gate": "the holdout score"},
             {"metric": "best before", "value": _fmt(gm.get("best_before")),
-             "gate": "the running best at this step (39.2.2)"},
+             "gate": "the running best at this step"},
             {"metric": "delta (candidate - best)",
              "value": _fmt(gm.get("delta")),
-             "gate": "the score gate — 39.2.2 priority 1"},
+             "gate": "the score gate"},
             {"metric": "gen gap (holdout - generation)",
-             "value": _fmt(gm.get("gen_gap")), "gate": "SPEC.md 18.5"},
+             "value": _fmt(gm.get("gen_gap")), "gate": "the overfit gate"},
             {"metric": "gen tolerance (5% of score)",
              "value": _fmt(gm.get("gen_tol")),
-             "gate": "the overfit gate — SPEC.md 18.5"},
+             "gate": "the overfit gate"},
             {"metric": "SE (block std)", "value": _fmt(gm.get("se")),
-             "gate": "SPEC.md 18.3/18.6 (52.1.1)"},
+             "gate": "the CI gate (block-bootstrap std)"},
             {"metric": "z (the env's z)", "value": _fmt(gm.get("z")),
-             "gate": "SPEC.md 18.6 (0 = legacy)"},
+             "gate": "the CI gate (z; 0 = legacy)"},
             {"metric": "z * SE threshold", "value": _fmt(gm.get("z_se")),
-             "gate": "accept iff delta > max(0, z*SE) — SPEC.md 18.6"},
+             "gate": "accept iff delta > max(0, z*SE)"},
         ], width="stretch")
-        st.caption(f"verdict: **{reason}** (the 51.3.2 reason column)")
+        st.caption(f"verdict: **{reason}** (the reason column)")
     diffs = u.get("spec_diff") or []
     if diffs:
         st.caption("spec: " + " · ".join(
@@ -401,22 +400,52 @@ def _pal_svg(pal: dict, stored: str, recompute) -> str:
 
 
 
-def _resolve_csv(upload, path_str: str) -> str | None:
-    """Uploaded bytes → session temp file; otherwise the sidebar path.
+def _resolve_index_to_dir(p: Path) -> str | None:
+    """A local ``.csv`` that is a media ``index.csv`` (a ``file``/``path`` +
+    label column, SPEC.md 24.2) resolves to its parent directory, so the
+    image/audio/text task reads the media files sitting beside it. A plain
+    tabular CSV stays a file (its parent is not returned)."""
+    if p.suffix.lower() != ".csv" or not p.is_file():
+        return None
+    from autorefine.tasks.media import modality_from_index
+    if modality_from_index(p) in ("image", "audio", "text"):
+        return str(p.parent)
+    return None
 
-    v0.10 (SPEC.md 24.5): the sidebar path may be a directory of labelled
-    images/audio as well as a CSV file; uploads stay CSV.
+
+def _resolve_csv(upload, path_str: str) -> str | None:
+    """Data source → a task-ready path.
+
+    Upload: a single CSV is written to a session temp file (a tabular
+    dataset); multiple files (a folder of labelled media + its ``index.csv``)
+    are rebuilt into a temp directory the media task reads (SPEC.md 24.2).
+    Sidebar path: a file or directory; a local media ``index.csv`` file
+    resolves to its parent directory so the media files beside it are found.
     """
     if upload is not None:
-        dest = Path(tempfile.gettempdir()) / "autorefine_dashboard"
-        dest.mkdir(parents=True, exist_ok=True)
-        name = Path(upload.name).name or "upload.csv"
-        out = dest / name
-        out.write_bytes(upload.getvalue())
-        return str(out)
+        files = upload if isinstance(upload, (list, tuple)) else [upload]
+        files = [f for f in files if f is not None]
+        if files:
+            dest = Path(tempfile.gettempdir()) / "autorefine_dashboard"
+            dest.mkdir(parents=True, exist_ok=True)
+            if len(files) == 1:
+                name = Path(files[0].name).name or "upload.csv"
+                out = dest / name
+                out.write_bytes(files[0].getvalue())
+                return str(out)
+            # multiple files → rebuild the labelled directory they came from
+            d = dest / "upload_dir"
+            d.mkdir(parents=True, exist_ok=True)
+            for f in files:
+                (d / (Path(f.name).name or "file")).write_bytes(f.getvalue())
+            return str(d)
     p = path_str.strip()
-    if p and (Path(p).is_file() or Path(p).is_dir()):
-        return p
+    if p:
+        pp = Path(p)
+        if pp.is_file():
+            return _resolve_index_to_dir(pp) or str(pp)
+        if pp.is_dir():
+            return str(pp)
     return None
 
 
@@ -440,7 +469,7 @@ def _preview_data(csv_path: str, stamp: int, size: int) -> dict:
         if m is None or m == "mixed":
             return {"error": (f"Directory {p} holds no image/audio items "
                              f"(or is mixed) — one subfolder per class, "
-                             f"or an index.csv (SPEC.md 24.2/24.5)")}
+                             f"or an index.csv")}
         cls = TASKS[m]
     try:
         probe = cls(seed=0, path=csv_path)
@@ -467,15 +496,31 @@ def _preview_data(csv_path: str, stamp: int, size: int) -> dict:
         return {"kind": "csv", "caption": caption,
                 "header": header, "rows": data}
     rows = []
-    for sub in sorted(p.iterdir()):
-        if sub.is_dir():
-            for f in sorted(sub.iterdir()):
-                if f.is_file():
-                    rows.append({"class": sub.name, "file": f.name})
-                    if len(rows) >= 5:
-                        break
-        if len(rows) >= 5:
-            break
+    index = p / "index.csv"
+    if index.is_file():
+        # a flat labelled directory (SPEC.md 24.2): preview the index rows
+        with index.open(encoding="utf-8-sig", newline="") as fh:
+            reader = _csv.reader(fh)
+            next(reader, None)  # header
+            for raw in reader:
+                if not raw or not any((c or "").strip() for c in raw):
+                    continue
+                rows.append({"file": (raw[0] or "").strip(),
+                             "label": ((raw[1] or "").strip()
+                                       if len(raw) > 1 else "")})
+                if len(rows) >= 5:
+                    break
+    else:
+        # one subfolder per class
+        for sub in sorted(p.iterdir()):
+            if sub.is_dir():
+                for f in sorted(sub.iterdir()):
+                    if f.is_file():
+                        rows.append({"class": sub.name, "file": f.name})
+                        if len(rows) >= 5:
+                            break
+            if len(rows) >= 5:
+                break
     return {"kind": "media", "caption": caption,
             "header": None, "rows": rows}
 
@@ -543,6 +588,42 @@ def _worker_loop(runner: DashboardRunner, record: dict) -> None:
         post("end", None)
 
 
+def _next_message(record: dict, idx: int, stream_mode: bool = False,
+                  timeout: float = 300.0) -> tuple[str, object, object]:
+    """The drain's read/wait protocol (SPEC.md 51.2.3) — one step, pure
+    record state (no ``st.*``) so it is unit-testable.
+
+    Returns ``(status, kind, payload)`` with status:
+      * ``"msg"``   — ``record["messages"][idx]`` is the next message;
+      * ``"wait"``  — caught up but the worker is alive (or the token that
+        woke us was *stale*): the caller must re-check, never index;
+      * ``"done"``  — the worker is gone and the backlog is fully drained;
+      * ``"stall"`` — the worker gave no progress within ``timeout``.
+
+    Stale tokens are the hazard: every ``post()`` puts one wakeup token,
+    but a drain that reads messages while *behind* consumes none of them.
+    A fast worker (many posts between our renders) therefore leaves queued
+    tokens whose messages are already rendered — a token that wakes a
+    caught-up drain must never be trusted as "a message is ready". The
+    only legal read is ``idx < len(messages)``; anything else is a
+    re-check ("wait"), which is what keeps the drain from indexing past
+    the end of the backlog (the ``IndexError`` the fall-through had).
+    """
+    msgs = record["messages"]
+    if idx < len(msgs):
+        kind, payload = msgs[idx]
+        return ("msg", kind, payload)
+    if not record["thread"].is_alive():
+        return ("done", None, None)
+    if stream_mode:  # 55.1: non-blocking drain — the app ticks and re-drains
+        return ("wait", None, None)
+    try:
+        record["queue"].get(timeout=timeout)
+    except _queue.Empty:
+        return ("stall", None, None)
+    return ("wait", None, None)  # token may be stale — re-check the guard
+
+
 def _drain_live(record: dict, narrate: bool = False,
                 stream_mode: bool = False) -> None:
     """SPEC.md 51.2.3 (v0.37): the synchronous drain — render the existing
@@ -590,20 +671,22 @@ def _drain_live(record: dict, narrate: bool = False,
     reduced_motion = st.session_state.get("reduce_motion", False)
 
     while True:
-        if idx >= len(msgs):
-            if not thread.is_alive():
-                record["drained"] = True
+        status, kind, payload = _next_message(record, idx, stream_mode)
+        if status == "wait":
+            # Stale token or stream tick — in stream mode this is the tick
+            # point (the app reruns and re-drains); otherwise re-check the
+            # guard. Either way never index past the end of the backlog.
+            if stream_mode:
                 break
-            if stream_mode:  # 55.1: non-blocking — the app ticks and re-drains
-                break
-            try:
-                q.get(timeout=300)
-            except _queue.Empty:
-                st.error("run stalled — no worker progress; press Stop or "
-                         "refresh (SPEC.md 51.2.4)")
-                record["drained"] = True
-                break
-        kind, payload = msgs[idx]
+            continue
+        if status == "done":
+            record["drained"] = True
+            break
+        if status == "stall":
+            st.error("run stalled — no worker progress; press Stop or "
+                     "refresh")
+            record["drained"] = True
+            break
         idx += 1
 
         if kind == "info":
@@ -697,7 +780,7 @@ def _drain_live(record: dict, narrate: bool = False,
             frac = max(0.0, min(1.0, spent / max(1, budget)))
             bar.progress(frac, text=(
                 f"experiment {spent} of {budget}"
-                + ("  ·  dup step (free, R3)" if is_dup else "")))
+                + ("  ·  dup step (free)" if is_dup else "")))
             # 52.2.2: the focus filter over the live table — keep only
             # the rows whose update mutated the field (the baseline row
             # mutated nothing and drops out when a field is focused)
@@ -718,7 +801,7 @@ def _drain_live(record: dict, narrate: bool = False,
                     ("All", *fields_seen(stream)), key="focus_field",
                     help="Keep only the candidates that mutated this "
                          "field — the live table and the mutation "
-                         "timeline both filter (SPEC.md 52.2.2).")
+                         "timeline both filter.")
             if u.get("field_stats"):  # D1: per-field win-rate bars (SPEC.md 26.1)
                 vbars.bar_chart(
                     pd.DataFrame.from_dict(u["field_stats"], orient="index")
@@ -762,7 +845,7 @@ def _drain_live(record: dict, narrate: bool = False,
                 score_txt = (f"score {u['candidate_score']:.2f}"
                              if isinstance(u["candidate_score"], (int, float))
                              else "duplicate")
-                kindtxt = ("dup step (free, R3)" if is_dup
+                kindtxt = ("dup step (free)" if is_dup
                            else f"experiment {spent} of {budget}")
                 diff_txt = " · ".join(
                     f"{d['field']}: {_spec_v(d['old'])} → {_spec_v(d['new'])}"
@@ -781,15 +864,15 @@ def _drain_live(record: dict, narrate: bool = False,
             eta_txt = f"≈ {eta:.1f}s" if eta is not None else "—"
             meta.caption(
                 f"ETA {eta_txt} · {left} experiment(s) left"
-                + (f"  ·  plateau: {streak} non-improving scored "
+                + (f" · plateau: {streak} non-improving scored "
                    "experiments in a row — Stop would be honest "
-                   "(SPEC.md 31.1)" if streak >= PLATEAU_HINT else ""))
+                   "" if streak >= PLATEAU_HINT else ""))
             # 52.1.2: the live drill-down — the latest candidate's gate
             # math (52.1.1, over its CI-gate inputs) + loss curves
             gm = gate_math(u, best_before, runner.env.z_accept)
             with drill.expander(
                     f"candidate #{u['index']} — {reason} · gate math + "
-                    "curves (SPEC.md 52.1)", expanded=False):
+                    "curves ", expanded=False):
                 _drill_body(u, gm, reason, info["target"])
             if stream_mode and vfresh is not None:  # 55.1: re-render live
                 _el = (time.monotonic()
@@ -831,7 +914,7 @@ def _drain_live(record: dict, narrate: bool = False,
             st.caption(
                 "Next steps: `autorefine doctor` checks versions + a smoke "
                 "train, and `autorefine fit --dry-run` validates your data "
-                "before a full run (SPEC.md 56.4).")
+                "before a full run.")
             continue
 
         if kind == "end":
@@ -887,7 +970,7 @@ def _render_result(res: dict) -> None:
         st.success(
             f"PASS: final **{res['final_best_score']:.2f}** ≥ target "
             f"{res['target']:.1f} on held-out data (the loop never trained on "
-            f"these points; gen_gap is the overfit guard) — SPEC.md 22.1"
+            f"these points; gen_gap is the overfit guard)"
         )
     else:
         st.error(
@@ -902,7 +985,7 @@ def _render_result(res: dict) -> None:
         st.warning(
             "Stopped by user — the run ended early, between experiments; the "
             "verdict and artifacts reflect the partial run so far "
-            "(SPEC.md 51.2.3/51.2.4).")
+            ".")
     # SPEC.md 48.4 (v0.34): the plain-English "what happened" narrative —
     # always shown here (the live narrate toggle, 48.5, is separate); pure
     # over the stored result, so the restored view renders the same block.
@@ -921,12 +1004,12 @@ def _render_result(res: dict) -> None:
     # Both via .get() — the restored view (SPEC.md 23.2) must re-render a
     # result either with or without them (older payloads lack both keys).
     if res.get("recipe"):  # 37.1.4: copy-pasteable `fit` re-run
-        st.caption("Reproduce (copy-paste) — SPEC.md 37.1.4")
+        st.caption("Reproduce (copy-paste)")
         st.code(" ".join(res["recipe"]))
     if res.get("gate"):  # 37.2: the per-objective acceptance rows
         gate = res["gate"]
         st.caption(
-            f"gate: {len(gate['objectives'])} objective(s) (SPEC.md 37.2)")
+            f"gate: {len(gate['objectives'])} objective(s)")
         st.dataframe([{
             "objective": r["name"],
             "op": r["op"],
@@ -949,7 +1032,7 @@ def _render_result(res: dict) -> None:
                            mime="application/json", key="dl_runconfig")
     else:
         st.caption("no run_config.json in this run dir — nothing to "
-                   "download (pre-v0.23 run, SPEC.md 50.2.2)")
+                   "download")
     if st.button("Build share bundle", key="build_share"):  # 50.2.3
         try:
             from autorefine.cli import _share_report_html  # 47.4.2: cli
@@ -960,7 +1043,7 @@ def _render_result(res: dict) -> None:
             st.session_state["share_bundle_" + str(rd)] = (
                 bundle, [[n, len(payload[n])] for n in sorted(payload)])
         except Exception as exc:  # local, friendly (50.2.3)
-            st.error(f"share bundle failed: {exc} (SPEC.md 50.2.3)")
+            st.error(f"share bundle failed: {exc}")
     stored = st.session_state.get("share_bundle_" + str(rd))
     if stored:
         bundle, listing = stored
@@ -994,14 +1077,14 @@ def _render_result(res: dict) -> None:
                         unsafe_allow_html=True)
             st.code(provenance_card(_payload), language="text")
         except Exception as exc:  # 56.4: a friendly error, not a page crash
-            st.error(f"provenance card unavailable: {exc} (SPEC.md 56.4)")
+            st.error(f"provenance card unavailable: {exc}")
 
     # SPEC.md 36.2 (v0.22, G2): the app's spec surface reads the field
     # registry — one table for the field list, not a per-surface literal
     from autorefine.improver.specspace import SPEC_FIELD_NAMES
     st.caption(
         f"spec space: {len(SPEC_FIELD_NAMES)} fields — "
-        f"{', '.join(SPEC_FIELD_NAMES)} (SPEC.md 36.2)"
+        f"{', '.join(SPEC_FIELD_NAMES)}"
     )
 
     st.subheader("Plots")
@@ -1062,7 +1145,7 @@ def _render_result(res: dict) -> None:
     try:
         _ren = _load_entries(res["run_dir"])
     except (ValueError, OSError) as exc:  # 49.4.3: a friendly error, not a crash
-        st.error(f"research views unavailable: {exc} (SPEC.md 57.5)")
+        st.error(f"research views unavailable: {exc}")
         _ren = []
     st.markdown(svg_spec_lineage(spec_lineage(_ren), **pal),
                 unsafe_allow_html=True)
@@ -1077,15 +1160,14 @@ def _render_result(res: dict) -> None:
         st.markdown(svg_bandit_beliefs(bandit_beliefs(_fs, _ucb), **pal),
                     unsafe_allow_html=True)
     else:
-        st.caption("bandit belief bars need a bandit-policy run (field_stats) "
-                   "— SPEC.md 57.4")
+        st.caption("bandit belief bars need a bandit-policy run (field_stats)")
 
     # SPEC.md 59.1 (v0.45): the parameter inspector — the two real layers
     # (architecture `SPEC_FIELDS` + loop `KNOBS`) as one read-only block
     # each. Pure derivation over the run's data (59.1); display-only
     # (AppTest-safe); a friendly caption on failure (the 49.4.3 pattern),
     # never a page crash.
-    st.subheader("Parameter inspector (SPEC.md 59.1)")
+    st.subheader("Parameter inspector")
     try:
         _ins_entries = _ren  # the entries loaded in the Research views above
         _ins_best = res.get("best_spec")
@@ -1096,16 +1178,16 @@ def _render_result(res: dict) -> None:
         _rows = parameter_inspection(_ins_entries, _ins_best, _ins_cfg,
                                      _ins_fs, _ins_ucb)
     except (ValueError, TypeError, KeyError) as exc:  # 49.4.3
-        st.error(f"parameter inspector unavailable: {exc} (SPEC.md 59.1)")
+        st.error(f"parameter inspector unavailable: {exc}")
     else:
         _ca, _cb = st.columns(2)
         with _ca:
-            st.markdown("**Architecture** (the `SPEC_FIELDS` registry, 36.2)")
+            st.markdown("**Architecture**")
             for r in _rows:
                 if r["layer"] == "architecture":
                     _inspector_field(r)
         with _cb:
-            st.markdown("**Loop** (the `KNOBS` registry, 33.2)")
+            st.markdown("**Loop** (the `KNOBS` registry)")
             for r in _rows:
                 if r["layer"] == "loop":
                     _inspector_field(r)
@@ -1116,7 +1198,7 @@ def _render_result(res: dict) -> None:
     # weight reslice (60.4). Pure derivations over the run's data (60.5);
     # display-only (AppTest-safe); a friendly caption on failure (the
     # 49.4.3 pattern), never a page crash.
-    st.subheader("What-if & comparison (SPEC.md 60)")
+    st.subheader("What-if & comparison")
     try:
         # 60.1 — the live what-if preview: one field, one value from its
         # registry space, zero retraining
@@ -1132,7 +1214,7 @@ def _render_result(res: dict) -> None:
             _wf = whatif_preview(_ren, res.get("best_spec"), _wf_field,
                                  _wf_value)
         except ValueError as exc:  # 49.4.3: a friendly error, not a crash
-            st.error(f"what-if preview: {exc} (SPEC.md 60.1)")
+            st.error(f"what-if preview: {exc}")
         else:
             _wfl, _wfr = st.columns(2)
             with _wfl:
@@ -1143,10 +1225,9 @@ def _render_result(res: dict) -> None:
                         res.get("n_out"), highlight=_wf_field),
                         unsafe_allow_html=True)
                 else:
-                    st.error(f"invalid combination: {_wf['error']} "
-                             f"(SPEC.md 60.1)")
+                    st.error(f"invalid combination: {_wf['error']}")
             with _wfr:
-                st.markdown("**Estimated effect (logged surface, 57.2)**")
+                st.markdown("**Estimated effect (logged surface)**")
                 st.markdown(svg_whatif_effect(_wf, **pal),
                             unsafe_allow_html=True)
         # 60.2 — the spec fingerprint ("DNA"); optional A-vs-B compare
@@ -1179,7 +1260,7 @@ def _render_result(res: dict) -> None:
                                     n_out=res.get("n_out"),
                                     grid=res.get("grid"))
         except ValueError as exc:  # 49.4.3
-            st.error(f"objective reslice: {exc} (SPEC.md 60.4)")
+            st.error(f"objective reslice: {exc}")
         else:
             st.markdown(svg_weighted_reslice(_wr2, **pal),
                         unsafe_allow_html=True)
@@ -1187,12 +1268,11 @@ def _render_result(res: dict) -> None:
                 st.success(f"{_wr2['passing']}/{_wr2['pool']} logged "
                            f"candidate(s) pass the weighted gate; "
                            f"counterfactual final = candidate "
-                           f"{_wr2['final']['cand']} (SPEC.md 60.4)")
+                           f"{_wr2['final']['cand']}")
             else:
-                st.warning("no logged candidate passes the weighted gate "
-                           "(SPEC.md 60.4)")
+                st.warning("no logged candidate passes the weighted gate")
     except (ValueError, TypeError, KeyError) as exc:  # 49.4.3
-        st.error(f"what-if & comparison unavailable: {exc} (SPEC.md 60)")
+        st.error(f"what-if & comparison unavailable: {exc}")
 
     # learning views (SPEC.md 28): computed once in finish(), re-rendered
     # here from the stored result — the restored view shows the same views
@@ -1251,7 +1331,7 @@ def _render_result(res: dict) -> None:
             confusion_svg=res.get("confusion_svg"),
         ).encode("utf-8")
     except (ValueError, FileNotFoundError, OSError) as exc:
-        st.caption(f"dossier unavailable: {exc} (SPEC.md 58.3/49.4.3)")
+        st.caption(f"dossier unavailable: {exc}")
     else:
         c5.download_button("dossier.html", dossier, mime="text/html",
                            file_name="dossier.html")
@@ -1284,8 +1364,7 @@ def _ab_rerun(res: dict) -> dict:
     tc = cfg.get("task_config") or {}
     path = tc.get("path")
     if not path:
-        raise ValueError("the run's data path is not in its run_config — "
-                         "cannot re-run (SPEC.md 49.3.2)")
+        raise ValueError("the run's data path is not in its run_config — cannot re-run")
     policy = opposite_policy(cfg.get("policy"))  # ValueError: rl/unknown
     runner = DashboardRunner(
         csv_path=path,
@@ -1316,12 +1395,12 @@ def _render_advanced(res: dict) -> None:
     run_dir = res.get("run_dir")
 
     # --- 49.1.4: interactive what-if re-gating (zero training) -------------
-    with st.expander("What-if re-gating — move the bars, zero training (49.1)"):
+    with st.expander("What-if re-gating — move the bars, zero training"):
         st.caption(
             "Re-score this run's logged history against a new objective set — "
-            "the app form of `report --what-if` (SPEC.md 40.2). The `model` "
+            "the app form of `report --what-if`. The `model` "
             "objective is evaluated on the final best model's artifact "
-            "(SPEC.md 49.1.2). Nothing is trained or written.")
+            ". Nothing is trained or written.")
         c1, c2 = st.columns(2)
         wi_target = c1.number_input(
             "score >= target", value=float(res.get("target", 95.0)),
@@ -1361,11 +1440,11 @@ def _render_advanced(res: dict) -> None:
                 if block["pass"]:
                     st.success(
                         "PASS — under this bar the run's logged history still "
-                        "contains a passing candidate (SPEC.md 49.1.1).")
+                        "contains a passing candidate.")
                 else:
                     st.error(
                         "MISS — no logged candidate meets every selected "
-                        "objective (SPEC.md 49.1.3).")
+                        "objective.")
                 wf = block.get("what_if")
                 if wf:
                     final = wf.get("final") or {}
@@ -1387,12 +1466,12 @@ def _render_advanced(res: dict) -> None:
                     } for r in mr["objectives"]])
 
     # --- 49.2.3: editable best-spec re-scoring (one training pass) ---------
-    with st.expander("Edit the best spec — one extra training pass (49.2)"):
+    with st.expander("Edit the best spec — one extra training pass"):
         st.caption(
             "Nudge a field (hidden width, optimizer, knn_k, …) and re-evaluate "
             "with this run's own seed — a controlled comparison with exactly "
-            "one variable (SPEC.md 49.2.2). One training pass per press; "
-            "the run dir is never written (49.2.1).")
+            "one variable. One training pass per press; "
+            "the run dir is never written.")
         spec_text = st.text_area(
             "best spec", json.dumps(res.get("best_spec") or {}, indent=2),
             height=240, key="spec_editor")
@@ -1400,7 +1479,7 @@ def _render_advanced(res: dict) -> None:
             try:
                 spec = json.loads(spec_text)
             except json.JSONDecodeError as exc:
-                st.error(f"not valid JSON: {exc} (SPEC.md 49.2.3)")
+                st.error(f"not valid JSON: {exc} ")
             else:
                 try:
                     out = retrain_spec(run_dir, spec)
@@ -1419,20 +1498,20 @@ def _render_advanced(res: dict) -> None:
                     if isinstance(final, (int, float)):
                         st.caption(
                             f"vs this run's final {float(final):.2f}: "
-                            f"{out['score'] - float(final):+.2f} (SPEC.md 49.2.3)")
+                            f"{out['score'] - float(final):+.2f}")
 
     # --- 49.3.4: policy A/B (one full budget of the other policy) ----------
-    with st.expander("Policy A/B — re-run with the other policy (49.3)"):
+    with st.expander("Policy A/B — re-run with the other policy"):
         cur = ((res.get("summary") or {}).get("run_config") or {}).get("policy")
         if cur not in ("bandit", "search"):
             st.caption(
                 "A/B is available for bandit and search runs only — `rl` "
-                "stays CLI-only (SPEC.md 23.1/49.3.1).")
+                "stays CLI-only.")
         else:
             other = opposite_policy(cur)
             st.caption(
                 f"This run used **{cur}**. Pressing the button re-runs the "
-                f"run's *exact* budget (its own run_config, SPEC.md 49.3.2) "
+                f"run's *exact* budget "
                 f"with **{other}** — one full training budget, in this tab; "
                 f"the second run gets its own run dir + registry entry.")
             if st.button(f"Re-run with {other}", key="ab_button", type="primary"):
@@ -1454,23 +1533,23 @@ def _render_advanced(res: dict) -> None:
                         st.caption(
                             f"final scores — {cur}: {fa:.2f} vs {other}: {fb:.2f} "
                             f"→ **{winner}** wins by {abs(fa - fb):.2f}")
-                    st.caption(f"the {other} run: `{res2['run_dir']}` (SPEC.md 49.3.4)")
+                    st.caption(f"the {other} run: `{res2['run_dir']}`")
 
     # --- 59.3 (v0.45): manual/expert mode — set the exact spec, train once --
-    with st.expander("Manual mode — train this exact spec (59.3)"):
+    with st.expander("Manual mode — train this exact spec"):
         st.caption(
-            "Override the search entirely (SPEC.md 59.3): set each field to "
+            "Override the search entirely : set each field to "
             "the exact value you want, then train one pass — the loop "
             "validates + reports, it does not discover. Starts from this "
             "run's best spec; override any field below. Nothing is written "
-            "to the run dir (49.2.1).")
+            "to the run dir.")
         _rcfg = (res.get("summary") or {}).get("run_config") or {}
         _mseed = int(_rcfg.get("seed", 7))
         _mtask = _rcfg.get("task")
         _mtaskcfg = _rcfg.get("task_config") or {}
         st.caption(
             f"seed **{_mseed}** · task **{_mtask or '—'}** (this run's "
-            f"run_config, SPEC.md 59.3.2)")
+            f"run_config)")
         _mdefaults = dict(DEFAULT_SPEC.to_dict())
         _mdefaults.update(res.get("best_spec") or {})
         _mvals = {}
@@ -1509,7 +1588,7 @@ def _render_advanced(res: dict) -> None:
                         st.caption(
                             f"vs this run's final {float(_mbest):.2f}: "
                             f"{_mout['score'] - float(_mbest):+.2f} "
-                            f"(SPEC.md 59.3.2)")
+                            f"")
 
 
 def _render_gallery(items: list[dict]) -> None:
@@ -1588,7 +1667,7 @@ def _render_experiments(payload: dict) -> None:
                                            u.get("candidate_score"),
                                            u.get("gen_gap"), best_before))
             with st.expander(f"candidate #{u.get('index')} — {reason} · "
-                             "gate math + curves (SPEC.md 52.1)",
+                             "gate math + curves",
                              expanded=False):
                 _drill_body(u, gm, reason, info.get("target"))
             if u.get("best_score") is not None:
@@ -1597,7 +1676,7 @@ def _render_experiments(payload: dict) -> None:
     # the live Pareto frontier (53.2) + the champion spec card with the
     # last acceptance's first mutated field highlighted (53.3)
     if stream:
-        st.subheader("Decision views (SPEC.md 53.2)")
+        st.subheader("Decision views")
         st.markdown(svg_live_frontier(stream), unsafe_allow_html=True)
     best_spec = (payload.get("res") or {}).get("best_spec")
     if best_spec:
@@ -1606,14 +1685,14 @@ def _render_experiments(payload: dict) -> None:
             if u.get("accepted") and u.get("mutation"):
                 last_hl = u["mutation"][0]
                 break
-        st.subheader("Champion spec (SPEC.md 53.3)")
+        st.subheader("Champion spec")
         st.markdown(svg_architecture(
             best_spec, payload.get("state_dim", 1), payload.get("n_out", 1),
             highlight=last_hl if isinstance(last_hl, str) else None),
             unsafe_allow_html=True)
     # B2 (SPEC.md 54.2): the wall-time cost strip over the stored stream
     if stream:
-        st.subheader("Wall-time cost strip (SPEC.md 54.2)")
+        st.subheader("Wall-time cost strip")
         st.markdown(svg_time_strip(
             stream, (payload.get("res") or {}).get("baseline_train_seconds")),
             unsafe_allow_html=True)
@@ -1633,7 +1712,7 @@ def _render_optin_views(path, label: str, target: float, policy: str,
       already wrote. **Never runs RL live** (keeps RL CLI-only, SPEC.md 23.1).
     """
     st.divider()
-    st.subheader("Multi-run / policy views (v0.15)")
+    st.subheader("Multi-run / policy views")
 
     # --- D1: seed-variance box plot (SPEC.md 29.1) ---------------------------
     st.subheader("Seed variance — is the improvement real?")
@@ -1683,7 +1762,7 @@ def _render_optin_views(path, label: str, target: float, policy: str,
     # --- D2: RL policy view, precomputed (SPEC.md 29.2) ----------------------
     st.subheader("RL policy view (precomputed — never runs RL live)")
     st.caption("Point at a `autorefine policy-report` output directory; this "
-               "renders its precomputed SVGs (RL stays CLI-only, SPEC.md 23.1).")
+               "renders its precomputed SVGs.")
     pol_dir = st.text_input("policy-report output dir", value="", key="pol_dir")
     if st.button("Load the policy view", key="pol_button") and pol_dir.strip():
         pd_ = Path(pol_dir.strip())
@@ -1755,16 +1834,16 @@ def _render_quickstart(seed: int, runs_dir: str) -> None:
             "Run the demo now — no data needed (parity-v1, 3 experiments, "
             "a few seconds)",
             key="demo_button", type="primary",
-            help="The `autorefine run --demo` loop (SPEC.md 41.3) as an "
-                 "in-app action (SPEC.md 65.4): one tiny deterministic "
+            help="The `autorefine run --demo` loop as an "
+                 "in-app action : one tiny deterministic "
                  "parity-v1 loop, then the narrated trace and the "
                  "summary. A demo run is a run: artifacts + registry "
-                 "entry (41.3.2)."):
+                 "entry."):
         res = run_demo(seed=seed, runs_dir=runs_dir)
         st.success(
             f"Demo finished — task **{res['task']}**, seed **{res['seed']}**, "
             f"run dir `{res['run_dir']}` (it is a real run: artifacts + "
-            f"registry entry, SPEC.md 65.4.2).")
+            f"registry entry).")
         st.code("\n".join(res["trace"]), language="text")
         st.caption(f"best spec: `{json.dumps(res['best_spec'])}`")
         st.json(res["summary"])
@@ -1773,10 +1852,10 @@ def _render_quickstart(seed: int, runs_dir: str) -> None:
             f"{res['run_dir']}` — or find it in the Compare tab's "
             f"past-runs list.")
     st.info("Upload a CSV (or give a path — a CSV file, or a directory "
-            "of labelled images/audio, v0.10) to begin. Labels are the "
+            "of labelled images/audio) to begin. Labels are the "
             "column (label/target/y/class, else last) or the subfolder "
             "name / index.csv; the head is inferred: 2–50 integer "
-            "classes → accuracy, otherwise R² (SPEC.md 22.1/24.2).")
+            "classes → accuracy, otherwise R².")
 
 
 def main() -> None:
@@ -1784,7 +1863,7 @@ def main() -> None:
                        layout="wide")
     st.title("AutoRefine — autonomous model improvement")
     st.caption(
-        f"v{__version__} (SPEC.md 23/24): upload a CSV (or point at a "
+        f"AutoRefine v{__version__} — upload a CSV (or point at a "
         f"directory of labelled images/audio), watch every experiment, get a "
         f"gated model + plots. `rl` policy stays CLI-only "
         f"(`autorefine fit --policy rl`)."
@@ -1807,7 +1886,7 @@ def main() -> None:
                         key="preset",
                         help="A one-click bundle: picking it fills in the "
                              "settings it defines — feel free to override "
-                             "any of them afterwards (SPEC.md 48.3).")
+                             "any of them afterwards.")
     if pi != "(none)":  # "(none)" applies nothing; selectbox returns the label
         preset_name = label_to_name[pi]
         if st.session_state.get("_preset_applied") != preset_name:  # 48.3.3
@@ -1824,11 +1903,16 @@ def main() -> None:
             st.markdown(f"**{knob}** — {KNOB_GLOSSARY[knob]}")
 
     side.header("Data")
-    upload = side.file_uploader("CSV file (header + rows)", type=["csv"],
-                                key="csv_upload", help=KNOB_GLOSSARY["data"])
-    csv_path = side.text_input("…or a CSV path / a directory of labelled "
-                               "images or audio (v0.10)", value="", key="csv_path",
-                               help=KNOB_GLOSSARY["data"])
+    upload = side.file_uploader(
+        "Upload your data — a CSV, or a folder of labelled images, audio "
+        "or text (select all of its files, including its index.csv)",
+        type=["csv", "png", "jpg", "jpeg", "bmp", "gif", "wav", "mp3",
+              "txt"],
+        accept_multiple_files=True,
+        key="csv_upload", help=KNOB_GLOSSARY["data"])
+    csv_path = side.text_input(
+        "…or a local path: a CSV, a folder of labelled media, or its "
+        "index.csv", value="", key="csv_path", help=KNOB_GLOSSARY["data"])
     label = side.text_input("Label column (blank = auto-detect)", value="",
                             key="label", help=KNOB_GLOSSARY["label"])
     target = side.number_input("Target score (0–100)", min_value=0.0, max_value=100.0,
@@ -1852,7 +1936,7 @@ def main() -> None:
         help="Reveal the advanced knobs — policy, seed, experiments (budget), "
              "max train seconds, search quality, runs dir. Off by default: the "
              "beginner set above is all you need for a first run "
-             "(SPEC.md 48.1.2).")
+             ".")
     if show_advanced:
         policy = side.selectbox("Policy (improver)", ("bandit", "search"),
                                 index=0, key="policy",
@@ -1885,14 +1969,14 @@ def main() -> None:
     narrate = side.checkbox("Narrate the loop (plain English)", value=False,
                             key="narrate",
                             help="A friendly line per experiment instead of the "
-                                 "terse caption (off by default, SPEC.md 48.5).")
+                                 "terse caption.")
 
     live_mode = side.checkbox("Live dashboard (tick mode)", value=False,
                               key="live_mode",
                               help="Tick the page as experiments land instead "
                                    "of one synchronous block (off by default; "
                                    "the default path stays byte-identical — "
-                                   "SPEC.md 55.1).")
+                                   ").")
 
     path = _resolve_csv(upload, csv_path)
     result = st.session_state.get("result")
@@ -1918,29 +2002,28 @@ def main() -> None:
             st.info(
                 "No data loaded — upload a CSV or set a path in the sidebar "
                 "to begin. A finished run's results are still viewable in "
-                "the Results tab (SPEC.md 56.4).")
+                "the Results tab.")
         st.caption(f"policy **{policy}** · seed **{seed}** · experiments "
                    f"**{experiments}** · max train **{max_train:g}s** · "
-                   f"quality **{quality}** · target **{target:g}** "
-                   f"(SPEC.md 51.1.1)")
+                   f"quality **{quality}** · target **{target:g}**")
         # 51.4.4: a view preference, not a run knob (the 48.1 knob
         # invariant holds — `ALL_KNOBS` is untouched)
         st.checkbox("Colorblind-safe palette (Okabe-Ito)", value=False,
                     key="cb_palette",
                     help="Re-renders the result plots colorblind-safe + "
                          "dark-mode-aware (a view preference, not a run "
-                         "setting — SPEC.md 51.4.4).")
+                         "setting).")
         # 56.5 (v0.42): the reduced-motion opt-out (A.6) — a view preference
         # for the live sparkline's pulsing halo, not a run knob (51.4.4)
         st.checkbox("Reduce motion", value=False, key="reduce_motion",
                     help="Render the live best-score sparkline as a static "
                          "dot instead of the pulsing halo (accessibility "
-                         "opt-out — SPEC.md 56.5).")
+                         "opt-out).")
         # 56.3 (v0.42): the design-token registry (A.3) — the single source
         # of truth for the SVG color/shape tokens, rendered as a table
         with st.expander("Design tokens", expanded=False):
             st.caption(
-                "The SVG design-token registry (SPEC.md 56.3) — one row per "
+                "The SVG design-token registry — one row per "
                 "token; the `okabe`/`dark` overrides are applied by the "
                 "active theme.")
             _tok = resolve_tokens()
@@ -1952,10 +2035,10 @@ def main() -> None:
         # (allowed set). Opt-in: an empty rule list is the pre-v0.45
         # byte-identical path (59.2). A Setup-side configuration, not a
         # run knob (the 48.1 knob invariant — `ALL_KNOBS` is untouched).
-        with st.expander("Steer the search — pin / bias / constrain (59.2)",
+        with st.expander("Steer the search — pin / bias / constrain",
                          expanded=False):
             st.caption(
-                "Human-in-the-loop over the spec space (SPEC.md 59.2): "
+                "Human-in-the-loop over the spec space : "
                 "**pin** a field to a value (the improver won't mutate it), "
                 "**bias** a mutation of a field toward a value, or "
                 "**constrain** a field to an allowed set (a candidate "
@@ -2013,14 +2096,14 @@ def main() -> None:
             "Stop the run (abort after the current experiment)",
             key="stop_button",
             help="Honored between experiments, never inside one — a "
-                 "partial, honest run with full artifacts (SPEC.md 51.2.3).")
+                 "partial, honest run with full artifacts.")
         rec = st.session_state.get("_worker")
         live = (rec is not None and not rec["drained"]
                 and rec.get("thread") is not None and rec["thread"].is_alive())
         if live:  # 51.2.3 preemption-safe reattach: drain the surviving run
             # 56.4 (v0.42): the explicit loading state (A.4) — "it's running"
             st.info("RUNNING — the improvement loop is in progress "
-                    "(SPEC.md 56.4).")
+                    ".")
             if stop_pressed:
                 rec["stop"]["flag"] = True
             _drain_live(rec, narrate, stream_mode=live_mode)
@@ -2040,7 +2123,7 @@ def main() -> None:
                     try:
                         _stg = SteeringState.from_dict(_stg_rules)
                     except ValueError as exc:
-                        st.error(f"invalid steering rule: {exc} (SPEC.md 59.2)")
+                        st.error(f"invalid steering rule: {exc} ")
                         st.stop()
                 _run(path, label.strip() or None, float(target), policy,
                      int(seed), int(experiments), float(max_train),
@@ -2057,7 +2140,7 @@ def main() -> None:
         else:
             st.caption("Press **Run** — every experiment is shown as it "
                        "happens (live table + curve), then the verdict, "
-                       "plots, and downloads (SPEC.md 23.2).")
+                       "plots, and downloads.")
         # SPEC.md 55.2/55.3 (v0.41): the "feel live" views — the mid-run
         # status snapshot (55.2) + the reference-run overlay (55.3). Gated
         # on a run existing (live or finished); a no-op before that (55.4).
@@ -2068,7 +2151,7 @@ def main() -> None:
             if st.button("Copy status (how's it going?)",
                          key="copy_status",
                          help="A self-contained text card: task, best, "
-                              "budget, ETA, last 3 decisions (SPEC.md 55.2)."):
+                              "budget, ETA, last 3 decisions."):
                 st.code(status_snapshot(sinfo, sstream, sseries,
                                         done=sdone), language="text")
             _runs = runs_dir.strip() or "runs"
@@ -2080,7 +2163,7 @@ def main() -> None:
                                   help="Draw a past run's best-score curve "
                                        "faintly beneath the current one — "
                                        "'am I beating last time?' "
-                                       "(SPEC.md 55.3).")
+                                       ".")
             if _ref_i != "(none)" and sseries:
                 _ref_curve = dict(_refs)[_ref_i]
                 st.markdown(
@@ -2098,7 +2181,7 @@ def main() -> None:
             _render_result(result["res"])
         else:
             st.caption("Finish a run first — the verdict, plots, and "
-                       "downloads appear here (SPEC.md 51.1.1).")
+                       "downloads appear here.")
 
     with t_compare:  # 51.1.1: seed-sweep / RL views (29.1/29.2) + past runs
         _render_optin_views(path, label, float(target), policy, int(seed),
@@ -2113,7 +2196,7 @@ def main() -> None:
         else:
             st.caption("Finish a run first — the per-candidate table (with "
                        "the reason column) and the best-score curve appear "
-                       "here (SPEC.md 51.1.1).")
+                       "here.")
 
 
 main()

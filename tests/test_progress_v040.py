@@ -292,7 +292,7 @@ def test_app_source_wires_54():
         'res.get("time_strip_svg")',
         'svg_time_strip(res["updates"]',
         'res.get("baseline_train_seconds")',
-        "Wall-time cost strip (SPEC.md 54.2)",
+        "Wall-time cost strip",
     ):
         assert token in src, token
 
@@ -322,7 +322,7 @@ def test_app_run_renders_time_strip(tmp_path):
     assert res["res"]["time_strip_svg"].startswith("<svg")
 
     subs = " | ".join(str(s.value) for s in at.subheader)
-    assert "Wall-time cost strip (SPEC.md 54.2)" in subs, subs
+    assert "Wall-time cost strip" in subs, subs
     mds = [str(m.value) for m in at.markdown]
     strips = [m for m in mds if 'aria-label="wall-time cost strip' in m]
     assert strips, "the wall-time cost strip renders"

@@ -386,7 +386,7 @@ def test_svg_frontier3_no_sizes():
     svg = svg_frontier3(r)
     _parse(svg)
     assert "no parameter counts" in svg
-    assert "tree/boost/knn sizes are data-dependent (58.2)" in svg
+    assert "tree/boost/knn sizes are data-dependent" in svg
 
 
 def test_svg_frontier3_themes():

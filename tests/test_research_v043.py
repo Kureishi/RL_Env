@@ -264,7 +264,7 @@ def test_svg_gate_region_render():
     _parse(svg)
     assert 'aria-label="gate-decision region (score × gen gap)"' in svg
     assert "<polygon points=" in svg  # the acceptance region
-    assert "gen_gap = 5%·score (18.5)" in svg  # the penalty boundary
+    assert "gen_gap = 5%·score" in svg  # the penalty boundary
     # the candidate dots' tooltips (score, gap, reason, best_before)
     assert "score 60.00 · gen_gap 1.00 · accepted · best_before 50.00" in svg
     assert "score 55.00 · gen_gap 1.00 · score · best_before 60.00" in svg
@@ -272,7 +272,7 @@ def test_svg_gate_region_render():
     # the legend + the 18.6 caption
     for token in ("accepted", "overfit", "score", "ci"):
         assert token in svg
-    assert "the per-step CI margin (18.6) shifts this by z·SE" in svg
+    assert "the per-step CI margin shifts this by z·SE" in svg
     empty = svg_gate_region({"baseline_score": None, "tol": 0.05,
                              "candidates": []})
     _parse(empty)
@@ -334,12 +334,11 @@ def test_svg_bandit_beliefs_render():
     assert i >= 0
     b_title = svg[i:svg.find("</title>", i)]
     assert "best-believed" not in b_title
-    assert "band = 95% Wilson CI · tick = win rate (26.1) · diamond = UCB " \
-        "(26.4) · ★ = best-believed" in svg
+    assert "band = 95% Wilson CI · tick = win rate · diamond = UCB " \
+        "· ★ = best-believed" in svg
     empty = svg_bandit_beliefs({})
     _parse(empty)
-    assert "no field stats — needs a bandit-policy run (SPEC.md 57.4)" \
-        in empty
+    assert "no field stats — needs a bandit-policy run" in empty
 
 
 # --- the renderers: palette / dark / validation (A47) --------------------------

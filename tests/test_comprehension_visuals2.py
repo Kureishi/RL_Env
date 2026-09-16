@@ -517,7 +517,7 @@ def test_svg_score_curve_bands_and_legacy_unchanged():
     ET.fromstring(svg)  # valid XML
     assert svg.count('stroke="#93c5fd"') == 2  # one band per positive-std row
     assert "±std 5.000" in svg and "±std 10.000" in svg
-    assert "bands = score ± std (SPEC.md 18.3" in svg
+    assert "bands = score ± std (block-bootstrap; the CI gate)" in svg
     # the y-range expanded to cover the bands: 60+5=65 ... 40-10=30
     assert ">65.00<" in svg and ">30.00<" in svg
     # ascii_score_curve is untouched (SPEC.md 30.7)

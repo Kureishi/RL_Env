@@ -1,0 +1,153 @@
+{
+  "baseline_effective": 84.97833404999983,
+  "baseline_score": 85.0,
+  "best_score_at_1s": 98.33333333333333,
+  "best_spec": {
+    "activation": "relu",
+    "architecture": [
+      16,
+      8
+    ],
+    "batch_size": 32,
+    "early_stopping_patience": 0,
+    "gradient_clipping": 0.0,
+    "init_scale": 0.5,
+    "input_noise": 0.0,
+    "knn_k": 3,
+    "label_smoothing": 0.05,
+    "learning_rate": 0.003,
+    "lr_schedule": "constant",
+    "model_family": "mlp",
+    "optimizer": "adam",
+    "train_steps": 400,
+    "weight_decay": 0.0
+  },
+  "effective_improvement_factor": 1.1563945696501063,
+  "efficiency_at_1s": 1.0,
+  "experiments_run": 30,
+  "final_best_effective": 98.26848403333254,
+  "final_best_score": 98.33333333333333,
+  "finished_reason": "budget_exhausted",
+  "improvement_factor": 1.156862745098039,
+  "mutation_win_rate": {
+    "activation": {
+      "trials": 2,
+      "wins": 1
+    },
+    "architecture": {
+      "trials": 2,
+      "wins": 0
+    },
+    "batch_size": {
+      "trials": 2,
+      "wins": 0
+    },
+    "early_stopping_patience": {
+      "trials": 2,
+      "wins": 0
+    },
+    "gradient_clipping": {
+      "trials": 2,
+      "wins": 0
+    },
+    "init_scale": {
+      "trials": 2,
+      "wins": 1
+    },
+    "input_noise": {
+      "trials": 2,
+      "wins": 1
+    },
+    "knn_k": {
+      "trials": 4,
+      "wins": 3
+    },
+    "label_smoothing": {
+      "trials": 2,
+      "wins": 1
+    },
+    "learning_rate": {
+      "trials": 2,
+      "wins": 1
+    },
+    "lr_schedule": {
+      "trials": 2,
+      "wins": 0
+    },
+    "model_family": {
+      "trials": 2,
+      "wins": 0
+    },
+    "optimizer": {
+      "trials": 2,
+      "wins": 1
+    },
+    "train_steps": {
+      "trials": 2,
+      "wins": 0
+    },
+    "weight_decay": {
+      "trials": 2,
+      "wins": 1
+    }
+  },
+  "pareto_frontier": [
+    {
+      "score": 85.0,
+      "spec_hash": "362bf6efd9c24720",
+      "train_seconds": 0.043331900000339374
+    },
+    {
+      "score": 96.66666666666667,
+      "spec_hash": "088606b631af85c4",
+      "train_seconds": 0.12425749999965774
+    },
+    {
+      "score": 98.33333333333333,
+      "spec_hash": "771a2d3c91178619",
+      "train_seconds": 0.12969860000157496
+    }
+  ],
+  "run_config": {
+    "autorefine_version": "0.51.0",
+    "biases": [],
+    "block_size": 512,
+    "ci_blocks": 8,
+    "constraints": [],
+    "curriculum": false,
+    "dataset_size": 480,
+    "efficiency_weight": 0.5,
+    "ensemble_top_k": 0,
+    "gen_gap_penalty": 0.5,
+    "kfold": 0,
+    "max_experiments": 30,
+    "max_train_seconds": 30.0,
+    "max_wall_seconds": 900.0,
+    "pins": [],
+    "policy": "bandit",
+    "rl_episodes": null,
+    "schema": "autorefine.run_config/1",
+    "screen_frac": 1.0,
+    "seed": 7,
+    "stall_patience": null,
+    "target": 95.0,
+    "task": "csv",
+    "task_config": {
+      "path": "C:\\Users\\kurei\\AppData\\Local\\Temp\\autorefine_dashboard\\churn_sample.csv"
+    },
+    "z_accept": 1.0
+  },
+  "search_quality": {
+    "block_size": 512,
+    "ci_blocks": 8,
+    "efficiency_weight": 0.5,
+    "gen_gap_penalty": 0.5,
+    "z_accept": 1.0
+  },
+  "seed": 7,
+  "task": "csv",
+  "task_config": {
+    "path": "C:\\Users\\kurei\\AppData\\Local\\Temp\\autorefine_dashboard\\churn_sample.csv"
+  },
+  "wall_seconds": 4.063
+}

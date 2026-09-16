@@ -5,8 +5,8 @@ The improver loop proposes model-configuration changes, trains, evaluates on
 splits it never saw, records the outcome, and proposes the next change — all
 within a hard budget, fully reproducible, NumPy-only.
 
-**Current version: 0.10.0** (input modalities: `autorefine fit --data DIR`
-on labelled image/audio directories — see [SPEC.md](SPEC.md) §24).
+**Current version: 0.51.0.** Input modalities: CSV, plus labelled
+image / audio / text directories via `autorefine fit --data PATH`.
 
 **Spec (source of truth):** [SPEC.md](SPEC.md)
 
@@ -80,65 +80,57 @@ python -m autorefine fit --data examples/data/image_shapes --target 90.0
 # upload the CSV or directory, watch every experiment live, view the plots, download the model
 python -m autorefine dashboard          # or: streamlit run src/autorefine/dashboard_app.py
 
-# run the test suite (214 tests, incl. acceptance A1-A14)
+# run the test suite (acceptance pins A1-A55)
 python -m pytest tests/
 ```
 
 ## Quickstart: the visual dashboard (UI)
 
-The dashboard is the same improver loop as a web app — no terminal required.
-Install the GUI extra and launch it:
+The same improver loop as a web page — no terminal required:
 
 ```bash
 pip install autorefine[gui]            # needs streamlit
-python -m autorefine dashboard          # or: streamlit run src/autorefine/dashboard_app.py
+python -m autorefine dashboard         # or: streamlit run src/autorefine/dashboard_app.py
 ```
 
-Your browser opens at `http://localhost:8501`. **The first screen you see is
-the Quickstart itself** (SPEC.md 65) — the same four steps the CLI and this
-README carry, from one source — with a **Run the demo now** button that runs a
-tiny deterministic parity-v1 loop in a few seconds (no data needed) and shows
-the narrated trace, the best spec, and the summary. A demo run is a real run:
-artifacts + a registry entry, re-openable via `autorefine report --run <dir>`.
+The first screen is the **Quickstart itself** (SPEC §65) — the same four
+steps the CLI and this README carry, from one source — with a **Run the
+demo now** button: a tiny deterministic parity-v1 loop in seconds (a demo
+run is a real run — artifacts + a registry entry, re-openable via
+`autorefine report --run <dir>`). Once you pick data, the app is a
+five-tab layout driven from the **sidebar**:
 
-Once you pick data, the app is a five-tab layout driven from the **sidebar**:
+1. **Setup** — upload a CSV (or a labelled image/audio/text directory),
+   label auto-detect, target score; a **Preset** fills a bundle of settings
+   in one click; the *Advanced* expander hides the rest (policy, seed,
+   experiments, max train seconds, search quality, runs dir); toggle
+   **Narrate the loop** for a plain-English line per experiment.
+2. **Run** — every experiment appears as it happens (live table +
+   best-score curve); **Stop** any time (keyboard `S`; `R` = Run) for an
+   honest partial run with full artifacts; **Copy status** gives a
+   self-contained "how's it going?" card; the *reference run* picker draws
+   a past run's curve beneath the current one.
+3. **Results** — the PASS/MISS verdict, the plots, and the downloads:
+   `report.html`, `best_model.npz`, `best_spec.json`,
+   `experiments.jsonl`, `run_config.json`, and a self-contained
+   **share bundle** (`.zip`).
+4. **Compare** — seed sweeps, the RL policy view, and past runs (re-open
+   and diff 2–3 runs side by side).
+5. **Experiments** — every candidate with the *reason* it was kept or
+   rejected.
 
-1. **Setup — pick the data.** Upload a CSV (or type a path; a directory of
-   labelled images/audio also works, v0.10). Leave *Label column* blank to
-   auto-detect (`label`/`target`/`y`/`class`, else the last column). Set the
-   *Target score* (default 95). Optional: a **Preset** fills a bundle of
-   settings in one click (override any after). The **Show advanced options**
-   toggle (off by default) reveals the rest: policy `bandit`/`search`, seed,
-   experiments, max train seconds, search quality `v04`/`legacy`, runs dir.
-   Toggle **Narrate the loop** for a plain-English line per experiment.
-2. **Run — press *Run the improvement loop*.** Every experiment appears as it
-   happens (live table + best-score curve). Press **Stop** any time (keyboard
-   `S`; `R` = Run) for an honest, partial run with full artifacts. **Copy
-   status** gives a self-contained "how's it going?" card, and the *reference
-   run* picker draws a past run's curve beneath the current one ("am I beating
-   last time?").
-3. **Results — read the verdict.** Target met? by how much? Plus the plots and
-   the downloads: `report.html`, `best_model.npz`, `best_spec.json`,
-   `experiments.jsonl`, `run_config.json` (the copy-pasteable recipe), and a
-   self-contained **share bundle** (`.zip`).
-4. **Compare — put runs side by side.** Seed sweeps, the RL policy view, and
-   the past-runs list (re-open and diff any two runs).
-5. **Experiments — audit every candidate.** The per-candidate table with the
-   *reason* each was kept or rejected, and the best-score curve.
+**Steer, don't just watch.** The *Steer the search* expander (Setup tab)
+adds human-in-the-loop rules — **pin** a field, **bias** a mutation toward
+one value, or **constrain** an allowed set (SPEC §59.2) — all opt-in. For
+the full parameter surface, the Results tab has the *Parameter inspector*
+(SPEC §59.1) and the *What-if & comparison* panel (SPEC §60): live what-if
+previews, the spec-fingerprint "DNA", the interaction heatmap, and
+objective-weight sliders.
 
-**Steer, don't just watch.** The *Steer the search* expander (Setup tab) adds
-human-in-the-loop rules — **pin** a field to a value, **bias** a mutation
- toward one, or **constrain** an allowed set — so a researcher can freeze what
- they already know and let the loop tune the rest (SPEC.md 59.2). All opt-in;
- leave empty for the default loop. For the full parameter surface, the
- **Results** tab has a *Parameter inspector* (SPEC.md 59.1) and a *What-if &
- comparison* panel (SPEC.md 60): live what-if previews, the spec-fingerprint
- "DNA", the interaction heatmap, and objective-weight sliders.
-
-> The dashboard is a thin renderer over the same core as the CLI (SPEC.md
-> 23); the `rl` policy stays CLI-only (`autorefine fit --policy rl`). The
-> Quickstart panel, `autorefine quickstart`, and this section all read from
-> one source (SPEC.md 65), so they never drift apart.
+> The dashboard is a thin renderer over the same core as the CLI
+> (SPEC §23); the `rl` policy stays CLI-only (`autorefine fit --policy
+> rl`). The Quickstart panel, `autorefine quickstart`, and this section
+> all read from one source (SPEC §65), so they never drift apart.
 
 ## Python API
 
@@ -304,533 +296,103 @@ Fixed-dim `Box` observation, `Discrete` action space (the mutation catalog).
 
 ## What improves, and how it's measured
 
-- **Unit of improvement:** `ModelSpec` — model family, architecture,
+The improver loop is the same for every task and every model family; what
+changes is the *space* it searches and the *surfaces* that explain it.
+
+**Loop invariants (always on):**
+
+- **Honesty** — candidates are scored on a holdout split the improver never
+  sees, plus a `gen_score` under different seeds; acceptance requires
+  `gen_gap < 5%` to catch overfitting (A3).
+- **Efficiency memory** — every run tracks the score-vs-train-time Pareto
+  frontier (`summary.json`: `pareto_frontier`, `best_score_at_1s`,
+  `efficiency_at_1s`).
+- **Budget** — hard caps on experiments, total wall time, and per-training
+  time (enforced mid-training); the budget is per-episode, so `reset()`
+  after `done` starts a fresh run.
+- **Dedup** — identical specs are rejected for free (`reason="duplicate"`).
+- **Reproducibility** — one seed pins every RNG stream; two same-seed runs
+  produce identical experiment sequences and best specs (A2).
+
+**The space being searched:**
+
+- **Unit of improvement** — a `ModelSpec`: model family, architecture,
   optimizer, learning rate, batch size, weight decay, training steps, input
-  noise, activation, (v0.3) `label_smoothing` (0.0–0.15, softmax head only),
-  and (v0.5) four mlp-family knobs that each have real training effect:
-  `lr_schedule` (constant/cosine/warmup_cosine), `early_stopping_patience`
-  (0–50, tail-split early stopping with best-val restore), `init_scale`
-  (0.5–2.0, scales the Glorot bound), `gradient_clipping` (0.0–10.0, global
-  L2-norm cap), and (v0.11) `knn_k` (1/3/5/11/21, consumed only by the
-  `knn` family; default 5 keeps pre-v0.11 spec JSON loadable). All default
-  to the legacy behavior, so pre-v0.5 spec JSON still loads and legacy
-  training stays bit-identical (T2/A8 pins).
-- **Tasks:**
-  - `cartpole-v1` — balance policy by dense behavior-cloning of a reference
-    controller; score = mean episode survival (max 500 steps).
-  - `sine-v1` (v0.2) — fit a fixed sum of sinusoids (regression, mse head);
-    score = 100·R² on fresh holdout/gen points.
-  - `gridnav-v1` (v0.2) — 6×6 toroidal navigation policy (one-hot cell → 4
-    directions); score = 100·success_rate + 25·efficiency (max 125).
-  - `parity-v1` (v0.3) — XOR parity of 4 hidden bits, observed with seeded
-    8% bit-flip noise (softmax head); score = 100·accuracy on fresh points.
-    Linear models provably can't solve it; an MLP reaches the ≈75 Bayes
-    ceiling — a clean family gradient for the improver.
-  - `csv` (v0.8) — `CsvTask(path, seed=0, label=None, split_frac=0.2)`
-    wraps your own CSV: numeric columns as features, label inferred (`label`
-    arg, else first of `label/target/y/class`, else last column);
-    seed-derived 80/10/10 train/holdout/gen splits, train-only standardization;
-    score = 100·accuracy (2–50 integer classes → softmax head) or 100·R².
-    SPEC.md 22.1.
-- **Model families (v0.2, +v0.5, +v0.11):** `mlp` (any depth 0..3; depth 0
-  is a *linear* model; `softmax` or `mse` head), `tree` (bagged CART
-  ensemble, depth 1..3, `train_steps//100` trees), (v0.5) `boost`
-  (gradient-boosted residual CART, `BOOST_SHRINK=0.1`, same surface as
-  `tree`), (v0.11) `knn` (non-parametric: memorizes the standardized train
-  split and answers by k-NN with deterministic ties; `knn_k` is its knob;
-  every task), and (v0.11) `convnet` (small NumPy convnet over
-  grid-structured features — the 32×32 image grid and the log-mel
-  time×mel spectrogram, the audio *temporal* model; `architecture=(c1,c2)`
-  with c ∈ 4/8/16/32; grid-capable tasks only — a convnet spec on a flat
-  task is a logged `invalid_spec` rejection, never a crash, SPEC.md
-  25.3/25.4). Boost is clearly stronger than bag on regression (`sine-v1`)
-  and a competitive third answer on `parity-v1` (the ordering is
-  config-dependent, SPEC §19.2). Old spec JSON and checkpoints still load.
-- **Honesty:** scoring uses a holdout split the improver never sees as data,
-  plus a `gen_score` under different seeds; `gen_gap` is logged to catch
-  overfitting (acceptance A3 requires < 5%).
-- **Search quality (v0.4):** acceptance is CI-aware (block-bootstrap σ;
-  accept only if `Δeff > z·SE`), efficiency-aware (0.5 points per training
-  second, 10 s cap), and penalizes gen gap beyond 5% of score — preset
-  `search_quality_v04()`, the CLI default (`--search-quality legacy` opts
-  out). All knobs 0 reproduces the v0.3 rule exactly (A8).
-- **Dedup:** identical specs are rejected for free (`reason="duplicate"`).
-- **Budget:** hard caps on experiments, total wall time, and per-training
-  time (enforced mid-training, clean abort); the budget is per-episode, so
-  `reset()` after `done` starts a fresh run (needed for meta-RL episodes).
-- **Efficiency memory (v0.2):** every run tracks the score-vs-train-time
-  Pareto frontier; `summary.json` reports `pareto_frontier`,
-  `best_score_at_1s`, `efficiency_at_1s`.
-- **Frontier ensembling (v0.5, opt-in):** `AutoRefineEnv(ensemble_top_k=2)`
-  (CLI `--ensemble-final`) additionally reports the top-2 frontier models
-  (baseline included) averaged as a final evaluation:
-  `summary.json` gains `ensemble = {top_k, member_scores, ensemble_score}`.
-  Off by default, so v0.4 runs and A1–A8 are unchanged; the reward/
-  acceptance contract is untouched (the ensemble is a reported evaluation,
-  not an accepted candidate).
-- **Curriculum (v0.6, opt-in):** `AutoRefineEnv(..., curriculum=ParityCurriculum(seed))`
-  (CLI `run --curriculum`, parity-v1 for now) steps difficulty up as the
-  improver saturates: sweep `p_flip` 0.08→0.16 (step 0.02) at 4 bits, then
-  5 bits re-sweeps — 10 levels, 9 step-ups. A step-up fires when
-  `best_score ≥ trigger_fraction · ceiling(level)` (default 0.9), rebuilds
-  the task at the next level (same seed), re-baselines the best spec for
-  free, and resets difficulty-scoped state (dedup, Pareto, ensemble) while
-  keeping the full experiment log. `state["curriculum"]` and
-  `summary["curriculum"]` track the ladder (SPEC.md 20.1).
-- **Multi-task meta-RL (v0.6):** task-conditioned `MetaRLPolicy` +
-  `train_multi_policy` transfer one REINFORCE policy across
-  sine→parity→cartpole via shared `w`/`b` and per-task bias rows;
-  `state["task"]` is the new conditioning key (SPEC.md 20.2).
-- **Default dataset sizes (v0.6):** every task declares
-  `default_dataset_size` (cartpole/gridnav 60 episodes; sine 2048, parity
-  4096 points); `AutoRefineEnv(dataset_episodes=None)` falls back to it and
-  an explicit int still wins. Parity/sine baselines rise noticeably with
-  more data; cartpole/gridnav runs are unchanged (SPEC.md 20.3).
-- **Report plots + JSON (v0.7):** `report --json` prints `summary.json` as
-  machine-readable JSON; `report --plot` appends ASCII score/pareto charts
-  and writes `score_curve.svg` + `pareto_frontier.svg` into the run dir
-  (hand-written SVG, no new dependency; default output unchanged;
-  combined `--plot --json` keeps stdout pure JSON). SPEC.md 21.2.
-- **Plugin loader (v0.7):** external packages contribute tasks/policies via
-  entry points — `[project.entry-points."autorefine.tasks"] my-task =
-  "my_pkg.tasks:MyTask"` — discovered at CLI start (tasks merge into
-  `TASKS`, so `--task` and `eval` see them) with protocol validation
-  (`make_dataset`/`score`; policies `propose`); `autorefine plugins list`
-  reports what was found. SPEC.md 21.3.
-- **Data-in CLI (v0.8):** `autorefine fit --data FILE [--label COL]
-  [--target T] [run flags]` runs the same improvement loop on your own CSV
-  (built-in `csv` task; `--policy bandit` by default) and gates the result:
-  exit 0 when the final score ≥ target, exit 2 when it misses — a
-  machine-readable gate for pipelines; `task_config` flows through the env,
-  `summary.json`, and `eval`. SPEC.md 22.1.
-- **One-page HTML report (v0.8):** `report --html` writes a single
-  self-contained `report.html` (summary block, embedded score-curve/Pareto
-  SVGs, per-experiment and frontier tables; hand-written, no dependency).
-  `--html --json` still keeps stdout as pure JSON. SPEC.md 22.2.
-- **Visual dashboard (v0.9):** `autorefine dashboard` (or `streamlit run
-  src/autorefine/dashboard_app.py`) — the "CSV in → model out" flow as a web
-  page: upload (or point at) a CSV, label/head auto-inferred, run the loop
-  with a live experiment table + best-score curve, then the §22.1 PASS/MISS
-  verdict, the §21.2 SVG plots, and downloads for `report.html`,
-  `best_spec.json`, `best_model.npz`, `experiments.jsonl`. The result stays
-  on screen after download clicks or sidebar changes (session state) and a
-  **New run** button resets it. Optional extra
-  (`pip install autorefine[gui]`); the core stays streamlit-free — a pure
-  `DashboardRunner` carries the run semantics, the app only renders
-  (SPEC.md 23, §3). v0.12 adds four **decision views** explaining the
-  improver's choices, derived purely from the existing update stream: a
-  per-field win-rate bar chart, per-step spec-diff chips (`field: old → new`)
-  in the note and table, a field × step mutation-timeline SVG (accepted /
-  scored-rejected / unscored), and the bandit's UCB trace (bandit policy
-  only) — rendered live during the run and again in the result section
-  (SPEC.md 26, A16). v0.13 adds three **acceptance-gate views** explaining
-  how the gate decided, derived purely from the same update stream plus the
-  experiment log: a **candidate-score strip** (accepted / scored-rejected /
-  unscored lanes — are the rejections near-misses or garbage?), a
-  **score-vs-gen-gap scatter** with the S18.5 5%-of-score tolerance line
-  (where the overfit penalty bites), and — for curriculum runs only — a
-  **ladder curve** with a marker at each difficulty step-up (n_bits /
-  p_flip); `report --html` gains the ladder section and `report --plot`
-  gains `ladder_curve.svg` when the run has one (SPEC.md 27, A17).
-  v0.14 adds four **learning views** explaining what the model actually
-  *learned*: per-experiment **training curves** (train/holdout loss over
-  steps — the only core change, `train()` now returns a bounded
-  `loss_history`, ≤ 48 records, logged per experiment, SPEC.md 28.1);
-  **final-model diagnostics** (per-class accuracy bars + a confusion matrix
-  on the holdout, turning "96.4%" into "fails on class X", SPEC.md 28.2);
-  an **error gallery** for media tasks (inline image thumbnails / audio
-  waveforms of the misclassified holdout items, ≤ 8, SPEC.md 28.3); and a
-  **spec → architecture diagram** (the best spec rendered as an annotated
-  block diagram — layers, activation, family, knn_k, conv filters,
-  SPEC.md 28.4). The dashboard renders all four under a "Learning views"
-  subheader, `report --html` gains the architecture / diagnostics / gallery
-  sections, and `report --plot` writes `architecture.svg` + `per_class.svg`
-  + `confusion.svg`. The core stays PIL/soundfile-free (optional extras,
-  §3/§21.1) and `import autorefine` never pulls them in (SPEC.md 28, A18).
-- **Multi-run / policy views (v0.15):** the two questions a single run
-  cannot answer. **Is the improvement real?** — `autorefine variance
-  --data PATH --seeds N` re-runs the same `fit` budget under N distinct
-  seeds (base `--seed`, default 7) and renders a **seed-variance box
-  plot** on a fixed 0–100 axis: min/q1/median/q3/max of the finals
-  (hand-rolled linear quantile), one paired baseline→final marker per
-  seed, a dashed target line, and `passing = P/N` — writing
-  `seed_variance.svg` + `seed_sweep.json` (the per-seed `verdict` carries
-  the §22.1 gate; a MISS seed still exits 0 — a variance report is a
-  measurement — and `--json` prints pure JSON). **What is the RL policy
-  doing?** — `autorefine policy-report --task TASK` (or `--multi --tasks
-  sine-v1,parity-v1,cartpole-v1`, SPEC.md 20.2) trains the meta-RL policy
-  with the **opt-in per-step trace** (off by default, so existing
-  `train_policy`/`train_multi_policy` callers and the §20.2 multi-task pin
-  stay bit-identical) and renders **per-step action-probability bars**
-  over the 77-action catalog (top-K + `rest`, the sampled action
-  highlighted) and **per-task episode-return curves** — writing
-  `action_probabilities.svg` + `task_returns.svg` + the raw
-  `policy_trace.json`/`policy_returns.json`; `MetaRLPolicy
-  .probabilities(env_state)` exposes the exact masked softmax `propose()`
-  would sample from (pure, no RNG draw). The dashboard gains the two
-  opt-in panels — a button-driven **Seed variance** sweep and an **RL
-  policy view (precomputed)** that renders a `policy-report` directory's
-  SVGs and **never runs RL live** (RL stays CLI-only, SPEC.md 23.1). Zero
-  new core dependencies (NumPy only; both SVGs are hand-rolled valid XML)
-  and `import autorefine` never pulls in streamlit (SPEC.md 29, A19, M18).
-- **Comprehension visuals II (v0.16):** the six questions the
-  v0.12–v0.15 views leave open. **When did the seeds diverge?** — the v0.15
-  Seed variance view gains **per-seed best-score curves**: `seed_sweep` now
-  carries a `curve` per seed (the baseline + the best score after every step,
-  so early noise vs late divergence are visible), and `autorefine variance`
-  writes `seed_curves.svg` next to `seed_variance.svg` — one polyline per
-  seed on the fixed 0–100 axis, a per-seed legend, the dashed target line,
-  and `n seeds / steps`; the app's Seed variance panel renders both (SPEC.md
-  30.1). **Which value won?** — the v0.12 per-field win-rate bars gain a
-  **field × value win matrix**: `field_value_stats` credits each update's
-  `(field, new value)` pair (from its `spec_diff`) with its accepted/
-  rejected outcome — value keys normalized (lists joined, `None` → `-`),
-  fields and values sorted (values numeric-first) — rendered as one green
-  cell per `(field, value)` (`fill-opacity` = win rate, `wins/trials` inside)
-  live in the run loop and in the result's Decision views; `finish()`
-  returns `field_value_stats` + `field_value_svg` (SPEC.md 30.2).
-  **Where does the model fail?** — the flat-task complement of the media
-  error gallery: **decision-boundary scatter** for 2-feature
-  classification — `decision_boundary` paints an `n_grid × n_grid`
-  prediction grid (holdout feature ranges, 5% padding, no RNG) plus the
-  holdout points colored correct/misclassified; `finish()` returns
-  `boundary` + `boundary_svg` and the app renders it in Learning views
-  (one-feature, mse-head, and episode tasks get `None`) (SPEC.md 30.3).
-  **How much is the score's noise?** — the **CI band on the score curve**:
-  the §18.3 block-bootstrap holdout σ that the §18.5 gate already computes
-  is now logged with every baseline/experiment/curriculum entry (`std`,
-  `0.0` in legacy mode), and `svg_score_curve` draws a translucent
-  `score ± std` band per positive-`std` row — `report --plot` picks it up
-  from `experiments.jsonl` for free; legacy rows/old logs render byte-
-  identical pre-v0.16 SVG (SPEC.md 30.4).
-  **Which family won?** — the **model-family score bars**: `family_stats`
-  rolls the scored log entries up per `spec.model_family` (best holdout
-  score, that member's cost, trials / accepted count; a missing family is
-  `unknown`), rendered as one bar per family on the fixed 0–100 axis with
-  the top family highlighted — `finish()` returns `family_stats` +
-  `family_bars_svg` and the app renders the bars in Decision views
-  (SPEC.md 30.5). **Why did the policy explore?** — the **RL
-  return-to-go trace**: `svg_policy_trace` renders the existing per-step
-  `policy-report` trace as reward bars (green `r ≥ 0`, red `r < 0`), a
-  return-to-go line + points, and a dashed running-mean baseline —
-  `autorefine policy-report` now also writes `policy_trace_curve.svg`
-  (named in its output listing), and the app's RL policy panel renders
-  whichever of the three precomputed SVGs exist (a v0.15-era two-file
-  directory still renders; the A19 warning text is preserved when none
-  exist) (SPEC.md 30.6). All six are pure over data the loop already
-  produces: zero new core dependencies, the SVGs are hand-rolled valid
-  XML, and every pinned sequence (A1–A19, §18.7) stays green.
-  (SPEC.md 30.1–30.6, A20.)
-- **Optimization (v0.17):** two loop-level wins, both opt-in, both
-  determinism-safe. **Stop at the plateau** — `run`, `fit`, and `variance`
-  accept `--stall-patience K` (or `AutoRefineEnv(stall_patience=K)` /
-  `DashboardRunner(stall_patience=K)`): K consecutive non-improving
-  experiments end the run early with `finished_reason="stalled"` instead of
-  burning the rest of the budget — an acceptance, a fresh `reset()`, or a
-  curriculum step-up (a new ceiling) re-arms it; free duplicate/invalid
-  rejections don't count. Default is **off**, so every pinned sequence
-  (A1–A20, the §18.7 legacy run) is byte-identical, and the §22.1 gate
-  still reads only the final score. **Parallel seed sweep** —
-  `DashboardRunner.seed_sweep(seeds, workers=N)` and `variance --workers N`
-  run the independent seeds on stdlib `concurrent.futures`
-  processes: each seed is a self-contained deterministic run, so per-seed
-  results are bit-identical to the serial path (except the timestamped
-  `run_dir`); `workers=1` (the default) keeps the exact serial loop, and
-  `on_update` raises with `workers > 1` (a callback can't cross a process
-  boundary). Zero new dependencies; `import autorefine` stays clean
-  (SPEC.md 31.1–31.2, A21.)
-- **Optimization (v0.18):** **App perceived-perf** (app-only) — the
-  "Run the seed sweep" button now streams the per-step `on_update`
-  callback (the SPEC.md 31.2 serial path; the app keeps `workers=1`) into
-  an `st.progress` bar that finishes at 100% with "complete", and the
-  data-preview computation is `st.cache_data`-cached on
-  (path, mtime, size) so an unchanged file is never re-probed. **Two-stage
-  candidate screening** — opt-in `run`/`fit --screen-frac F` (or
-  `AutoRefineEnv(screen_frac=F)` with `0 < F < 1`, preset
-  `candidate_screening(frac)`): each candidate is first trained on the
-  first `floor(F·n)` rows and only a strict beat of the fixed champion
-  (the baseline spec screened once at `reset()`) spends the full
-  training; screen rejections are logged `kind="screen"`, spend one budget
-  experiment, and count for the v0.17 stall patience. Default
-  (`screen_frac=1.0`) is pre-v0.18 exactly — every pinned sequence
-  (A1–A21) stays green; the screening path has its own scripted pin (A22).
-  **Trainer micro-opts** (fused MLP ops, vectorized bagging) are deferred:
-  any float-order change would break bit-identical determinism (G2), and
-  they're only worth the pin re-derivation if the loop-level wins fall
-  short (SPEC.md 32.3). Zero new dependencies (SPEC.md 32.1–32.3, A22, M21.)
-- **Coherency (v0.19):** three cross-check contracts over the accumulated
-  knobs and features — no new features, no behavior change with any flag
-  off (A1–A22 stay green). **Version story (33.1):** `pyproject.toml`
-  `[project].version` and `autorefine.__version__` are one version, bumped
-  together each round (v0.19 ⇒ `0.19.0`); the dashboard caption renders the
-  same number; there is no third copy. **Knob registry (33.2):**
-  `autorefine.KNOBS` is the one table for every tunable `AutoRefineEnv`
-  knob (name, default, validator, spec ref, CLI subcommands, app widget);
-  env validation and both presets (`search_quality_v04`,
-  `candidate_screening`) route through it, and `cli.build_parser()` (a pure
-  extraction of the parser from `main()`) is tested for CLI honesty — each
-  claimed `--flag` per subcommand present and *absent* elsewhere (no
-  `--screen-frac` on `variance`, 32.3) with parser defaults equal to
-  registry defaults. **Interaction matrix (33.3):** defined, tested
-  behavior for every pair of combinable round features; the one new
-  semantic — a curriculum step-up **re-pins the screen champion** (the
-  baseline spec re-screened on the harder dataset, free), so the 32.2
-  K=1 champion semantics are per curriculum level; a screen-rejected spec
-  never enters the Pareto frontier or the ensemble top-k. The summary's
-  `baseline_screen_score` keeps reporting the reset champion; each
-  re-pinned value rides its curriculum event row (`screen_champion`).
-  Enforced by A23 (SPEC.md 33.1–33.3, M22.)
-- **Coherency II (v0.20):** the cross-check discipline extends from the
-  env knobs (33) to the two remaining cross-surface artifacts — no new
-  features, no behavior change (A1–A23 stay green), and the version steps
-  per 33.1 (v0.20 ⇒ `0.20.0`, both sources together). **Spec-space
-  coherency (34.1):** the spec space is one object with three surfaces —
-  the law (`config.py` constants + `ModelSpec.validate`), the
-  `FIELD_CATALOG` catalog (RL/Gym/bandit), and the `FIELD_SAMPLERS`
-  samplers — and the A24 tests pin their agreement: exact-value fields
-  equal the config constants (order included), range-field catalog values
-  sit inside the config ranges, every catalog architecture is legal for a
-  non-knn family, a fixed-seed battery of every sampler draw stays in the
-  registered space (field classes exhaustive), and the field sets are one
-  set (`FIELD_NAMES == CATALOG_FIELDS`, the 25.7 `SEARCH_FIELDS`
-  exclusion, `ORDERED_FIELDS`, `FAMILY_FIELDS`). **Summary contract
-  (34.2):** `summary.json` is the cross-surface artifact (env writes;
-  `report`/`eval`/dashboard/plotting read), and A24 pins its **exact
-  top-level key set** for the legacy run (17 keys) and the full-flag run
-  (+ `task_config`/`curriculum`/`screening`/`ensemble`), plus each
-  internal dict's exact key set — a renamed or dropped key is now a suite
-  failure, not a dashboard runtime surprise (SPEC.md 34.1–34.2, A24, M23.)
-- **Coherency III (v0.21):** the loop closes over the last two
-  convention-policed artifacts — no new features, no behavior change
-  (A1–A24 stay green, logged bytes byte-identical), version per 33.1
-  (v0.21 ⇒ `0.21.0`, both sources together). **Log kind registry (35.1):**
-  the five `experiments.jsonl` row kinds (`baseline`, `experiment`,
-  `screen`, `curriculum`, `invalid_spec`) are now one constant set —
-  `KIND_*` + `LOG_KINDS` in `memory.py` (the log module) — and the
-  emitter (`meta_env.py`) plus the consumers (`plotting.py`, `cli.py`,
-  `dashboard.py`) route through it; the A25 source scans fail on a raw
-  `"kind"` literal, an unregistered `KIND_` name, or a bare
-  kind-literal comparison, and a live run's rows all carry registry
-  kinds — the next new kind added to the logger is a suite failure
-  instead of a silently-missing report row (the v0.18 gotcha).
-  **Acceptance index (35.2):** the M# → SPEC § → A# → test-file table
-  at the top of SPEC.md is the single source of truth, and the A25
-  consistency tests close the spec/code drift loop — every A# defined
-  in the SPEC is cited by ≥ 1 test, every `tests/test_*.py` cites an
-  A#, and each index row's test file exists and cites that row's A#
-  (SPEC.md 35.1–35.2, A25, M24.)
-- **Generalization (v0.22):** the last two convention-policed contracts
-  become nominal, registered interfaces — no behavior change (the
-  77-action catalog, the proposal order, and A1–A25 stay
-  byte-identical), version per 33.1 (v0.22 ⇒ `0.22.0`, both sources
-  together). **Task ABC (36.1):** `tasks.Task` is a nominal ABC (not the
-  former structural Protocol) with exactly two abstract methods
-  (`make_dataset`, `score`) and two explicit attributes — `metric`
-  (what the task reports: `accuracy`/`r2`/`mean_steps`/`success`,
-  declared instead of inferred from `n_outputs`/label dtype; instance-
-  set alongside `head` for the data tasks) and `capabilities`
-  (`interactive` cartpole/gridnav, `grid`+`media` image/audio) — every
-  registered task lists it as its base, and the app preview caption and
-  the `fit` gate line now read the declared `metric`; the §23 plugin
-  loader, `fit --task auto`, and new metrics (F1, log-loss) get a
-  frozen interface to target, with A26 pinning the contract (an AST
-  scan asserts no core code performs `isinstance(…, Task)`, so the
-  duck-typed test fakes keep working). **ModelSpec field registry
-  (36.2):** `improver/specspace.py` holds one
-  `SpecField(name, space, validator, families, spec_ref, kind)` row per
-  ModelSpec field in catalog order — the single table from which
-  `FIELD_CATALOG`/`CATALOG_FIELDS`, the 77-action `ACTIONS` catalog,
-  `FAMILY_FIELDS`, `FIELD_NAMES`, `ORDERED_FIELDS`, the `FIELD_SAMPLERS`
-  exhaustiveness check, and the app's spec chips all derive — a new
-  field is one registry row, and a surface (bandit, search enumerator,
-  RL/Gym catalog, dashboard) that misses it fails the A26 suite: the
-  model-space analogue of the C2 knob registry and the C4 kind registry
-  (SPEC.md 36.1–36.2, A26, M25.)
-- **Generalization (v0.23):** every run gets a canonical recipe and the
-  acceptance gate becomes a small objective set — no behavior change
-  under the defaults (with no `--gate` the gate line, PASS/MISS text,
-  and rc 0/2 are byte-identical to pre-v0.23, and A1–A26 stay green),
-  version per 33.1 (v0.23 ⇒ `0.23.0`, both sources together).
-  **RunConfig (37.1):** a frozen dataclass serialized to
-  `run_config.json` at `reset()` and mirrored as an additive
-  `summary.json` key — a copy-pasteable full recipe for any run; `fit
-  --from-run RUN_DIR` re-runs a finished data run exactly from that
-  config (built-in-task runs are pointed at `autorefine run`),
-  `report` prints a `reproduce (copy-paste):` line, and the rendered
-  recipe parses against the real CLI (`fit_recipe` emits
-  `--data`/`--seed`/knobs verbatim). **Objective gates (37.2):**
-  `fit --gate NAME OP THRESHOLD` (appendable) and `variance --gate`
-  accept an objective set over `score` (vs target), `train` (best
-  candidate's train seconds), and `model` (total `best_model.npz`
-  values) — all must pass for PASS; the default set is exactly today's
-  §22.1 score gate, and the dashboard's result panel shows both the
-  reproduce recipe and per-objective gate rows (SPEC.md 37.1–37.2,
-  A27, M26.)
-- **Tracking (v0.24):** runs over time become comparable data — no
-  behavior change under the defaults (the `report --run` path, the
-  A24 summary key sets, and A1–A27 stay green), version per 33.1
-  (v0.24 ⇒ `0.24.0`, both sources together).
-  **Run registry (38.1):** every finished run appends exactly one
-  13-key entry (`run_id`, `task`, `seed`, `policy`, `final_score`,
-  `target`, `met_target`, `finished_reason`, `experiments_run`,
-  `wall_seconds`, `config_fp` — a 12-hex SHA-256 fingerprint of the
-  run's recipe, `parent_run`, `timestamp`) to `runs/registry.json` —
-  "which of my five attempts was best?" is now one command; a corrupt
-  registry is moved aside (bytes preserved) and finish never crashes
-  on it. **Lineage (38.2):** `fit --from-run` records the source
-  run's dir name as `parent_run` (conditional `summary.json` key +
-  registry field), so an iteration chain (`r1 → r2 → r3`) is
-  recoverable. **`report --history` (38.3):** the registry as a
-  table (or `--json`), with the PASS/MISS gate per run; `--run` and
-  `--history` are mutually exclusive. **Past-runs view (38.4):** the
-  dashboard renders the registry below the result views plus a
-  two-run compare (per-field `best_spec` diff + score delta) — the
-  diff is a streamlit-free helper, testable without an app session
-  (SPEC.md 38.1–38.4, A28, M27.)
-- **Tracking II (v0.25):** the in-flight run and the decisions inside it
-  become legible — no behavior change under the defaults (`report --json`,
-  the summary key sets, the registry, and the A1–A28 pins stay green),
-  version per 33.1 (v0.25 ⇒ `0.25.0`, both sources together).
-  **Watch mode (39.1):** `autorefine watch --run RUN_DIR` tails
-  `experiments.jsonl` (byte-offset; a partial trailing line waits for the
-  next poll) and re-renders the live header + ASCII score curve + Pareto
-  until `summary.json` lands — the run dir may not exist yet, `watch`
-  waits; `--tail` emits one compact JSON line per row for CI, `--clear`
-  refreshes in place, and `--max-polls N` bounds a stuck wait (rc 0 on
-  finish, rc 1 on the bounded wait, rc 130 on Ctrl-C). **Decision
-  accounting (39.2):** `report --run` gains a "what happened" block —
-  accepted vs rejected candidates with the rejected ones bucketed by the
-  first failing gate (score → overfit → ci; the curriculum re-pins the
-  running best, and free-duplicate rejections are reported as 0 by
-  construction since they are unspent and unlogged),
-  time-to-first-improvement (first accepted candidate + seconds after the
-  baseline), and where the wall time went (baseline / candidates /
-  eval+overhead) — pure post-hoc reconstruction from the jsonl + summary,
-  no new logged field (SPEC.md 39.1–39.2, A29, M28.)
-- **Simulation (v0.26):** answer “what would this run do / what would it
-  have done” **without training** — no behavior change under the defaults
-  (`fit` without `--dry-run` and `report` without `--what-if` are
-  byte-identical to pre-v0.26, A1–A29 stay green), version per 33.1
-  (v0.26 ⇒ `0.26.0`, both sources together).
-  **Dry-run (40.1):** `autorefine fit --dry-run --data CSV` resolves
-  data → task → head/metric → split — the *same* probe that would crash on a
-  wrong label column, now surfaced before any epoch — and prints the plan:
-  recipe, task (head/metric/n_outputs/state_dim), dataset size, budget, the
-  policy’s expected candidate catalog, and a wall-time estimate from the
-  registry’s same-task history (median `wall/experiments × budget`, or an
-  explicit “no past runs” line) — creating **no** run dir / artifacts (rc 0
-  plan; rc 1 on a bad label column, or with `--from-run`).
-  **What-if (40.2):** `autorefine report --run DIR --what-if 'score>=97'
-  'train<=30'` re-gates the logged history against a *new* objective set and
-  reports the counterfactual final (best passing candidate) vs this run’s
-  actual best — pure derivation from `experiments.jsonl`, no retraining (rc 0
-  PASS / rc 2 MISS / rc 1 on a bad objective; `model` is unsupported — its
-  size is only known from the trained artifact). The `--json` / `--history`
-  machine and history paths are untouched (SPEC.md 40.1–40.2, A30, M29.)
-- **Simulation III (v0.27):** complete the simulation surface — "will we get
-  there, how did it go, and show me the loop" — still **without training**
-  (`report` without `--project`/`--trace` and `run` without `--demo` are
-  byte-identical to pre-v0.27, A1–A30 stay green), version per 33.1
-  (v0.27 ⇒ `0.27.0`, both sources together).
-  **Projection (41.1):** `autorefine report --run DIR --project
-  [--target 95]` fits the Michaelis–Menten saturation curve `score(e) =
-  Vmax·e/(Km+e)` (Lineweaver–Burk OLS, deterministic) to the same-task
-  history — the registry's finished runs plus this run, deduped by run id —
-  and answers "will I hit 95?": **CEILING** when the curve's asymptote does
-  not exceed the target, else **~N more experiment(s)** (N = max(0,
-  ⌈e_T − e_current⌉)); < 2 usable points degrade gracefully to
-  INSUFFICIENT HISTORY (always rc 0 — an informational view; mutually
-  exclusive with `--json`/`--history`/`--what-if`).
-  **Trace (41.2):** `autorefine report --run DIR --trace` is a terminal
-  replay — one decision line per `experiments.jsonl` entry (baseline →
-  candidate → mutation → score → ACCEPTED/REJECTED + reason), with the
-  documented rejection priority (score gate → overfit → CI gate) and the
-  running best reconstructed exactly as in the accounting block; the whole
-  loop is auditable without the GUI (rc 0; mutually exclusive with
-  `--json`/`--history`/`--what-if`).
-  **Demo (41.3):** `autorefine run --demo` runs one tiny, deterministic
-  parity-v1 loop (3 experiments / 60 s wall / 10 s per train, v0.4 preset,
-  `--seed`/`--runs-dir` apply, the other run flags are ignored) in seconds
-  and prints the full loop narrated with the same trace renderer — baseline
-  → candidates → gate → best spec — a cheap "here's what this tool does";
-  a demo run is a run (normal run dir, artifacts, registry entry; rc 0)
-  (SPEC.md 41.1–41.3, A31, M30.)
-- **Use the model (v0.28):** close the last gap of the loop — the model
-  itself — with three additive, pure commands over an existing run dir:
-  **no new data, no training, no writes** (A1–A31 stay green, `fit`/
-  `report`/`eval` byte-identical under the defaults), version per 33.1
-  (v0.28 ⇒ `0.28.0`, both sources together).
-  **Predict (42.1):** `autorefine predict --run DIR` scores **new** rows
-  with the run's best model — exactly one input mode: `--row JSON` (an
-  object keyed by feature name, case-insensitive, extra keys ignored — or
-  a positional array), `--csv FILE` (header auto-detected and matched by
-  name, an extra label column is fine; otherwise positional), `--stdin`
-  (JSON lines), or `--item FILE` (repeatable; media tasks only — the file
-  goes through the task's own `item_features` decode). A new row is
-  standardized with the **task's own training stats** (`feature_mean` /
-  `feature_std`, the §22.1 rule — `sine-v1` is the identity, already
-  unit-scaled) and decoded with one forward pass: the softmax argmax
-  mapped back through the user's labels (0/1 values or class names like
-  `high`/`low`) + `--json` softmax probabilities; mse → the scalar. Human
-  view: one `row_index<TAB>prediction` line per row (rc 0; rc 1 on any
-  error — episode tasks point at `eval`, mode exclusivity, missing run
-  dir, wrong cell count, undecodable file).
-  **Compare (42.2):** `autorefine compare --run A --run B` is the app's
-  Past-runs compare widget in the terminal — `diff_two_summaries` now
-  lives in **core** `autorefine.dashboard` (no streamlit; the app's name
-  *is* the core one, 38.4 unchanged): the final-score delta (B − A) +
-  the per-field `best_spec` diff (only differing fields; identical specs
-  → an `identical` line); `--json` the pure dict (rc 1 on a missing
-  summary).
-  **Explain (42.3):** `autorefine explain --run DIR [--target 95]` is a
-  one-screen narrative assembled from the run's own artifacts —
-  **result** (task/seed/policy, baseline → final, improvement factor,
-  finished reason), **tried** (per-field trial/wins/win-rate), **why**
-  (the baseline champion + the accepted chain in log order), **weak**
-  (per-class holdout diagnostics + the weakest-class hint — “the model
-  fails on class X”; an mse/episode run degrades to `n/a`), and **next**
-  (the 41.1 budget projection: CEILING / ~N MORE / insufficient
-  history) — rc 0 informational, `--json` exactly those five blocks
-  (SPEC.md 42.1–42.3, A32, M31.)
-- **Beginner onboarding (v0.34):** five additive app features that make the first screen answer "what do I do?" before "what can I tune?" — all logic pure in the core (`onboarding.py`, `narrate.py`) so it is testable without streamlit, and **no behavior change under the defaults** (presets unselected and narrate off render the pre-v0.34 loop byte-identically; A1–A37 stay green), version per 33.1 (v0.34 ⇒ `0.34.0`, both sources together). **Guided two-step setup (48.1):** the sidebar splits into the *beginner* knobs — data, label, target — top-level, and the *advanced* set (policy, seed, experiments, max-train, quality, runs dir; the same six widgets, keys, and defaults) under a closed "Advanced" expander. **Knob glossary (48.2):** one plain-English line per knob, doubled as each widget's `help=` text (single source of truth), with the completeness invariant that the glossary's keys are exactly the sidebar's knob set — a new knob without a glossary line is a suite failure, not a silent "?" in the UI. **Presets (48.3):** three one-click bundles over the GUI's own knobs only — *Quick smoke test*, *Classify my labels*, *Thorough search* — applied when the selection changes — picking a preset fills in the knobs it defines (including the Advanced ones, written before that run's widget instantiation), and re-selecting the same preset keeps your manual edits (a preset is a starting point, not a lock). **"What happened" narrative (48.4):** the result section always opens with a plain-English summary — verdict + target + final vs baseline, what the loop tried (the D1 field rollup), how it improved (the accepted score chain), and the winning recipe as chips — pure over the stored result, so the restored view renders the same block. **Narrate the loop (48.5):** an opt-in toggle (default off) that replaces the terse per-step caption with a friendly line per experiment — the app form of `report --trace`'s narration (SPEC.md 41.2) (SPEC.md 48.1–48.5, A38, M37.)
-- **Advanced analysis (v0.35):** three interactive panels for the advanced questions that previously had no surface — all logic pure in the core (`advanced.py`, plus `what_if_block` in `simulate.py` and `svg_frontier_overlay` in `plotting.py`) so it is testable without streamlit, one inert-until-pressed "Advanced analysis" section in the result view (shared by the live and restored views; the app stays a thin renderer, 23.1), and **no behavior change under the defaults** (every action behind a uniquely-keyed `st.button`; A1–A38 stay green; the `report --what-if` / `fit --gate` CLIs are unchanged), version per 33.1 (v0.35 ⇒ `0.35.0`, both sources together). **Interactive what-if re-gating (49.1):** a target + objective checkboxes (score / wall-time / model-size) that re-score the existing candidate history live, zero training — "drag to 97, do you still pass?"; the verdict is the AND of the logged-pool half (the 40.2 `what_if` over score/train) and the final-best-model-size half (the 37.2 `fit --gate` surface — per-candidate sizes are not logged, so the model objective is judged against the final `best_model.npz` artifact, and a missing artifact fails it honestly). **Editable best-spec → re-score (49.2):** a code editor preloaded with `best_spec.json` and a "re-evaluate this spec" button — one controlled training pass with the run's own seed (a deterministic re-score: same spec ⇒ same score) — to nudge `hidden_dim`, `knn_k`, etc.; a bad spec is a typed `SpecError`, shown in that panel only. **Policy A/B (49.3):** one-click "re-run this exact config with the other policy" (bandit↔search; `rl` stays CLI-only, 23.1) and an overlay of the two Pareto frontiers (x = actual train seconds, so different-length frontiers align truthfully; an optional horizontal target line only if in range) (SPEC.md 49.1–49.4, A39, M38.)
-- **Advanced: N-run comparison + one-click exports (v0.36):** two app/CLI bridges that turn the *exploration* GUI into the *CI* CLI — all logic pure in the core (`sharing.py`, `diff_n_summaries`/`running_best_curve` in `dashboard.py`, `svg_run_curves` in `plotting.py`) so it is testable without streamlit, and **no behavior change under the defaults** (A1–A39 stay green; the pinned 2-run `compare` output is byte-identical), version per 33.1 (v0.36 ⇒ `0.36.0`, both sources together). **N-run comparison (50.1):** generalises the 2-run diff (SPEC 42.2) to **2–3 runs side by side** — `autorefine compare --run A --run B [--run C]` (1 or 4 dirs are rc 1; `--json` is the tagged `diff_n_summaries` dict), and the app's Past-runs section gains a "Compare 2–3 runs" expander: **overlayed best-score curves** (`running_best_curve` per run rendered by `svg_run_curves` — adaptive score axis, shared experiment-index x-axis, one palette color per run), a per-run **recipe** row (the canonical `run_config.json` rendered via `fit_recipe`; pre-v0.23 runs degrade to a caption), a **spec-fields table** (which field values differ across the picked runs), and a **gate-row table** (final score vs target, PASS/MISS, experiments, wall time). **One-click exports (50.2):** the result view (live and restored) gains two buttons next to the copy-paste recipe — **"Download run_config.json"** (the canonical recipe as a file) and **"Build share bundle"** (one deterministic, self-contained zip — `report.html` regenerated in memory via the same `cli._share_report_html` path the CLI uses, plus `summary.json`, `run_config.json`, `best_spec.json`, and the run's flat SVGs — kept in memory and offered via `st.download_button`; the app still writes nothing into the runs tree, 23.1); the shared core (`share_payload` / `zip_bundle_bytes` / `write_share_zip` in `sharing.py`) is cycle-free (never imports cli) and byte-identical between the CLI and the app (SPEC.md 50.1–50.3, A40, M39.)
-- **Decision views (v0.39):** each candidate's *decision*, not just the running best — three decision views on the v0.38 dashboard, all logic pure in the core (`plotting.svg_gate_line` / `plotting.svg_live_frontier`, plus a `highlight=` parameter on `plotting.svg_architecture`) so it is testable without streamlit, and **no behavior change under the defaults** (A1–A42 stay green; the pre-v0.39 `svg_architecture` output is byte-identical; the loop and the pinned jsonl projections are untouched), version per 33.1 (v0.39 ⇒ `0.39.0`, both sources together). **Per-candidate gate number-line (53.1):** a small SVG at the top of every candidate's drill-down — the 0–100 axis with the running best, the target, the CI band, and the candidate's dot, annotated with the margin ("missed by 4.2", "accepted +3.1 over best", "over gen-gap tolerance") — the reason column's "no" turned into a picture; shared by the live drill and the Experiments tab. **Live Pareto frontier (53.2):** the score-vs-train-time scatter that grows each step — the new candidate drawn as a flash, dominated ones greyed — a pure render of data already in every update. **Live champion spec card (53.3):** the C4 architecture diagram re-rendered on every acceptance with the just-mutated field highlighted — "what the current best actually looks like" updating in real time (SPEC.md 53.1–53.3, A43, M42.)
-- **Live interaction (v0.38):** interact with the run *while it's alive* — four interaction surfaces on the v0.37 dashboard, all logic pure in the core (`dashboard.gate_math` / `fields_seen` / `eta_seconds` / `plateau_streak` + the `field=` filter on `plotting.svg_mutation_timeline`) so it is testable without streamlit, and **no behavior change under the defaults** (A1–A41 stay green; the loop, the summary keys, and every default SVG hex are byte-identical — all four surfaces are display-only, no gate/budget/search change), version per 33.1 (v0.38 ⇒ `0.38.0`, both sources together). **Row drill-down (52.1):** every candidate gets an expander with the *numbers* of the acceptance gate — the score gate `delta` (39.2.2), the overfit gate `gen_gap` vs `gen_tol = 5% · score` (18.5), and the CI gate `se` / `z_se = z · SE` (18.6) — plus the spec diff (26.2) and the candidate's train/holdout loss curves (28.1); live (the latest candidate, re-rendered per step) and on the Experiments tab after finish (one expander per candidate, the running best replayed exactly as the live loop did); unscored (duplicate) candidates honestly show "—" across the board. **Cross-view field filtering (52.2):** a "Focus field" selectbox on the Run tab keeps *two* views in focus with one widget — the live table keeps only the candidates that mutated the field, and the mutation timeline re-renders through `svg_mutation_timeline(..., field=)` (the default call is byte-identical, G2; the empty case names the field); the Experiments-tab table honors the same selection. **Live ETA + stall sentinel (52.3):** an "ETA ≈ N s · K experiment(s) left" caption (mean train-seconds × budget remaining; the free duplicate steps never skew the mean — R3) plus a display-only "plateau: … — Stop would be honest (SPEC.md 31.1)" hint at 5 non-improving scored experiments in a row — the env's opt-in `stall_patience` gate (31.1) is untouched, and Stop (51.2) remains the only way a run ends early. **Keyboard (52.4):** `S` = Stop, `R` = Run — a zero-height same-origin iframe on the Run tab DOM-clicks the *existing* 51.2.3 buttons (no new buttons, no new state); the guards skip typing-in-inputs and meta/ctrl/alt-held keys, and the shortcuts are inert on the idle screen (SPEC.md 52.1–52.4, A42, M41.)
-- **App interactivity (v0.37):** four structural and live-interactivity upgrades to the dashboard — all logic pure in the core (`accounting.candidate_reason`, the `stop_check` / `request_stop` hooks in `meta_env.py` / `dashboard.py`, and the Okabe-Ito / dark / ARIA layer in `plotting.py`) so it is testable without streamlit, and **no behavior change under the defaults** (A1–A40 stay green; the loop, the summary keys, and every default SVG hex are byte-identical), version per 33.1 (v0.37 ⇒ `0.37.0`, both sources together). **Five tabs (51.1):** `main()` renders its content as **Setup / Run / Results / Compare / Experiments** via `st.tabs` over the *same* widget keys (48.1 sidebar unchanged) and the *same* per-interaction order (Run press → live loop → result; clear → drop) — a layout change, not a behavior change, so the A1–A40 app assertions (verdict present, `md.count("<svg") >= 2`, `download_button >= 4`, `len(at.metric) == 4`, `dataframe >= 1`) keep holding inside the tabs. **Stop / cancel mid-run (51.2):** a **Stop** button on the Run tab calls `DashboardRunner.request_stop()`; the env consults a zero-arg `stop_check` at the top of `step()` and, once set, finishes with `finished_reason == "stopped"` through the normal `_finish` path — the full artifact set (`summary.json`, `best_spec.json`, `best_model.npz`, registry entry, 38.1), an honest PASS/MISS verdict, and a neutral "Stopped by user" warning (Stop is "between experiments", not instant; a Stop after the loop ended is a no-op). **Live rejection reasons (51.3):** the run table gains a **reason** column per candidate — `accepted` / `score` / `overfit` / `ci` / `dup` (and `stopped` on the row that honors a Stop) — from the pure `accounting.candidate_reason` in the 39.2.2 gate priority; a visible text column (not a color-only signal), carried into the Experiments tab and the restored view for free. **Accessibility (51.4):** a colorblind-safe **Okabe-Ito** palette (`plotting.OKABE_ITO`) behind a Setup-tab `cb_palette` checkbox (a *view preference*, not a sidebar knob — the `ALL_KNOBS` invariant holds), **dark-mode** SVGs that follow the theme base (`#0e1117` background + `#c9d1d9` axis), `role="img"` + an `aria-label` on all eight multi-series SVGs, and Streamlit-native keyboard operation; with the checkbox off, every stored SVG is byte-identical (SPEC.md 51.1–51.4, A41, M40.)
-- **Ergonomics (v0.33):** four polish items, all additive under the defaults (A1–A36 stay green), version per 33.1 (v0.33 ⇒ `0.33.0`, both sources together). **`--config` on any command (47.1):** every subcommand accepts `--config FILE` — a plain JSON object of kebab-case flag names, or a canonical `run_config.json` (schema `autorefine.run_config/1`) translated into the CLI vocabulary by `RunConfig.from_dict` + `runconfig_to_flags` — so a finished run dir is directly re-runnable: `autorefine fit --config runs/<id>/run_config.json`; explicit CLI flags (including `--flag=value`) beat the file, the file beats the defaults; `store_true` flags take a JSON boolean, `append` flags a JSON array, typed flags the parser's own `type`; unknown keys, bad JSON, and bad values are rc 1 before the command runs (a canonical recipe pairs with the command that owns its flags). **Help polish (47.2):** top-level `autorefine --version` (the 33.1 single source), an `examples:` block per subcommand (the README Quickstart invocations, rendered verbatim), and the exit-code table (`0` success / `1` error / `2` gate MISS / `130` watch Ctrl-C) in the top-level `--help`. **`--quiet` on run/fit (47.3):** `run --quiet` / `fit --quiet` suppress the per-experiment lines, the run-dir/baseline echoes, and fit's diagnostics block; the `=== summary ===` block and fit's gate verdict (and its rc semantics) are always kept; `--demo` and `fit --dry-run` ignore it (already minimal). **`autorefine share` (47.4):** `share --run DIR [--out FILE]` bundles a finished run into one deterministic, self-contained zip — `report.html` (always regenerated in memory, so a share of an old run dir carries a current renderer's HTML), `summary.json`, `run_config.json`, `best_spec.json`, and the run dir's flat SVGs; two shares of the same dir are byte-for-byte equal; a missing run dir is rc 1 (SPEC.md 47.1–47.4, A37, M36.)
-- **Probabilistic outputs, curriculum beyond parity, portfolio (v0.32):** three generalizations, all additive under the defaults (A1–A35 stay green), version per 33.1 (v0.32 ⇒ `0.32.0`, both sources together). **Probabilistic CSV outputs (46.1):** `autorefine predict --run DIR --prob` now prints the calibrated **per-class probabilities** alongside every prediction — one `<row>\t<class>: p=…` line per row per class (user labels, class order; `--json` already carried them and is unchanged) — and `fit --metric logloss` scores a softmax-head CSV by **log-loss** instead of accuracy (score = 100·(1 − mean NLL/ln 2), clamped at 0: a perfect model → 100, a constant binary model → 0); the metric is a declared task property (G1), `fit --dry-run --metric logloss` names it in the plan (the accuracy headroom note is omitted — 46.1.3), `fit --metric accuracy` (the default) is byte-identical to no flag, and an mse-head file with `--metric logloss` fails at the probe before any training. **Curriculum beyond parity (46.2):** `run --curriculum` is no longer parity-only — `sine-v1` gets a 3-axis difficulty ladder (label noise → frequency scale → amplitude; 27 levels, `sine_ceiling` = 100·(1 − noise²/var) on a fixed grid) and `cartpole-v1` a single-axis one (initial-condition box scale 1.0 → 2.0 → 3.0; ceiling proxy = 500 mean-steps), both on the *same* curriculum API the §20.1 parity ladder uses — `level_params()` is splatted into the curriculum event rows (parity rows keep their historical `n_bits`/`p_flip` keys byte-identical), `report`/`eval` rebuild the level task from the row, and the ladder curve labels sine/cartpole markers with their difficulty string. **Portfolio mode (46.3):** `fit --tasks A.csv,B.csv` runs one **shared budget** over several CSV datasets — experiments split `ceil(total/N)` per task, one shared wall-clock deadline, tasks in the given order, each fully gated on its own (rc 0 iff *every* task passes, 2 if any misses, 1 on a resolve failure before training); `fit --dry-run --tasks …` prints the per-task plans with zero training; cross-task policy transfer (MetaRL over a shared budget) is the documented follow-up (SPEC.md 46.1–46.3, A36, M35.)
-- **Adapts to more use cases (v0.31):** three use-case widenings, all additive under the defaults (A1–A34 stay green), version per 33.1 (v0.31 ⇒ `0.31.0`, both sources together). **Temporal / walk-forward split (45.1):** `fit --temporal` makes the CSV split respect **row order** instead of shuffling — train = first rows, holdout = next block, generalization = last — so time-ordered data (finance, sensor, logs) can be fitted with no leakage; `split_mode` is a `Task`-ABC property defaulting to `"random"` (bit-identical to today's split). **Text modality (45.2):** a fourth modality on the *same* protocol — `fit --task text --data DIR` over a labelled directory of `.txt` files (subfolder per class, or an `index.csv`), pure-numpy hashed word unigram+bigram features (128-dim, crc32 buckets) — so `auto` detection, dry-run, preflight, reports, and the dashboard all work unchanged. **Gradient-boosted trees (45.3):** status note — `BoostingEnsemble` already shipped in v0.5 (SPEC §19.2) and is in the model space; v0.31 **verifies** it (train/score + bandit catalog) rather than re-implementing (SPEC.md 45.1–45.3, A35, M34.)
-- **Stable scores, visible features (v0.30):** two opt-in scoring surfaces, both **no behavior change under the defaults** (kfold = 0 is bit-identical to the legacy single-split path — A1–A33 stay green; the A24 summary key set and the `search_quality` 5-key set untouched), version per 33.1 (v0.30 ⇒ `0.30.0`, both sources together). **K-fold holdout scoring (44.1):** `--kfold K` (on `run` and `fit`, default 0 = off) scores each *trained* model on **K distinct held-out subsets** and averages — the score becomes the fold mean and the fold σ feeds the CI gate, so baseline/candidate comparisons are materially more stable for small tabular datasets without K× retraining; CSV folds draw distinct, deterministic random subsets of the non-train pool (documented seed scheme — no leakage), generative tasks fold to distinct fresh point sets; the summary carries a **conditional** `kfold` key (absent at 0), and `RunConfig` / `fit --from-run` round-trip the recipe's K. **Feature importance (44.2):** `report --importance [--importance-repeats R]` (default 5) — pure-numpy **permutation importance** over the run's holdout ("importance = score drop when the column is shuffled"), answering *which columns does my winning model actually use*; sorted feature list, `n/a` line (still rc 0) on episode / non-flat / non-softmax-mse runs (SPEC.md 44.1–44.2, A34, M33.)
-- **Trust before you train (v0.29):** catch the bad idea before the 30-minute run — no behavior change under the defaults (A1–A32 stay green; the 40.1 dry-run rc contract unchanged), version per 33.1 (v0.29 ⇒ `0.29.0`, both sources together). **Preflight (43.1):** `fit --dry-run` now also prints a **data-health block** from the probe task it already builds — class balance + a headroom note against your `--target` (“majority class alone scores 90.0 — 5.0 points of headroom below target 95”, or “already meets target”), constant / near-constant (≥ 99% one value) columns named with the offending value/share, per-column missing values (an *ignored* column is named as such), and min/max/mean per feature; media tasks degrade to item count + class balance; bad health is a **warning in the plan, never a failure** (rc 0). **Doctor (43.2):** `autorefine doctor [--runs-dir DIR]` — the friendly first command: version + Python, numpy, the optional extras (via `find_spec` + dist metadata — never imported, A23 invariant), a micro parity-v1 smoke train (< 1 s → ok, slow → warn, error → FAIL, into a throwaway dir), and runs-dir writability; `result: N ok, N warn, N FAIL`; rc 0 unless something FAILs (SPEC.md 43.1–43.2, A33, M32.)
-- **Input modalities (v0.10):** `autorefine fit --data DIR` now accepts a
-  labelled directory — one subfolder per class (or an `index.csv`) of
-  **images** (PNG/JPG/JPEG/BMP/GIF; grayscale 32×32 features; optional
-  `autorefine[image]` extra) or **audio clips** (16-bit PCM WAV via stdlib;
-  MP3 via optional `autorefine[audio]`; NumPy log-mel features) —
-  `ImageTask`/`AudioTask` implement the *same* fitting protocol as
-  `CsvTask` (the §22.1 head/split/score rule verbatim), so the improver
-  loop, spec space, `eval`, reports, and the dashboard (which also accepts
-  a directory) all work unchanged. `fit --task auto` detects the modality
-  from the directory; `--task {csv,image,audio}` forces it; a mixed
-  directory asks for an explicit choice. The core stays PIL/soundfile-free
-  (SPEC.md 24, §3); acceptance A14 runs `fit` on both sample directories
-  with the §22.1 gate.
-- **Modality-aware model families (v0.11):** the improver now has
-  structurally better answers per modality — `knn` on every task and
-  `convnet` on grid tasks, where it exploits the 2-D layout of image
-  pixels and audio spectrograms that flat-feature families only see
-  flattened. Both keep the `forward -> (n, n_out)` contract, so scoring,
-  the §19.3 ensemble (mixed grid/flat members filter to the top member's
-  contract), `eval`, reports, and the dashboard work unchanged; `eval`
-  loads both new families. Invalid specs (a convnet on a flat task, an
-  external agent's malformed spec) are rejected in `step()` with
-  `reason="invalid_spec"` — no budget spent, not dedup-marked, logged —
-  closing a pre-existing crash path. The v0.10 flat features stay
-  bit-identical (the audio flat path is the same 26-d time-mean, the image
-  grid a pure reshape). SPEC.md 25, acceptance A15.
-- **Reproducibility:** one seed pins every RNG stream; two same-seed runs
-  produce identical experiment sequences and best specs (acceptance A2).
+  noise, activation, plus `label_smoothing`, the mlp knobs
+  `lr_schedule` / `early_stopping_patience` / `init_scale` /
+  `gradient_clipping`, and `knn_k`. All default to the legacy behavior, so
+  old spec JSON still loads and legacy training stays bit-identical (A8).
+- **Tasks** — `cartpole-v1` (mean episode survival), `sine-v1` (100·R²,
+  regression), `gridnav-v1` (navigation policy), `parity-v1` (noisy 4-bit
+  XOR — linear models provably can't solve it; an MLP reaches the ≈75 Bayes
+  ceiling), `csv` (your own CSV), and labelled image / audio / text
+  directories.
+- **Model families** — `mlp` (depth 0..3; 0 = linear), `tree` (bagged
+  CART), `boost` (gradient-boosted CART — clearly stronger than bag on
+  regression), `knn` (memorized k-NN), and `convnet` (grid tasks only:
+  image pixels and audio spectrograms; SPEC §25).
+
+**Feature → command.** Every row is opt-in or additive — with the defaults
+off, every pinned sequence (A1–A55) stays byte-identical. [SPEC.md](SPEC.md)
+carries the full detail; this table is the index.
+
+| Feature | What it does | How to use it | SPEC § |
+|---------|--------------|---------------|--------|
+| Search quality | CI-aware + efficiency-aware acceptance gate (`Δeff > z·SE`, overfit penalty) | default on `run`/`fit`; `--search-quality legacy` to opt out | 18 |
+| Frontier ensembling | Top-2 frontier models averaged, reported as a final evaluation | `run --ensemble-final` | 19.3 |
+| Curriculum | Steps task difficulty up as the improver saturates (parity / sine / cartpole ladders) | `run --curriculum` | 20.1, 46.2 |
+| Meta-RL improver | REINFORCE policy trained on the loop itself; task-conditioned transfer | `run --policy rl`; `policy-report --multi --tasks ...` | 20.2 |
+| Default dataset sizes | Task-declared dataset size when none is passed | (automatic) | 20.3 |
+| External RL agent | The loop as a Gymnasium env for outside agents | `python examples/gym_dqn.py` | 21.1 |
+| Report outputs | Machine JSON, ASCII + SVG plots, one-page HTML | `report --json` / `--plot` / `--html` | 21.2, 22.2 |
+| Plugin loader | External packages contribute tasks/policies via entry points | `plugins list` | 21.3 |
+| Data-in fit + gate | No-code fit on your CSV; exit 0/2 as a pipeline gate | `fit --data FILE --label COL --target T` | 22.1 |
+| Visual dashboard | Upload data, watch every experiment live, verdict, plots, downloads | `dashboard` (`pip install autorefine[gui]`) | 23 |
+| Input modalities | Labelled image / audio directories through the same protocol | `fit --data DIR` | 24 |
+| Modality-aware families | `knn` everywhere; `convnet` on grid (image/audio) tasks | (automatic) | 25 |
+| Seed variance | Same budget under N seeds — "is the improvement real?" | `variance --data PATH --seeds N [--workers N]` | 29.1, 30.1 |
+| RL policy view | Per-step action probabilities + per-task return curves | `policy-report --task T` | 29.2, 30.6 |
+| Comprehension visuals | Decision views, acceptance-gate views, training curves, diagnostics, error gallery, architecture diagram | dashboard; `report --html --plot` | 26–30 |
+| Stall patience | End the run early after K non-improving experiments | `run/fit --stall-patience K` | 31.1 |
+| Parallel seed sweep | Independent seeds on processes, bit-identical per seed | `variance --workers N` | 31.2 |
+| Candidate screening | Subsample-screen candidates; full-train only the champions | `run/fit --screen-frac F` | 32.2 |
+| Coherency registries | One table for env knobs, spec fields, and log kinds — cross-surface pins | (internal; A23–A26) | 33–36 |
+| RunConfig + reproduce | A canonical copy-pasteable recipe; re-run a finished run exactly | `fit --from-run DIR`; the `report` reproduce line | 37.1 |
+| Objective gates | PASS on a set of objectives: score / train-time / model-size / constraints | `fit --gate NAME OP THRESHOLD` (appendable) | 37.2, 61.1 |
+| Run registry + history | Every finished run logged — "which attempt was best?" | `report --history`; `compare --run A --run B [--run C]` | 38 |
+| Watch mode | Tail a live run; re-render charts, or `--tail` JSON for CI | `watch --run DIR` | 39.1 |
+| Decision accounting | "What happened": rejections by gate, time-to-first-improvement, wall-time split | `report --run DIR` | 39.2 |
+| Dry-run + preflight | The full plan + a data-health report before training (no run created) | `fit --dry-run --data FILE` | 40.1, 43.1 |
+| What-if re-gating | Replay the logged history under a different gate — zero training | `report --run DIR --what-if 'score>=97'` | 40.2 |
+| Projection | Saturation-curve fit over past runs — "will I hit 95?" | `report --run DIR --project --target 95` | 41.1 |
+| Trace | A terminal replay of every decision in the loop | `report --run DIR --trace` | 41.2 |
+| Demo | A tiny narrated loop in seconds — "here's what this tool does" | `run --demo` | 41.3 |
+| Doctor | Version / numpy / extras / smoke train / runs-dir check | `doctor` | 43.2 |
+| Predict | Score NEW rows with the run's best model; `--prob` for calibrated probabilities | `predict --run DIR --row/--csv/--stdin/--item` | 42.1, 46.1 |
+| Explain | One-screen narrative: result / tried / why / weak / next | `explain --run DIR` | 42.3 |
+| K-fold holdout scoring | K distinct holdout subsets → steadier baseline/candidate comparisons | `run/fit --kfold K` | 44.1 |
+| Feature importance | Permutation importance — which columns does the model actually use? | `report --importance` | 44.2 |
+| Temporal split | Walk-forward (row-order) split for time-ordered CSVs | `fit --temporal` | 45.1 |
+| Text modality | Labelled `.txt` directories; hashed n-gram features | `fit --task text --data DIR` | 45.2 |
+| Log-loss metric | Softmax CSV scored by calibrated log-loss instead of accuracy | `fit --metric logloss` | 46.1 |
+| Portfolio mode | One shared budget across several CSV datasets, each gated on its own | `fit --tasks a.csv,b.csv` | 46.3 |
+| Ergonomics | `--config FILE` on any command, `--quiet`, `--version`, help examples + exit codes | (flags) | 47 |
+| Share bundle | One deterministic self-contained .zip of a finished run | `share --run DIR` | 47.4, 50.2 |
+| Beginner onboarding | Guided setup, knob glossary, presets, a "what happened" narrative, narrate toggle | dashboard | 48 |
+| Advanced analysis | Interactive what-if re-gating, editable best-spec re-score, policy A/B | dashboard | 49 |
+| Tabs + live control | Five tabs; Stop mid-run; live rejection reasons; keyboard + colorblind-safe palettes | dashboard | 51 |
+| Decision views | Per-candidate gate number-line, live Pareto frontier, live champion spec | dashboard | 53 |
+| Live run experience | Opt-in stream mode, mid-run status snapshot, reference-run overlay, wall-time cost strip, hover tooltips | dashboard | 54–55 |
+| Professional polish | A provenance "certificate" card, a report cover, explicit app states | `report --certificate`; dashboard | 56 |
+| Research surfaces | Spec-lineage DAG, per-field response surfaces, gate-decision region, bandit belief bars, the run dossier | dashboard; `dossier --run DIR` | 57–58 |
+| Parameter inspector + steering | Pin / bias / constrain fields; every knob with its space, best-seen value, and measured effect | dashboard | 59.1–59.2 |
+| Manual / expert mode | Set the exact spec over the field registry and train it once | `manual --task T --set field=value` | 59.3 |
+| What-if & comparison | Live previews, the spec "DNA" fingerprint, interaction heatmap, objective-weight sliders | dashboard | 60 |
+| Specialized scenarios | Constraint-aware gates (per-class F1, ECE, cost, monotonicity) + stress scenarios | `fit --gate per_class_f1>=0.9` etc. | 61 |
+| Audience reports | exec / domain / technical / regulator re-skins; `verify` independently re-derives every reported number | `report --audience exec`; `verify --run DIR` | 62 |
+| Report formats + guides | Markdown / plain-text / PDF; a "what this model does" user guide; the go/no-go decision artifact | `report --format md|txt|pdf`; `report --user`; `report --decision` | 63 |
+| Benchmark report | Cross-run leaderboard, generalization matrix, best-score trend; ± uncertainty on every headline | `report --benchmark` | 64 |
+| Quickstart in the UI | The same four steps in the README, the CLI, and the app's first screen — one source | `quickstart` | 65 |
 
 ## Run artifacts
 

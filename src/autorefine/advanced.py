@@ -36,7 +36,7 @@ def opposite_policy(name) -> str:
         return "bandit"
     raise ValueError(
         f"policy A/B covers 'bandit' and 'search' only, got {name!r} "
-        f"('rl' stays CLI-only, SPEC.md 23.1/49.3.1)")
+        f"")
 
 
 def retrain_spec(run_dir, spec, max_train_seconds: float | None = None) -> dict:
@@ -66,23 +66,22 @@ def retrain_spec(run_dir, spec, max_train_seconds: float | None = None) -> dict:
     run_dir = Path(run_dir)
     summary_path = run_dir / "summary.json"
     if not summary_path.is_file():
-        raise ValueError(f"no summary.json in {run_dir} — not a finished run "
-                         f"(SPEC.md 49.2.1)")
+        raise ValueError(f"no summary.json in {run_dir} — not a finished run")
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     task = _task_from_summary(summary)
     if task is None:
         raise ValueError(
             f"cannot reconstruct the task of {run_dir} (unknown task name "
-            f"or no curriculum level; SPEC.md 49.2.2)")
+            f"or no curriculum level; )")
     if isinstance(spec, dict):
         try:
             spec = ModelSpec.from_dict(spec)
         except (KeyError, TypeError, ValueError) as exc:
-            raise SpecError(f"invalid spec: {exc} (SPEC.md 49.2.1)") from exc
+            raise SpecError(f"invalid spec: {exc} ") from exc
     elif not isinstance(spec, ModelSpec):
         raise SpecError(
             f"spec must be a dict or a ModelSpec, got {type(spec).__name__} "
-            f"(SPEC.md 49.2.1)")
+            f"")
     seed = int(summary["seed"])
     result = train_from_task(
         task, spec, seed,
