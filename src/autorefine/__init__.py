@@ -131,10 +131,11 @@ from .reporting import (  # 63 (v0.49, B2/B3/B4): formats + user guide + decisio
     render_user_guide,
     user_guide_view,
 )
-from .uncertainty import (  # 64.2 (v0.50, B6): uncertainty on headline numbers
+from .uncertainty import (  # 64.2 (v0.50, B6) + 66 (v0.52, B7): the reads
     format_pm,
     headline_uncertainty,
     seed_spread_stats,
+    verdict_robustness,
 )
 from .quickstart import (  # 65 (v0.51): the Quickstart (one source, three surfaces)
     QUICKSTART_INTRO,
@@ -165,8 +166,8 @@ from .tasks import (
 
 # SPEC.md 33.1 (C1): single version source — must equal pyproject.toml's
 # [project].version (enforced by the A23 test); one step per feature round
-# (v0.51 ⇒ 0.51.0, M54, SPEC.md 65)
-__version__ = "0.51.0"
+# (v0.52 ⇒ 0.52.0, M55, SPEC.md 66)
+__version__ = "0.52.0"
 
 __all__ = [
     "AutoRefineEnv",
@@ -272,6 +273,7 @@ __all__ = [
     "REPORT_FORMATS", "build_report_doc", "render_report_md", "render_report_txt",
     "render_report_pdf", "render_report", "user_guide_view",
     "render_user_guide", "decision_view", "render_decision",
+    "verdict_robustness",  # 66.1 (v0.52, B7): verdict robustness (A56)
     # v0.50: the benchmark / longitudinal report + uncertainty on headlines
     # (SPEC.md 64, A54). Note: the top-level `spec_fingerprint` stays the
     # v0.46 whatif "DNA" bars (one name, one binding); the B5 12-hex spec

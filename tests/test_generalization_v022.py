@@ -447,4 +447,4 @@ def test_version_round_v022():
     assertion advanced in place per SPEC.md 33.1)."""
     py = tomllib.loads(
         (REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.51.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.52.0"

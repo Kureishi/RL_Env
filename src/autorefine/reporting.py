@@ -51,7 +51,11 @@ from .audience import (  # 62 (v0.48, B1): one home for the 62.2.2 rule + render
 )
 from .dashboard import field_stats           # 26.1 (D1): the per-field win rollup
 from .tasks.media import class_label_str     # 28.3: the class display string
-from .uncertainty import headline_uncertainty  # 64.2 (B6): one home for the ± read
+from .uncertainty import (  # 64.2 (B6) + 66 (v0.52, B7): one home for the reads
+    headline_uncertainty,
+    summary_target,
+    verdict_robustness,
+)
 
 # 63.1 (B2): the three output formats, in documented order (the CLI's
 # ``--format`` ``choices`` share this tuple — one source).
@@ -883,6 +887,13 @@ def decision_view(summary, entries, proj=None, seed_spread=None,
     in ``more`` / ``ceiling`` / ``insufficient``); ``seed_spread`` is a
     list of same-task final scores; ``diag`` is a 28.2 diagnostics dict.
     All pure over the already-loaded data (G2).
+
+    ``robustness`` (66.2, A56) — the verdict's robustness to the seed band
+    (``uncertainty.verdict_robustness``, one home with the exec view):
+    ``robust_go`` / ``marginal_go`` / ``marginal_no`` / ``robust_no`` /
+    ``unassessable``, with the quoteable ``one_liner`` and the
+    "what would flip this" ``flip`` note. ``None`` when there is no
+    final score (rendered as an em-dash, the 64.2.3 rule).
     """
     s = summary if isinstance(summary, dict) else {}
     entries = [e for e in (entries or []) if isinstance(e, dict)]
@@ -996,6 +1007,11 @@ def decision_view(summary, entries, proj=None, seed_spread=None,
         # 64.2.2 (B6): the ± read on the headline number (None-safe — a
         # single run has no variance to display; the A53 pin is untouched)
         "headline_uncertainty": headline_uncertainty(best, seed_spread),
+        # 66.2 (A56): is the verdict robust to the seed band (None-safe);
+        # the target resolves through uncertainty.summary_target (66.1.1) so
+        # real runs (canonical run_config.target) classify, not unassessable
+        "robustness": verdict_robustness(summary_target(s), best,
+                                         seed_spread),
     }
 
 

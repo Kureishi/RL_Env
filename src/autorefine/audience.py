@@ -42,7 +42,11 @@ from .memory import (  # 35.1 (C4): the kind registry — the value source
     KIND_EXPERIMENT,
     LOG_KINDS,
 )
-from .uncertainty import headline_uncertainty  # 64.2 (B6): one home for the ± read
+from .uncertainty import (  # 64.2 (B6) + 66 (v0.52, B7): one home for the reads
+    headline_uncertainty,
+    summary_target,
+    verdict_robustness,
+)
 
 
 def _uncertainty_block(summary: dict, seed_spread) -> dict | None:
@@ -53,6 +57,19 @@ def _uncertainty_block(summary: dict, seed_spread) -> dict | None:
     One home so the four views cannot drift."""
     s = summary if isinstance(summary, dict) else {}
     return headline_uncertainty(s.get("final_best_score"), seed_spread)
+
+
+def _robustness_block(summary: dict, seed_spread) -> dict | None:
+    """66.2 (A56): the exec view's robustness read — the
+    ``uncertainty.verdict_robustness`` classification of the summary's
+    go/no-go verdict (its target via ``uncertainty.summary_target``, 66.1.1;
+    its ``final_best_score``) against the same-task seed spread (``None`` →
+    rendered as ``—``, the 64.2.3 rule). One home so the two decision
+    surfaces (the exec view and the decision artifact) cannot drift."""
+    s = summary if isinstance(summary, dict) else {}
+    return verdict_robustness(summary_target(s), s.get("final_best_score"),
+                              seed_spread)
+
 
 # SPEC.md 62.1: the four reader audiences, in the documented order.
 AUDIENCES = ("exec", "domain", "technical", "regulator")
@@ -199,7 +216,10 @@ def exec_view(summary, entries, diag=None, seed_spread=None) -> dict:
     ``diag`` (the 28.2 diagnostics, when the task is classification) feeds the
     risk block. No hyperparameters and no mutation data appear.
     ``seed_spread`` (64.2.2, B6) attaches the "± half-spread (N runs)" read
-    to the headline score; absent → the block renders as an em-dash."""
+    to the headline score; absent → the block renders as an em-dash.
+    ``robustness`` (66.2, A56) answers the trust question — does the
+    verdict survive the seed band — from the same spread; ``None`` (no
+    final score) renders as an em-dash."""
     s = summary if isinstance(summary, dict) else {}
     best = s.get("final_best_score")
     baseline = s.get("baseline_score")
@@ -222,6 +242,8 @@ def exec_view(summary, entries, diag=None, seed_spread=None) -> dict:
         "target_met": target_met,
         # 64.2.2 (B6): how sure to be — the seed-spread read on the headline
         "uncertainty": _uncertainty_block(s, seed_spread),
+        # 66.2 (A56): is the verdict robust to the seed band (None → —)
+        "robustness": _robustness_block(s, seed_spread),
         "cost": {"wall_seconds": s.get("wall_seconds"),
                  "experiments_run": s.get("experiments_run"),
                  "finished_reason": s.get("finished_reason")},

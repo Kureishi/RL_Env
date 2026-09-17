@@ -405,11 +405,14 @@ def test_audience_views_uncertainty_block():
 
 def test_audience_views_keep_their_pre_v050_keys():
     """A54 (SPEC.md 64.2.3, the A52 pin anchor): the B6 key is additive —
-    the pre-v0.50 key sets of the four views are unchanged."""
+    the pre-v0.50 key sets of the four views are unchanged. (The v0.52
+    B7 key ``robustness`` is likewise additive on the exec view only —
+    A56, SPEC.md 66.2: the three other views do not render a go/no-go
+    verdict, so they keep their key sets intact.)"""
     s = _syn_summary()
     assert set(exec_view(s, [])) == {
-        "what_we_built", "target_met", "uncertainty", "cost", "risk",
-        "go_no_go"}
+        "what_we_built", "target_met", "uncertainty", "robustness",
+        "cost", "risk", "go_no_go"}
     assert set(domain_view(s, [])) == {
         "task", "final_score", "uncertainty", "per_class",
         "weakest_class", "calibration", "worked_examples"}
@@ -448,10 +451,11 @@ def test_decision_view_headline_uncertainty():
         (97.2 - 95.6) / 2)
     d0 = decision_view(s, [])
     assert d0["headline_uncertainty"] is None
-    # the A53 key set, intact and additive
+    # the A53 key set, intact and additive (the v0.52 B7 ``robustness``
+    # key is additive too — A56, SPEC.md 66.2)
     assert set(d0) == {"verdict", "target_met", "confidence",
                        "failure_modes", "next_step",
-                       "headline_uncertainty"}
+                       "headline_uncertainty", "robustness"}
     assert d0["verdict"]["verdict"] == "GO"  # 97 >= 95 (62.2.2 rule)
 
 
@@ -605,4 +609,4 @@ def test_version_round_v050():
     """A54 (33.1): the version stepped with the round — ``0.50.0`` in
     both sources (pyproject and the package)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.51.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.52.0"

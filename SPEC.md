@@ -72,6 +72,7 @@ numbers and carry none.)
 | M52 | v0.49   | 63     | A53 | tests/test_reporting_v049.py |
 | M53 | v0.50   | 64     | A54 | tests/test_reporting_v050.py |
 | M54 | v0.51   | 65     | A55 | tests/test_quickstart_v051.py |
+| M55 | v0.52   | 66     | A56 | tests/test_reporting_v052.py |
 
 ---
 
@@ -6525,3 +6526,53 @@ No run semantics change: the loop, the gates, the budgets, the summary writer, a
 ### 65.7 Milestone (M54)
 
 **M54** — v0.51 "Quickstart in the UI": the README's Quickstart gets its UI twin — `quickstart.py` as the one home for the four onboarding steps (65.1: intro + step model with the in-app action and the CLI equivalent per step), `render_quickstart_md` / `render_quickstart` as the byte-stable renderers (65.2), the dashboard's first screen becomes the Quickstart with a **no-data demo button** that runs the 41.3.1 recipe in-app and narrates the result (65.4), and `autorefine quickstart [--json]` prints the same steps in the terminal (65.3). One source, three surfaces, no run semantics touched (A55).
+
+## 66. Decision robustness: does the verdict survive the seed band? (v0.52)
+
+v0.50 (SPEC.md 64, B6) put the uncertainty on every headline number, and v0.49 (SPEC.md 63, B4) put a go/no-go verdict in the decision artifact — but the two were never **combined**. "Is this GO robust to run-to-run variance?" is answered nowhere: a stakeholder reading "GO, 95.5 ≥ 95" next to "95.5 ± 0.8 (2 runs)" must do the arithmetic themselves — and the interesting case is exactly when the band crosses the target line. This round closes that gap with one pure classification of the verdict against the seed band, rendered exactly where the verdict is rendered.
+
+The through-line: *the band is already computed; the verdict is the variable.* `verdict_robustness` is a pure function of `(target, best, seed_spread)` — the same same-task final-score population `headline_uncertainty` already displays (64.2.1) — and lives in the A54 one-home statistics module, `uncertainty.py`. No new logged fields, no new CLI flags, no new dependencies. All additive, opt-in, **no default-path behavior change** — the default `report --run DIR` stays byte-identical (66.3, the A56 pin anchor; A1–A55 green).
+
+### 66.1 The robustness read: `verdict_robustness` (B7)
+
+**One home** (66.1.1) — `uncertainty.py`, the 64.2 module: the single home for the seed-band statistics so the audience views (`audience`), the decision view (`reporting`), and the CLI cannot drift (the `accounting` / `memory` one-home pattern). B7 adds its third read there: `verdict_robustness(target, best, seed_spread) -> dict | None` — and, because the two surfaces must read the *same* target from a run's artifacts, its target resolver: `summary_target(summary) -> float | None`. The top-level `target` (the synthesized-summary convention the A52–A54 views are pinned on) wins when finite; else the canonical `run_config.target` (real-run summaries keep the RunConfig, 47.1 — the same source `research.run_verdict` reads), so a real gated run classifies instead of degrading to `unassessable`. House rules apply: stdlib only; pure and deterministic (G2); `bool` excluded from the numeric population (the 62.5 guard); non-finite values are skipped, never propagated.
+
+**Classification** (66.1.2) — hand-computable, from `half = (max − min) / 2`, `band_low = best − half`, `band_high = best + half`:
+
+| status         | rule                                          | meaning                                              |
+|----------------|-----------------------------------------------|------------------------------------------------------|
+| `robust_go`    | `band_low >= target`                          | the whole band clears the line                       |
+| `marginal_go`  | `best >= target`, `band_low < target`         | the point clears; a different seed could dip below   |
+| `marginal_no`  | `best < target`, `band_high >= target`        | the point misses; a different seed could clear it    |
+| `robust_no`    | `band_high < target`                          | the whole band sits below the line                   |
+| `unassessable` | no finite `target`, or fewer than 2 seed runs | the point-estimate verdict stands; the read says why |
+
+**Inclusive boundaries** (66.1.2): a band edge exactly on the target counts as clearing it — a zero-variance band on the line is a robust GO; a point on the line with a spread is marginal.
+
+**Shape** (66.1.3) — `{status, band, one_liner, flip}`. `band` is `{low, high, half, n_runs}` — the same half-spread the A54 headline read displays — and is `None` in the `unassessable` case. `one_liner` is the quoteable plain-language decision; `flip` is the "what would flip this" note (the band edge's distance to the target; `None` in the `unassessable` case). The whole read is `None` when there is no finite `best` — there is no verdict to robustify (the views render the block as `—`, the 64.2.3 rule).
+
+### 66.2 The integration points
+
+Only two surfaces render a go/no-go verdict, and only those two gain the block:
+
+- **66.2.1 The exec view** (`audience.py`) — a `_robustness_block` helper sits beside the 64.2.2 `_uncertainty_block` (one home, so the two decision surfaces cannot drift): it classifies the summary's verdict (its target via `summary_target`, 66.1.1; its `final_best_score`) against the same-task seed spread. `exec_view` gains a top-level `robustness` key — the A52/A54 exact key-set pins advance in place to the extended set (66.3); the A53 `confidence` dict is untouched, because `robustness` is a sibling of it, not a member.
+- **66.2.2 The decision artifact** (`reporting.py`) — `decision_view` gains the same top-level `robustness` key; the A53 `confidence` block and the A54 `headline_uncertainty` stay intact and additive.
+- **66.2.3 The CLI** — no new flags: `report --decision` and `report --audience exec` already render their views, and the existing dict renderers pick up the new key. The seed-spread plumbing (64.2.2) is unchanged — one run ⇒ one point ⇒ `unassessable` (the read says "run a seed sweep to bound the risk"); ≥ 2 same-task runs ⇒ a classified status.
+- **66.2.4 Why only two** — `domain` / `technical` / `regulator` keep their exact pre-v0.52 key sets (the A52–A54 pins keep holding): the trust question is a decision question, and the decision is rendered exactly where the verdict is rendered.
+
+### 66.3 The default path is untouched (the A56 pin anchor)
+
+No run semantics change: the loop, the gates, the budgets, the summary writer, and every existing renderer are untouched (A1–A55 stay green). The default `report --run DIR` stays byte-identical to `--audience technical` (extending the 63.5 / 64.4 anchors). The `domain` / `technical` / `regulator` views keep their exact key sets; the exec and decision views gain exactly one additive top-level key each. `run --demo`, `fit`, and the app's data-loaded path are byte-identical per interaction.
+
+### 66.4 Acceptance (A56)
+
+- **66.1.2 classification** — all five statuses hand-computed against the A54 population (best 97, spread [95.6, 97.2] ⇒ `robust_go`, band 96.2–97.8, `flip` "safe by 1.2 pt(s)"; best 95.5 ⇒ `marginal_go`, band dips to 94.7; best 94, spread [93, 97] ⇒ `marginal_no`, band reaches 96; best 90, spread [88, 92] ⇒ `robust_no`, band 88–92 below the 95 line); `unassessable` both for a missing target and for fewer than 2 seed runs, with the exact one-liners (including "run a seed sweep to bound the risk") and `band` / `flip` absent; the inclusive boundary rule (a zero-variance band on the line is a robust GO; a point on the line with a spread is marginal GO; a band edge exactly on the target counts as clearing); `None` when `best` is absent / NaN / non-numeric (no verdict to robustify); `bool` and NaN skipped out of the population (the 62.5 guard); a non-finite target degrades to `unassessable`, never a crash.
+- **66.1.3 shape + determinism** — exactly `{status, band, one_liner, flip}`; `band == {low, high, half, n_runs}` equal to the A54 headline half-spread; the exact `one_liner` / `flip` strings; G2 — a re-call returns the identical dict (JSON-serializable; the input list untouched); `summary_target` (66.1.1) — top-level `target` wins when finite (the A52–A54 synthesized-summary convention), else `run_config.target` (the real-run canonical source), else `None` — bools and non-finite values never qualify (the 62.5 guard).
+- **66.2 views** — `exec_view` and `decision_view` carry the hand-computed `robustness` block with a spread (`robust_go` on the A54 fixture), `unassessable` without one, and `None` with no final score (rendered as `—`, the 64.2.3 rule); the A52/A53/A54 exact key-set pins advance in place to the sets that include `robustness`; the A53 `confidence` block and the A54 `uncertainty` / `headline_uncertainty` blocks stay intact (additive, 66.2.1–66.2.2).
+- **CLI (66.2.3)** — a real tiny single run with no target ⇒ `report --decision` rc 0 + the `unassessable` one-liner + every pre-v0.52 decision key rendered; `report --run DIR --audience exec` rc 0 + the block + the A54 `uncertainty: —` pin intact; two same-task runs with a target ⇒ a classified status (the target resolved through `summary_target`, 66.1.1 — real runs keep the canonical `run_config.target`) whose CLI-rendered block equals the read recomputed from the run's own artifacts (no hardcoded scores, G2); the default technical report stays byte-identical to `--audience technical` (the 66.3 pin anchor).
+- **exports (66.4.5)** — `verdict_robustness` is in `__all__` (33.1) and resolvable; `uncertainty.__all__` carries it (the 64.2 one-home module).
+- **version + regression** — the version steps to `0.52.0` in both sources (33.1); A1–A55 stay green (no default-path behavior change; the default / technical report byte-identity pins untouched); the A25 index advances (52 acceptance rows; `defined == set(range(1, 57))`).
+
+### 66.5 Milestone (M55)
+
+**M55** — v0.52 "Decision robustness: does the verdict survive the seed band?": `uncertainty.verdict_robustness` (66.1) — the one-home classification of the GO/NO-GO verdict against the A54 seed band (`robust_go` / `marginal_go` / `marginal_no` / `robust_no` / `unassessable`, with the quoteable `one_liner` and the "what would flip this" `flip`) — integrated into the two decision surfaces where the verdict is rendered: the exec view (66.2.1) and the decision artifact (66.2.2), shown by the existing CLI paths with no new flags (66.2.3). Pure, deterministic (G2), no default-path behavior change (66.3) (A56).
