@@ -24,6 +24,7 @@ longer "train and forget".
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -292,17 +293,12 @@ def train_policy(env, policy: MetaRLPolicy, n_episodes: int, verbose: bool = Fal
     return out
 
 
-# --- v0.53 (SPEC.md 67.1, A57): policy persistence -----------------------------
+# --- policy bytes (68.2.1, v0.54, A58) + v0.53 (67.1, A57) persistence --------
 
-def save_policy(policy: MetaRLPolicy, path) -> Path:
-    """SPEC.md 67.1 (v0.53, A57): persist a trained policy to `path` (npz).
-
-    67.1.1 one home — the full trainable state: `w`, `b`, the per-task bias
-    `B` (+ the comma-joined `task_names`) in multi-task mode, the
-    hyper-parameters (`lr`, `baseline_decay`), `n_updates`, and the
-    exploration schedule (`epsilon`, `epsilon_decay`). Tagged with
-    `FORMAT_TAG` so a foreign file is rejected on load (67.1.2)."""
-    p = Path(path)
+def _policy_arrays(policy: MetaRLPolicy) -> dict:
+    """The full trainable state as an npz array dict (67.1.1) — ONE home:
+    both `save_policy` (file) and `policy_to_bytes` (memory) build the
+    identical arrays, so the file and bytes formats cannot drift (68.2.1)."""
     arrays = {
         "format": np.asarray(FORMAT_TAG),
         "w": np.asarray(policy.w, dtype=np.float64),
@@ -316,44 +312,45 @@ def save_policy(policy: MetaRLPolicy, path) -> Path:
     if policy.B is not None:
         arrays["B"] = np.asarray(policy.B, dtype=np.float64)
         arrays["task_names"] = np.asarray(",".join(policy.task_names))
-    np.savez_compressed(p, **arrays)
-    return p
+    return arrays
 
 
-def load_policy(path, seed: int = 0) -> MetaRLPolicy:
-    """SPEC.md 67.1 (v0.53, A57): reconstruct a policy bit-exactly from a
-    file written by `save_policy`.
+def policy_to_bytes(policy: MetaRLPolicy) -> bytes:
+    """SPEC.md 68.2.1 (v0.54, A58): the full trainable state (67.1.1) as
+    an in-memory tagged npz — the same arrays, the same `FORMAT_TAG` as
+    `save_policy` (one home, `_policy_arrays`), so a policy can be
+    carried in memory (the app's download / upload round) without a file."""
+    import io
+    buf = io.BytesIO()
+    np.savez_compressed(buf, **_policy_arrays(policy))
+    return buf.getvalue()
 
-    67.1.2 contract — a `ValueError` on a missing / mismatched format tag or
-    an incompatible weight shape (the catalog length, SPEC.md 19.4); a
-    missing file raises `FileNotFoundError`. The reconstruction re-enters
-    `MetaRLPolicy.__init__` (hyper-parameter validation included) and then
-    overwrites `w` / `b` / `B` / `n_updates` with the saved arrays, so the
-    loaded policy is bit-exact: same-seed `propose` streams are identical to
-    the original's (67.1.3)."""
-    p = Path(path)
-    with np.load(p, allow_pickle=False) as z:
-        if "format" not in z or str(z["format"]) != FORMAT_TAG:
-            raise ValueError(
-                f"not an AutoRefine policy file (expected format tag "
-                f"{FORMAT_TAG!r}, got "
-                f"{None if 'format' not in z else str(z['format'])!r})")
-        w = z["w"].astype(np.float64)
-        b = z["b"].astype(np.float64)
-        if w.shape[1] != len(ACTIONS) or b.shape[0] != len(ACTIONS):
-            raise ValueError(
-                f"incompatible action dimension: weights {w.shape}, "
-                f"bias {b.shape} vs {len(ACTIONS)} catalog actions")
-        lr = float(z["lr"])
-        baseline_decay = float(z["baseline_decay"])
-        n_updates = int(z["n_updates"])
-        epsilon = float(z["epsilon"])
-        epsilon_decay = float(z["epsilon_decay"])
-        B = z["B"].astype(np.float64) if "B" in z else None
-        task_names = (
-            [t for t in str(z["task_names"]).split(",") if t]
-            if "task_names" in z else None
-        )
+
+def _policy_from_npz(z, seed: int) -> MetaRLPolicy:
+    """Reconstruct a policy from an opened npz view (67.1.2 validation).
+    Shared by `load_policy` (file) and `policy_from_bytes` (memory) so the
+    two paths can never disagree (68.2.1)."""
+    if "format" not in z or str(z["format"]) != FORMAT_TAG:
+        raise ValueError(
+            f"not an AutoRefine policy file (expected format tag "
+            f"{FORMAT_TAG!r}, got "
+            f"{None if 'format' not in z else str(z['format'])!r})")
+    w = z["w"].astype(np.float64)
+    b = z["b"].astype(np.float64)
+    if w.shape[1] != len(ACTIONS) or b.shape[0] != len(ACTIONS):
+        raise ValueError(
+            f"incompatible action dimension: weights {w.shape}, "
+            f"bias {b.shape} vs {len(ACTIONS)} catalog actions")
+    lr = float(z["lr"])
+    baseline_decay = float(z["baseline_decay"])
+    n_updates = int(z["n_updates"])
+    epsilon = float(z["epsilon"])
+    epsilon_decay = float(z["epsilon_decay"])
+    B = z["B"].astype(np.float64) if "B" in z else None
+    task_names = (
+        [t for t in str(z["task_names"]).split(",") if t]
+        if "task_names" in z else None
+    )
     policy = MetaRLPolicy(seed, lr=lr, baseline_decay=baseline_decay,
                           task_names=task_names,
                           epsilon=epsilon, epsilon_decay=epsilon_decay)
@@ -370,6 +367,55 @@ def load_policy(path, seed: int = 0) -> MetaRLPolicy:
     policy.b = b
     policy.n_updates = n_updates
     return policy
+
+
+def policy_from_bytes(data, seed: int = 0) -> MetaRLPolicy:
+    """SPEC.md 68.2.1 (v0.54, A58): the in-memory counterpart of
+    `load_policy` — reconstruct a bit-exact policy (67.1.3) from bytes
+    written by `policy_to_bytes`. The 67.1.2 validation (format tag,
+    weight shape, B/task_names consistency) applies to arbitrary bytes:
+    garbage in is a `ValueError`. `seed` is the reconstruction seed (it
+    fixes `rng` for continued sampling); the saved weights are
+    authoritative."""
+    import io
+    if isinstance(data, (str, os.PathLike)):
+        raise ValueError(
+            "policy_from_bytes expects bytes (use load_policy for a path)")
+    with np.load(io.BytesIO(bytes(data)), allow_pickle=False) as z:
+        return _policy_from_npz(z, seed)
+
+
+def save_policy(policy: MetaRLPolicy, path) -> Path:
+    """SPEC.md 67.1 (v0.53, A57): persist a trained policy to `path` (npz).
+
+    67.1.1 one home — the full trainable state: `w`, `b`, the per-task bias
+    `B` (+ the comma-joined `task_names`) in multi-task mode, the
+    hyper-parameters (`lr`, `baseline_decay`), `n_updates`, and the
+    exploration schedule (`epsilon`, `epsilon_decay`). Tagged with
+    `FORMAT_TAG` so a foreign file is rejected on load (67.1.2)."""
+    p = Path(path)
+    # 68.2.1 (v0.54, A58): the array dict comes from `_policy_arrays` —
+    # one home with `policy_to_bytes`, so file and bytes cannot drift.
+    np.savez_compressed(p, **_policy_arrays(policy))
+    return p
+
+
+def load_policy(path, seed: int = 0) -> MetaRLPolicy:
+    """SPEC.md 67.1 (v0.53, A57): reconstruct a policy bit-exactly from a
+    file written by `save_policy`.
+
+    67.1.2 contract — a `ValueError` on a missing / mismatched format tag or
+    an incompatible weight shape (the catalog length, SPEC.md 19.4); a
+    missing file raises `FileNotFoundError`. The reconstruction re-enters
+    `MetaRLPolicy.__init__` (hyper-parameter validation included) and then
+    overwrites `w` / `b` / `B` / `n_updates` with the saved arrays, so the
+    loaded policy is bit-exact: same-seed `propose` streams are identical to
+    the original's (67.1.3)."""
+    p = Path(path)
+    # 68.2.1 (v0.54, A58): the reconstruction + 67.1.2 validation come from
+    # `_policy_from_npz` — one home with `policy_from_bytes`.
+    with np.load(p, allow_pickle=False) as z:
+        return _policy_from_npz(z, seed)
 
 
 def train_multi_policy(envs: list, policy: MetaRLPolicy,

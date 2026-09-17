@@ -28,6 +28,8 @@ from .improver.rl_policy import (
     train_multi_policy,
     save_policy,  # 67.1 (v0.53): policy persistence
     load_policy,
+    policy_to_bytes,   # 68.2.1 (v0.54): the in-memory policy bytes
+    policy_from_bytes,  # 68.2.1 (v0.54): reconstruct a policy from bytes
 )
 from .improver.curriculum import (  # 46.2 (v0.32): the three ladders
     CartPoleCurriculum,
@@ -169,11 +171,16 @@ from .tasks import (
     SineRegressionV1,
     TextTask,
 )
+from .rl_dashboard import (  # 68 (v0.54, A58): the RL loop in the dashboard
+    RLMultiRunner,
+    RLRunner,
+    describe_policy,
+)
 
 # SPEC.md 33.1 (C1): single version source — must equal pyproject.toml's
 # [project].version (enforced by the A23 test); one step per feature round
-# (v0.53 ⇒ 0.53.0, M56, SPEC.md 67)
-__version__ = "0.53.0"
+# (v0.54 ⇒ 0.54.0, M57, SPEC.md 68)
+__version__ = "0.54.0"
 
 __all__ = [
     "AutoRefineEnv",
@@ -188,6 +195,11 @@ __all__ = [
     "train_multi_policy",
     "save_policy",
     "load_policy",
+    "policy_to_bytes",
+    "policy_from_bytes",
+    "RLRunner",
+    "RLMultiRunner",
+    "describe_policy",
     "ParityCurriculum",
     "SineCurriculum",
     "CartPoleCurriculum",

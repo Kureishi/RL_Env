@@ -30,7 +30,12 @@ from autorefine import (
     spec_fingerprint,       # 60.2 (v0.46): the spec "DNA" bars
     whatif_preview,         # 60.1 (v0.46): the live what-if preview
     weighted_reslice,       # 60.4 (v0.46): the objective-weight re-gate
+    RLRunner,               # 68.1 (v0.54, A58): the RL loop in the dashboard
+    RLMultiRunner,          # 68.1.4 (v0.54): the multi-task RL transfer
+    describe_policy,        # 68.2.2 (v0.54): the policy preview card
 )
+from autorefine.improver.rl_policy import policy_from_bytes  # 68.2.1 (v0.54)
+from autorefine.rl_dashboard import BUILTIN_TASKS  # 68.1.4 (v0.54)
 from autorefine.config import DEFAULT_SPEC  # 59.3 (v0.45): manual defaults
 from autorefine.improver.specspace import SPEC_FIELDS  # 59 (v0.45) the registry
 from autorefine.accounting import candidate_reason  # 51.3.2 (v0.37)
@@ -110,6 +115,7 @@ from autorefine.plotting import (
     svg_seed_curves,  # V1 view (SPEC.md 30.1)
     svg_seed_variance,  # D1 view (SPEC.md 29.1)
     svg_spec_lineage,  # 57.1 (v0.43) the spec-lineage DAG
+    svg_policy_trace,  # 68.3 (v0.54, A58) the RL policy return curve
     svg_task_returns,  # noqa: F401 (D2 view, SPEC.md 29.2)
     svg_run_verdict,  # the run verdict card (target vs final best)
     svg_knob_signal,  # the decisive-knob ranking (signal vs noise)
@@ -723,6 +729,7 @@ def _drain_live(record: dict, narrate: bool = False,
             chart = st.empty()
             bar = st.progress(0.0, text="starting…")
             note = st.empty()
+            epnote = st.empty()  # 68.3.2 (v0.54, A58): the RL episode line
             narr = st.empty() if narrate else None  # SPEC.md 48.5.1 placeholder
             # decision-view placeholders, live (SPEC.md 26.5): D1 win-rate bars,
             # V2 field x value matrix, D3 mutation timeline, D4 UCB trace
@@ -863,6 +870,10 @@ def _drain_live(record: dict, narrate: bool = False,
                     f"{kindtxt}: {'accepted +' if u['accepted'] else 'rejected '} "
                     f"{score_txt} · {diff_txt}"
                 )
+            if u.get("episode_done"):  # 68.3.2 (v0.54, A58): the RL episode line
+                epnote.caption(
+                    f"episode {u['episode']}/{info.get('episodes')}: "
+                    f"return {u['episode_return']:+.4f} · ε now {u['epsilon']:.3f}")
             # 52.3.1: the live ETA + the stall sentinel (the 31.1
             # patience semantics, display-only — the env's opt-in
             # `stall_patience` gate stays off unless explicitly set)
@@ -935,7 +946,10 @@ def _run(csv_path: str, label: str, target: float, policy: str, seed: int,
          quality: str = "v04", narrate: bool = False,
          initial_stop: bool = False,
          stream_mode: bool = False,
-         steering: "SteeringState | None" = None) -> None:
+         steering: "SteeringState | None" = None,
+         episodes: int = 5, epsilon: float = 0.0, epsilon_decay: float = 1.0,
+         keep_best: bool = True,
+         initial_policy_bytes: "bytes | None" = None) -> None:
     """Start the live loop (SPEC.md 51.2.3): build the runner, launch the
     daemon worker, then drain its messages synchronously into the live UI.
 
@@ -945,13 +959,28 @@ def _run(csv_path: str, label: str, target: float, policy: str, seed: int,
     ``stream_mode`` (SPEC.md 55.1, v0.41) is the opt-in live path: the drain
     is non-blocking and the app ``st.rerun()``s to tick the page; the default
     (``False``) is the byte-identical synchronous drain (55.4).
+
+    ``policy == "rl"`` (SPEC.md 68.1, v0.54) builds an ``RLRunner`` instead of
+    a ``DashboardRunner`` — the same worker/drain contract (51.2.3), the
+    bandit/search path is byte-identical (68.4).
     """
-    runner = DashboardRunner(
-        csv_path=csv_path, label=label or None, target=target, policy=policy,
-        seed=seed, experiments=experiments, max_train_seconds=max_train,
-        runs_dir=runs_dir, search_quality=quality,
-        steering=steering,  # SPEC.md 59.2 (v0.45): the steering rules (None = off)
-    )
+    if policy == "rl":  # 68.1 (v0.54, A58): the RL loop in the dashboard
+        runner = RLRunner(
+            csv_path=csv_path, label=label or None, target=target,
+            seed=seed, experiments=experiments, max_train_seconds=max_train,
+            runs_dir=runs_dir, search_quality=quality,
+            episodes=int(episodes), epsilon=float(epsilon),
+            epsilon_decay=float(epsilon_decay), keep_best=bool(keep_best),
+            initial_policy=initial_policy_bytes,
+        )
+    else:
+        runner = DashboardRunner(
+            csv_path=csv_path, label=label or None, target=target,
+            policy=policy,
+            seed=seed, experiments=experiments, max_train_seconds=max_train,
+            runs_dir=runs_dir, search_quality=quality,
+            steering=steering,  # SPEC.md 59.2 (v0.45): the steering rules (None = off)
+        )
     record = {
         "thread": None,
         "stop": {"flag": bool(initial_stop)},
@@ -1007,6 +1036,37 @@ def _render_result(res: dict) -> None:
     m3.metric("experiments", res["experiments_run"])
     wall = res["wall_seconds"]
     m4.metric("wall time", f"{wall:.1f}s" if wall is not None else "—")
+
+    # SPEC.md 68.3.3 (v0.54, A58): the RL result block — present only when
+    # the run used the `rl` policy (the bandit/search result dicts carry no
+    # "rl" key, so the default path renders byte-identically, 68.4).
+    rl = res.get("rl")
+    if rl:
+        st.subheader("Reinforcement learning")
+        st.markdown(svg_task_returns(rl["returns"]), unsafe_allow_html=True)
+        best = rl.get("best")
+        if best:
+            st.caption(
+                f"best episode: #{best['episode'] + 1} "
+                f"(return {best['return']:+.4f}) — the downloaded policy is "
+                f"this checkpoint (keep-best on)")
+        elif rl.get("keep_best") is False:
+            st.caption("keep-best off — the downloaded policy is the final "
+                       "episode's weights")
+        st.download_button(
+            "Download the trained policy (.npz)",
+            data=rl["policy_bytes"], file_name="autorefine_policy.npz",
+            mime="application/octet-stream", key="dl_policy")
+        if rl.get("trace"):
+            st.markdown(
+                svg_action_probabilities(rl["trace"], top_k=8, n_steps=12),
+                unsafe_allow_html=True)
+            st.markdown(svg_policy_trace(rl["trace"]), unsafe_allow_html=True)
+        _tasks = rl.get("task_names") or []
+        st.caption(
+            f"{rl['n_updates']} update(s) · {len(_tasks)} task(s): "
+            f"{', '.join(_tasks) or '—'} · ε final {rl['epsilon_final']:.3f} "
+            f"{'(resumed)' if rl.get('resumed') else '(fresh)'}")
 
     # v0.23 (SPEC.md 37): the canonical recipe + the objective-set gate rows.
     # Both via .get() — the restored view (SPEC.md 23.2) must re-render a
@@ -1810,6 +1870,52 @@ def _render_optin_views(path, label: str, target: float, policy: str,
                        f"task_returns.svg — run `autorefine policy-report "
                        f"--runs-dir {pd_}` first.")
 
+    # --- 68.3.4 (v0.54, A58): live multi-task RL transfer --------------------
+    st.subheader("Multi-task RL transfer (live)")
+    st.caption(
+        "One shared policy trained round-robin over several built-in tasks — "
+        "the multi-task RL path, run live here (the precomputed panel above "
+        "still reads a policy-report output dir).")
+    multi_tasks = st.multiselect(
+        "Tasks", list(BUILTIN_TASKS),
+        default=["parity-v1", "sine-v1"], key="rlmulti_tasks")
+    multi_eps = st.number_input(
+        "Episodes per task", min_value=1, max_value=10, value=1, step=1,
+        key="rlmulti_eps")
+    if st.button("Run the multi-task RL", key="rlmulti_button"):
+        if not multi_tasks:
+            st.error("Choose at least one task to run multi-task RL.")
+        else:
+            with st.spinner("Training the shared policy…"):
+                try:
+                    m = RLMultiRunner(
+                        tasks=multi_tasks, episodes_per_task=int(multi_eps),
+                        seed=int(seed), experiments=int(experiments),
+                        max_train_seconds=float(max_train),
+                        runs_dir=runs_dir.strip() or "runs",
+                        search_quality=quality)
+                    m.start()
+                    while not m.done:
+                        m.next()
+                    mres = m.finish()
+                except ValueError as exc:
+                    st.error(str(exc))
+                else:
+                    st.markdown(
+                        svg_task_returns(mres["rl"]["returns"]),
+                        unsafe_allow_html=True)
+                    st.download_button(
+                        "Download the shared policy (.npz)",
+                        data=mres["rl"]["policy_bytes"],
+                        file_name="autorefine_shared_policy.npz",
+                        mime="application/octet-stream",
+                        key="dl_multi_policy")
+                    _d = describe_policy(m.policy)
+                    st.caption(
+                        f"shared policy: {_d['n_updates']} update(s) · "
+                        f"bias {'on' if _d['has_bias'] else 'off'} · "
+                        f"tasks: {', '.join(mres['rl']['task_names'])}")
+
 
 # SPEC.md 52.4 (v0.38): the keyboard shortcuts (S = Stop, R = Run) — a
 # zero-height same-origin (srcdoc) iframe; its JS listens for keydown on
@@ -1895,8 +2001,9 @@ def main() -> None:
     st.caption(
         f"AutoRefine v{__version__} — upload a CSV (or point at a "
         f"directory of labelled images/audio), watch every experiment, get a "
-        f"gated model + plots. `rl` policy stays CLI-only "
-        f"(`autorefine fit --policy rl`)."
+        f"gated model + plots. The `rl` policy now runs here too (advanced "
+        f"→ policy = `rl`); `autorefine run --policy rl` remains the CLI "
+        f"equivalent."
     )
 
     side = st.sidebar
@@ -1968,9 +2075,10 @@ def main() -> None:
              "beginner set above is all you need for a first run "
              ".")
     if show_advanced:
-        policy = side.selectbox("Policy (improver)", ("bandit", "search"),
-                                index=0, key="policy",
-                                help=KNOB_GLOSSARY["policy"])
+        policy = side.selectbox("Policy (improver)",
+                               ("bandit", "search", "rl"),
+                               index=0, key="policy",
+                               help=KNOB_GLOSSARY["policy"])
         seed = side.number_input("Seed", min_value=0, max_value=1_000_000, value=7,
                                  key="seed", help=KNOB_GLOSSARY["seed"])
         experiments = side.number_input("Experiments (budget)", min_value=1,
@@ -1985,9 +2093,48 @@ def main() -> None:
                                  key="quality", help=KNOB_GLOSSARY["quality"])
         runs_dir = side.text_input("Runs dir", value=_launcher_runs_dir(),
                                    key="runs_dir", help=KNOB_GLOSSARY["runs_dir"])
+        if policy == "rl":  # 68.3.1 (v0.54, A58): the RL knobs (opt-in)
+            side.divider()
+            side.markdown("**RL options**")
+            side.number_input(
+                "Episodes (full-budget runs)", min_value=1, max_value=20,
+                value=5, step=1, key="rl_episodes",
+                help="How many full-budget episodes the RL policy trains over.")
+            side.slider(
+                "Epsilon (exploration)", min_value=0.0, max_value=1.0,
+                value=0.0, step=0.05, key="rl_epsilon",
+                help="Opt-in ε-greedy exploration (zero = the pure learned path).")
+            side.slider(
+                "Epsilon decay (per episode)", min_value=0.1, max_value=1.0,
+                value=1.0, step=0.05, key="rl_epsilon_decay",
+                help="Geometric ε decay applied once per episode (a factor of 1 = off).")
+            side.checkbox(
+                "Keep the best episode's policy", value=True, key="rl_keep_best",
+                help="Download the highest-return checkpoint instead of the last.")
+            pol_upload = side.file_uploader(
+                "Resume from a saved policy (.npz)", type=["npz"],
+                key="rl_policy_upload",
+                help="A policy trained earlier (this app or the CLI); the run "
+                     "resumes from it.")
+            if pol_upload is not None:
+                try:  # 68.2.2 (v0.54): the policy preview card (one home)
+                    _pol = policy_from_bytes(pol_upload.getvalue())
+                    _d = describe_policy(_pol)
+                    side.caption(
+                        f"loaded policy: {_d['n_updates']} update(s) · "
+                        f"ε {_d['epsilon']:.3f} (decay {_d['epsilon_decay']:.3f}) · "
+                        f"bias {'on' if _d['has_bias'] else 'off'}")
+                except ValueError as exc:
+                    side.warning(f"could not read that policy: {exc}")
     else:
         for _k, _d in _ADV_DEFAULTS.items():
             if _k not in st.session_state:  # never clobber a preset/manual edit
+                st.session_state[_k] = _d
+        # 68.3.1 (v0.54): the RL knobs' defaults (materialized when the
+        # advanced toggle is off; the widgets are not rendered here)
+        for _k, _d in {"rl_episodes": 5, "rl_epsilon": 0.0,
+                       "rl_epsilon_decay": 1.0, "rl_keep_best": True}.items():
+            if _k not in st.session_state:
                 st.session_state[_k] = _d
         policy = st.session_state["policy"]
         seed = st.session_state["seed"]
@@ -2155,11 +2302,24 @@ def main() -> None:
                     except ValueError as exc:
                         st.error(f"invalid steering rule: {exc} ")
                         st.stop()
+                # 68.3.1 (v0.54, A58): the RL knobs come from session_state —
+                # set by the sidebar widgets when advanced is on, or by the
+                # materialized defaults when it is off. The uploaded policy
+                # (the sidebar's file_uploader) is its raw bytes.
+                _rl_up = st.session_state.get("rl_policy_upload")
                 _run(path, label.strip() or None, float(target), policy,
                      int(seed), int(experiments), float(max_train),
                      runs_dir.strip() or "runs", quality,
                      narrate=narrate, initial_stop=stop_pressed,
-                     stream_mode=live_mode, steering=_stg)
+                     stream_mode=live_mode, steering=_stg,
+                     episodes=int(st.session_state.get("rl_episodes", 5)),
+                     epsilon=float(st.session_state.get("rl_epsilon", 0.0)),
+                     epsilon_decay=float(
+                         st.session_state.get("rl_epsilon_decay", 1.0)),
+                     keep_best=bool(st.session_state.get("rl_keep_best", True)),
+                     initial_policy_bytes=(
+                         _rl_up.getvalue() if (_rl_up is not None
+                                               and policy == "rl") else None))
         elif result is not None:
             # widget-triggered re-run (download click, sidebar change) — the
             # last completed result stays on screen (SPEC.md 23.2 persistence)

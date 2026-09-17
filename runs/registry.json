@@ -1873,5 +1873,35 @@
     "config_fp": "c6c734b306ff",
     "parent_run": null,
     "timestamp": "2026-09-17T14:16:19Z"
+  },
+  {
+    "run_id": "csv-seed7-20260917-130222",
+    "task": "csv",
+    "seed": 7,
+    "policy": "bandit",
+    "final_score": 50.0,
+    "target": 95.0,
+    "met_target": false,
+    "finished_reason": "budget_exhausted",
+    "experiments_run": 2,
+    "wall_seconds": 0.137,
+    "config_fp": "cf156acb9091",
+    "parent_run": null,
+    "timestamp": "2026-09-17T17:02:22Z"
+  },
+  {
+    "run_id": "csv-seed8-20260917-130222",
+    "task": "csv",
+    "seed": 8,
+    "policy": "bandit",
+    "final_score": 33.33333333333333,
+    "target": 95.0,
+    "met_target": false,
+    "finished_reason": "budget_exhausted",
+    "experiments_run": 2,
+    "wall_seconds": 0.078,
+    "config_fp": "75393ea905a3",
+    "parent_run": null,
+    "timestamp": "2026-09-17T17:02:22Z"
   }
 ]

@@ -36,6 +36,7 @@ SRC = REPO / "src" / "autorefine"
 APP_MODULES = (
     "dashboard_app", "dashboard", "onboarding", "narrate", "quickstart",
     "steering", "advanced", "sharing", "live", "research", "plotting",
+    "rl_dashboard",
 )
 
 # A25 (SPEC.md 35.2): the developer-internal references banned from
