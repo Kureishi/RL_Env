@@ -1,0 +1,29 @@
+{
+  "autorefine_version": "0.54.0",
+  "biases": [],
+  "block_size": 512,
+  "ci_blocks": 8,
+  "constraints": [],
+  "curriculum": false,
+  "dataset_size": 480,
+  "efficiency_weight": 0.5,
+  "ensemble_top_k": 0,
+  "gen_gap_penalty": 0.5,
+  "kfold": 0,
+  "max_experiments": 30,
+  "max_train_seconds": 30.0,
+  "max_wall_seconds": 900.0,
+  "pins": [],
+  "policy": "bandit",
+  "rl_episodes": null,
+  "schema": "autorefine.run_config/1",
+  "screen_frac": 1.0,
+  "seed": 7,
+  "stall_patience": null,
+  "target": 95.0,
+  "task": "csv",
+  "task_config": {
+    "path": "C:\\Users\\kurei\\AppData\\Local\\Temp\\autorefine_dashboard\\churn_sample.csv"
+  },
+  "z_accept": 1.0
+}

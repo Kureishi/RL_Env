@@ -63,6 +63,7 @@ from .plotting import (
     svg_knob_signal,  # the decisive-knob ranking (signal vs noise)
     svg_efficiency_knee,  # the efficiency knee (bang for buck)
     svg_rejection_anatomy,  # the rejection mix + stall story
+    svg_is_well_formed,  # 69.3 (v0.55) the SVG render guard
 )
 from .dossier import build_dossier  # 58.3 (v0.44) the run dossier
 from .provenance import (
@@ -155,6 +156,15 @@ from .quickstart import (  # 65 (v0.51): the Quickstart (one source, three surfa
     render_quickstart_md,
     run_demo,
 )
+from .workflow import (  # 69.4 (v0.55): the procedural workflow (state + strip + next steps)
+    STEP_CURRENT,
+    STEP_DONE,
+    STEP_TODO,
+    WORKFLOW_STEPS,
+    next_steps,
+    svg_workflow_strip,
+    workflow_state,
+)
 from .plugins import PluginError, discover, register_policies, register_tasks
 from .tasks import (
     TASKS,
@@ -179,8 +189,8 @@ from .rl_dashboard import (  # 68 (v0.54, A58): the RL loop in the dashboard
 
 # SPEC.md 33.1 (C1): single version source — must equal pyproject.toml's
 # [project].version (enforced by the A23 test); one step per feature round
-# (v0.54 ⇒ 0.54.0, M57, SPEC.md 68)
-__version__ = "0.54.0"
+# (v0.55 ⇒ 0.55.0, M58, SPEC.md 69)
+__version__ = "0.55.0"
 
 __all__ = [
     "AutoRefineEnv",
@@ -305,5 +315,9 @@ __all__ = [
     "QUICKSTART_INTRO", "QUICKSTART_STEPS", "quickstart_steps",
     "quickstart_commands", "render_quickstart", "render_quickstart_md",
     "demo_recipe", "run_demo",
+    # v0.55: the procedural workflow core (SPEC.md 69, A59)
+    "WORKFLOW_STEPS", "STEP_DONE", "STEP_CURRENT", "STEP_TODO",
+    "workflow_state", "svg_workflow_strip", "next_steps",
+    "svg_is_well_formed",
     "__version__",
 ]

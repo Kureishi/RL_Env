@@ -261,10 +261,13 @@ def test_svg_frontier_overlay_deterministic():
 
 def test_app_renders_advanced_section():
     """A39 (SPEC.md 49.4): the result view contains the
-    'Advanced analysis' section — after the learning views (28), before
-    the artifacts (23.2) — with the three panels' core calls wired in
-    (49.1.4/49.2.3/49.3.4) and every action behind a unique-keyed
-    st.button (inert until pressed, 49.4.2)."""
+    'Advanced analysis' section — after the learning views (28) — with
+    the three panels' core calls wired in (49.1.4/49.2.3/49.3.4) and
+    every action behind a unique-keyed st.button (inert until pressed,
+    49.4.2). Since v0.55 the result view is tabbed (SPEC.md 69.1): the
+    Advanced analysis section is the *last* result tab, after Learning
+    views (the pre-v0.55 'before the artifacts' bound is superseded —
+    Artifacts moved into the first result tab, Export & artifacts)."""
     src = APP_SRC.read_text(encoding="utf-8")
     for token in (
         'st.subheader("Advanced analysis")',
@@ -277,16 +280,18 @@ def test_app_renders_advanced_section():
         "res2 = _ab_rerun(res)",
     ):
         assert token in src, token
-    # placement (49.4.1): in the result view the advanced section renders
-    # after the Learning views and before the Artifacts. The section's
-    # subheader lives in the `_render_advanced` helper (defined after the
-    # result view), so the runtime order is fixed by its call site in
-    # `_render_result` — assert on that, not on the source-text order.
+    # placement (49.4.1, tabbed since 69.1): in the result view the
+    # advanced section renders after the Learning views — and, in the
+    # v0.55 tab order, inside the last result tab (Advanced analysis).
+    # The section's subheader lives in the `_render_advanced` helper
+    # (defined after the result view), so the runtime order is fixed by
+    # its call site in `_render_result` — assert on that, not on the
+    # source-text order.
     result_view = src[src.index("def _render_result("):
                     src.index("def _render_advanced(")]
     pos_adv = result_view.index("_render_advanced(res)")
     assert pos_adv > result_view.index('st.subheader("Learning views")')
-    assert pos_adv < result_view.index('st.subheader("Artifacts")')
+    assert pos_adv > result_view.index('"Advanced analysis"')  # 69.1 tab
     # inert-until-pressed (49.4.2): each action sits behind its button
     for button, action in (
         ('key="wi_button"', "block = what_if_block("),
@@ -303,4 +308,4 @@ def test_version_round_v035():
     """A39 (SPEC.md 49.5, 33.1): the version stepped to `0.39.0` in
     both sources (v0.39 ⇒ `0.39.0`, M42, SPEC.md 53)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.54.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.55.0"

@@ -154,6 +154,27 @@ def resolve_tokens(palette: str = "default", dark: bool = False) -> dict:
     return out
 
 
+def svg_is_well_formed(svg) -> bool:
+    """SPEC.md 69.3 (v0.55, A59): the SVG render guard — `True` iff `svg`
+    is a string carrying a complete `<svg>…</svg>` document.
+
+    The dashboard renders ~40 hand-rolled SVGs with `unsafe_allow_html`;
+    a renderer that returns a truncated/empty fragment (or a non-string)
+    would paint a broken partial with no diagnostic. The app's
+    `_svg_block` (69.3) consults this before rendering and degrades to a
+    friendly caption instead. Pure and deterministic (G2); no new
+    dependency; the default rendering path is untouched (69.5)."""
+    if not isinstance(svg, str):
+        return False
+    s = svg.strip()
+    if not s.startswith("<svg") or not s.endswith("</svg>"):
+        return False
+    # a complete document opens and closes exactly one root `<svg>` element
+    if s.count("<svg") != 1 or s.count("</svg>") != 1:
+        return False
+    return True
+
+
 @contextmanager
 def _styled(palette: str = "default", dark: bool = False):
     """SPEC.md 51.4.1/51.4.2 (v0.37): scoped palette + dark-mode overrides.

@@ -455,7 +455,7 @@ def test_version_round_v043():
     """A47 (SPEC.md 57.6, 33.1): the version stepped to ``0.43.0`` in both
     sources (v0.43 ⇒ ``0.43.0``, M46, SPEC.md 57)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.54.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.55.0"
 
 
 def test_all_exports_research_round():

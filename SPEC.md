@@ -75,6 +75,7 @@ numbers and carry none.)
 | M55 | v0.52   | 66     | A56 | tests/test_reporting_v052.py |
 | M56 | v0.53   | 67     | A57 | tests/test_rl_selfimprove_v053.py |
 | M57 | v0.54   | 68     | A58 | tests/test_rl_dashboard_v054.py |
+| M58 | v0.55   | 69     | A59 | tests/test_workflow_v055.py |
 
 ---
 
@@ -6686,3 +6687,72 @@ A1–A57 stay green because every v0.54 addition is additive or opt-in: `RLRunne
 ### 68.6 Milestone (M57)
 
 **M57** — v0.54 "The RL loop in the dashboard": the self-improving RL path (SPEC.md 15/20.2/67) gets a UI home — `RLRunner` and `RLMultiRunner` implement the policy-agnostic worker contract (start/next/finish, 51.2.3) so the live table, curve, and decision views render an RL run step by step (68.1, R1); the policy bytes have one home (`policy_to_bytes` / `policy_from_bytes` under the same `FORMAT_TAG`) and flow in (npz upload + `describe_policy` preview, resume) and out (the trained/best policy downloads, keep-best = best checkpoint) (68.2, R2); the sidebar gains the `rl` policy + knobs (48.1.2 pattern), the result block renders the episode curve + best card + live policy views, and the Compare tab runs multi-task transfer live (68.3, R3). The bandit/search app path and every pin stay byte-identical (68.4) (A58).
+
+## 69. Workflow efficiency and result-view tabs (v0.55)
+
+By v0.54 the dashboard had grown a long single-scroll Results page (verdict, metrics, recipe, gate, run config, artifacts, provenance, plots, decision views, research views, conclusions, parameter inspector, what-if, learning curves, advanced analysis, RL block), the live drain was a flat stack of placeholders, several hand-rolled SVGs could render as broken images when a renderer emitted a truncated string, and the app told the user *what* happened but not *where in the workflow they are* or *what to do next*. This round makes the procedural workflow legible and the result views navigable, in the app plus one new streamlit-free core module:
+
+- **69.1** groups the Results page into nested tabs so no single scroll exceeds a screen;
+- **69.2** splits the live drain into subtabs (live loop / decision views / notes) so the running page stops growing vertically;
+- **69.3** adds a pure SVG well-formedness guard so a malformed renderer degrades to a caption instead of a broken image;
+- **69.4** adds the streamlit-free `workflow` core — the step strip, the workflow state machine, and the post-run "next steps" advice.
+
+The through-line: *the app already knows the state of the procedure — make that state visible, and make each result view reachable by name instead of by scroll offset.* All additive; the bandit/search default path, the worker protocol (51.2.3), and every source-wire pin stay intact (69.5, the A59 pin anchor).
+
+### 69.1 Result subtabs (R1)
+
+`_render_result` keeps everything above the tabs exactly as it was — the verdict banner, the stopped-warning, the `narrate_run` markdown, the four-metric row, the RL block (68.3.3), and a new **Next steps** block (69.4.4) — and groups the remainder into six nested `st.tabs`:
+
+1. **"Export & artifacts"** — the recipe copy-paste block, the gate summary, the `run_config` JSON, the share-bundle and provenance expanders (33.x/48.x), the spec-space caption, and the Artifacts section (dossier download + run-dir caption) moved here so all deliverables share one tab;
+2. **"Plots & decisions"** — the Plots section (run curves, verdict, verdict strip, time strip, candidate strip, scatter, frontier, champion) and the Decision views subheaders (bars, matrix, timeline, UCB, gate number-line);
+3. **"Research & conclusions"** — the Research views subheaders (spec-lineage, response surfaces, gate region, belief bars, error pack, 3-objective frontier) and the Conclusions block;
+4. **"Parameters & what-if"** — the Parameter inspector panel (steering, C-round) and the What-if & comparison panel (fingerprint, interaction heatmap, weighted reslice);
+5. **"Learning views"** — the per-experiment training-curve drill-down (C-round) and loss-history views;
+6. **"Advanced analysis"** — the `_render_advanced` content (seed-variance box/curves, error gallery links, past-run comparison).
+
+Nesting `st.tabs` inside the top-level tabs is legal Streamlit; the AppTest tree flattens them, so the top-level five-tab test (A41) is unaffected when no result exists (the inner tabs are only built inside `_render_result`). Every pinned source-wire token (the 65-token extraction from the 12 source-wire test files) survives the re-indentation — tokens are substring pins and the refactor preserves them verbatim.
+
+### 69.2 Live drain subtabs (R2)
+
+The drain's `info` branch previously created a flat placeholder stack (table, curve, bar, note, episode note, narrative, sparkline, then the eight decision-view placeholders). It now creates three subtabs — **"Live"**, **"Decision views"**, **"Notes & drill-down"**:
+
+- **Live** — the update table, the live score curve, the win-rate bar, the "RUNNING" note, the episode note, the narrate sparkline, and the time-strip sparkline (the main pulse of the run);
+- **Decision views** — the eight decision-surface placeholders (bars, matrix, timeline, UCB, strip, scatter, frontier, champion, time) that refresh per step (B/C-round views) — same placeholders, same update code, now grouped;
+- **Notes & drill-down** — the run meta block, the drill-down table, and the lazily-created `focus_field` selectbox (now inside `with lt_notes:` so it renders under the notes subtab, the `key="focus_field"` pin preserved).
+
+The drain stays preemption-safe: on re-run the subtabs are re-created and the old placeholders leak above, exactly the pre-existing flat-placeholder behavior. `stream_mode` (C-round, opt-in) is untouched — the toggle still gates the timer-driven rerun, not the structure.
+
+### 69.3 SVG well-formedness guard (R3)
+
+**Core** (69.3.1) — `plotting.py` gains `svg_is_well_formed(svg: str) -> bool`: a pure stdlib check (balanced tags via a small stack over the SVG's own tag soup, a present `<svg` root, no obvious truncation) that returns `False` for truncated or malformed markup and `True` for every well-formed string the 13 production renderers emit. Pure, deterministic (G2), no new dependency.
+
+**App** (69.3.2) — two helpers: `_svg_html(title, html)` (returns the `components.html` string for placeholder sites; on a failed 69.3.1 check returns a caption-grade message) and `_svg_block(title, html)` (the `st.markdown`/`st.caption` form for non-placeholder sites; on failure degrades to a "plot unavailable" caption instead of rendering broken markup). Applied at ~30 SVG render sites across the drain, the result tabs, the experiments table, the compare views, the gallery, and the RL block — a renderer emitting a truncated string now produces a caption, never a broken `<img>`/embedded SVG.
+
+### 69.4 The workflow core (R4)
+
+**Streamlit-free module** `src/autorefine/workflow.py` (the 23.1 pattern — core logic, app renders):
+
+- **`WORKFLOW_STEPS` + `STEP_DONE` / `STEP_CURRENT` / `STEP_TODO`** (69.4.1) — the canonical four-step procedure *Data → Preview → Run → Results* (the same four steps the Quickstart already teaches, 65.1), with the three per-step statuses (`done` / `current` / `todo`) as exported constants.
+- **`workflow_state(has_data, running, has_result)`** (69.4.2) — the pure state machine over the three app facts (a data path is set, a run is in flight, a finished result exists): one `{"step", "status"}` row per step, in order. Data is `done` once set, else the `current` step; Preview is `done` once data is set (the Setup tab renders it); Run is `current` while in flight, `done` once a result exists, else `todo`; Results is `current` once a result exists and no run is in flight (the terminal step is where the workflow is). Non-bool inputs are a `ValueError` — the app can't mis-report a state.
+- **`svg_workflow_strip(state)`** (69.4.3) — a compact horizontal stepper (one node per step, connectors colored toward completed steps; `done` = accepted-green, `current` = baseline-amber, `todo` = grey, per `resolve_tokens` (56.3); ARIA per the 51.4.3 convention — `role="img"` + `aria-label` naming the current step, plus a `<title>`; deterministic, no Okabe-Ito hexes in the default call). The app renders it in `main()` *before* the idle `st.stop()` branch — so **every screen** (idle, running, finished) shows where the user is in the procedure. A non-list or a bad state row is a `ValueError`.
+- **`next_steps(verdict, finished_reason)`** (69.4.4) — the post-run advice: two always-on lines (Export & artifacts; Compare/seed-sweep) first, then the verdict-specific lines — `PASS`: confirm the margin across seeds, re-gate/A-B in Advanced analysis; `MISS`: raise the budget or steer the search and run again, re-gate the logged history — and, when `finished_reason == "stopped"` (51.2.2), the partial-run line last. Every line names a tab or panel the app already has, so the guidance is actionable. An unknown verdict is a `ValueError` (the 49.4.3 honesty rule: never guess a verdict). Rendered in the app as the **"Next steps" block** under the metrics/RL block in `_render_result`, and the Run tab's finished branch gains the "Run finished — see the Results tab" info line (the procedural hand-off the user previously had to find by scrolling).
+
+### 69.5 The default path is untouched (the A59 pin anchor)
+
+A1–A58 stay green because every v0.55 addition is additive or app-structural: `workflow.py` is a new module (the `__init__` export additions are the 33.1 pattern); `svg_is_well_formed` is a new pure function no existing caller invokes, and the app guard degrades only *malformed* SVG (all 13 production renderers pass it — verified by the 69.3 acceptance); the 69.1/69.2 tab regrouping changes DOM structure but not widget semantics, and all ~65 pinned source-wire tokens in the 12 source-wire test files remain present verbatim post-refactor; the five top-level tabs, the worker protocol (51.2.3), the bandit/search default run, and A6/A41/A57/A58's pins pass unmodified (A1–A59 green).
+
+### 69.6 Acceptance (A59)
+
+- **69.4.2 state machine** — all 8 `(has_data, running, has_result)` input combinations of `workflow_state` return the expected per-step rows (idle: Data current; running: Data/Preview done, Run current; finished: Run/Results resolved with Results current); non-bool inputs raise `ValueError`; equal inputs give byte-equal rows.
+- **69.4.3 strip** — `svg_workflow_strip` on a valid state is well-formed (its own `svg_is_well_formed` passes), deterministic (two calls byte-identical), ARIA-labelled (`role="img"` + `aria-label` naming the current step), and renders all four step labels; a non-list or a bad row raises `ValueError`.
+- **69.4.4 next steps** — `next_steps("PASS")` leads with the two always-on lines (export, compare) and names the seed-confirmation lever; `next_steps("MISS")` names the budget/steering levers; `finished_reason="stopped"` appends the partial-run line; an unknown verdict raises `ValueError`.
+- **69.3.1 guard** — `svg_is_well_formed` accepts the well-formed strings of the production renderers and rejects truncated markup (`"<svg></svg"`); the version steps to `0.55.0` in both sources (33.1).
+- **69.1 result subtabs** — AppTest (streamlit optional-skipped): after a tiny bandit run on the quadrant CSV fixture, the top five tab labels `Setup/Run/Results/Compare/Experiments` appear, and a raw-tree walk finds the six inner tab labels (Export & artifacts, Plots & decisions, Research & conclusions, Parameters & what-if, Learning views, Advanced analysis) after them; the pinned subheaders (Plots, Decision views, Research views, Conclusions, Parameter inspector, What-if & comparison, Advanced analysis) remain present; the Next steps block and the "Run finished" info line render (69.1/69.4).
+- **69.3.2 degrade** — with `autorefine.dashboard_app.svg_spec_lineage` monkeypatched (bound-name, pre-`run()`) to return truncated markup, the app completes without exception and a "plot unavailable" caption appears instead of a broken image (69.3.2; the app never crashes or paints a broken fragment).
+- **69.4 app wiring** — the idle screen (no data) renders the workflow strip before `st.stop()` (69.4.3); a source scan asserts the app wires `workflow_state(` / `svg_workflow_strip(` / `next_steps(` and imports the workflow module, and `plotting.py` defines `svg_is_well_formed(` (69.2–69.4).
+- **69.5 pin** — the source-wire suites (A41–A46, A47–A52's app tests, A58) pass unmodified; `tests/test_app_language.py` scans the new `workflow` module and passes (35.2).
+- **exports** — `workflow_state` / `svg_workflow_strip` / `next_steps` / `WORKFLOW_STEPS` / `STEP_DONE` / `STEP_CURRENT` / `STEP_TODO` / `svg_is_well_formed` are in `autorefine.__all__` (33.1) and resolvable; the A25 index advances (55 acceptance rows; `defined == set(range(1, 60))`).
+
+### 69.7 Milestone (M58)
+
+**M58** — v0.55 "Workflow efficiency + result-view tabs": the Results page is grouped into six named subtabs with all deliverables in one (69.1, R1); the live drain splits into Live / Decision views / Notes subtabs (69.2, R2); a pure SVG well-formedness guard turns broken images into graceful captions at ~30 render sites (69.3, R3); and the streamlit-free `workflow` core — state machine, step strip, next-steps advice — makes the procedure legible on every screen (69.4, R4). The bandit/search default path, the worker protocol, and every source-wire pin stay intact (69.5) (A59).

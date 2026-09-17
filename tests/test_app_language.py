@@ -37,6 +37,8 @@ APP_MODULES = (
     "dashboard_app", "dashboard", "onboarding", "narrate", "quickstart",
     "steering", "advanced", "sharing", "live", "research", "plotting",
     "rl_dashboard",
+    # 69.4 (v0.55, A59): the procedural workflow core — user-facing strings
+    "workflow",
 )
 
 # A25 (SPEC.md 35.2): the developer-internal references banned from

@@ -74,6 +74,13 @@ from autorefine.quickstart import (
     render_quickstart_md,  # 65.2: the byte-stable first-screen markdown
     run_demo,              # 65.4: the no-data narrated demo action
 )
+# 69.4 (v0.55, A59): the procedural workflow — state machine + strip SVG +
+# the verdict's "next steps"; the app is a thin renderer (23.1).
+from autorefine.workflow import (
+    next_steps,
+    svg_workflow_strip,
+    workflow_state,
+)
 from autorefine.simulate import what_if_block
 # SPEC.md 55 (v0.41): "make it feel live" — the three live-view helpers.
 # The app is a thin renderer over these pure core functions (55.x).
@@ -121,6 +128,7 @@ from autorefine.plotting import (
     svg_knob_signal,  # the decisive-knob ranking (signal vs noise)
     svg_efficiency_knee,  # the efficiency knee (bang for buck)
     svg_rejection_anatomy,  # the rejection mix + stall story
+    svg_is_well_formed,  # 69.3 (v0.55, A59): the SVG render guard
 )
 # SPEC.md 56.1 (v0.42): the provenance certificate — the app's Provenance
 # expander (56.4) is a thin renderer over these pure core functions.
@@ -411,6 +419,30 @@ def _pal_svg(pal: dict, stored: str, recompute) -> str:
         return recompute()
     except Exception:
         return stored  # an older run dir may lack the re-render source
+
+
+def _svg_html(title: str, html) -> str:
+    """69.3 (v0.55, A59): the SVG render guard, placeholder form — a
+    well-formed SVG passes through unchanged; a truncated/empty fragment
+    (or a non-string) degrades to a friendly inline note, so the live
+    placeholders never paint a broken partial. Pure over the renderer's
+    output; the healthy path returns the identical SVG (69.5)."""
+    if svg_is_well_formed(html):
+        return html
+    return (f"<p style='color:#777'>{title}: plot unavailable — the "
+            "renderer returned no complete SVG</p>")
+
+
+def _svg_block(title: str, html) -> None:
+    """69.3 (v0.55, A59): the SVG render guard, page form — renders a
+    well-formed SVG, or a friendly caption on malformed output (the app
+    never crashes or paints a broken fragment). The healthy path renders
+    the identical SVG (69.5)."""
+    if svg_is_well_formed(html):
+        st.markdown(html, unsafe_allow_html=True)
+    else:
+        st.caption(f"{title}: plot unavailable — the renderer returned "
+                   "no complete SVG")
 
 
 
@@ -725,38 +757,49 @@ def _drain_live(record: dict, narrate: bool = False,
             best_series = [round(info["baseline_score"], 2)]
             best_before = info["baseline_score"]
             rows_meta = [None]  # 52.2.2: per-row mutations (baseline: none)
-            table = st.empty()
-            chart = st.empty()
-            bar = st.progress(0.0, text="starting…")
-            note = st.empty()
-            epnote = st.empty()  # 68.3.2 (v0.54, A58): the RL episode line
-            narr = st.empty() if narrate else None  # SPEC.md 48.5.1 placeholder
-            # decision-view placeholders, live (SPEC.md 26.5): D1 win-rate bars,
-            # V2 field x value matrix, D3 mutation timeline, D4 UCB trace
-            vbars = st.empty()
-            vmatrix = st.empty()  # V2 (SPEC.md 30.2)
-            vtimeline = st.empty()
-            vucb = st.empty() if runner.policy_name == "bandit" else None
-            vstrip = st.empty()  # G1 (SPEC.md 27.1)
-            vscatter = st.empty()  # G2 (SPEC.md 27.2)
-            vfrontier = st.empty()  # 53.2 (v0.39) the live Pareto frontier
-            vchamp = st.empty()    # 53.3 (v0.39) the live champion spec card
-            vtime = st.empty()  # B2 (SPEC.md 54.2) the wall-time cost strip
-            # live-interaction placeholders (SPEC.md 52, v0.38): the
-            # ETA/plateau caption (52.3) + the latest-candidate drill-down
-            # (52.1); the focus selectbox (52.2) is created exactly once,
-            # at the first update that introduces any mutation field
-            meta = st.empty()
-            drill = st.empty()
+            # 69.2 (v0.55, A59): the live view grouped into three sub-tabs —
+            # Live (table/curve/progress/notes), Decision views (the v* set),
+            # Notes & drill-down (focus filter / ETA / drill-down). The
+            # placeholders bind to their sub-tab at creation, so every
+            # update-branch render site below is unchanged.
+            lt_main, lt_views, lt_notes = st.tabs(
+                ["Live", "Decision views", "Notes & drill-down"])
+            with lt_main:
+                table = st.empty()
+                chart = st.empty()
+                bar = st.progress(0.0, text="starting…")
+                note = st.empty()
+                epnote = st.empty()  # 68.3.2 (v0.54, A58): the RL episode line
+                narr = st.empty() if narrate else None  # SPEC.md 48.5.1 placeholder
+                if stream_mode:  # 55.1 (v0.41): the live freshness + sparkline
+                    vfresh = st.empty()
+                    vspark = st.empty()
+                    vfresh.caption(freshness_caption(0, 0.0, done=False))
+                    vspark.markdown(
+                        _svg_html("Live sparkline",
+                                  svg_live_sparkline(best_series, info.get("target"),
+                                                     live=True,
+                                                     reduced_motion=reduced_motion)),
+                        unsafe_allow_html=True)
+            with lt_views:
+                # decision-view placeholders, live (SPEC.md 26.5): D1 win-rate
+                # bars, V2 field x value matrix, D3 mutation timeline, D4 UCB
+                vbars = st.empty()
+                vmatrix = st.empty()  # V2 (SPEC.md 30.2)
+                vtimeline = st.empty()
+                vucb = st.empty() if runner.policy_name == "bandit" else None
+                vstrip = st.empty()  # G1 (SPEC.md 27.1)
+                vscatter = st.empty()  # G2 (SPEC.md 27.2)
+                vfrontier = st.empty()  # 53.2 (v0.39) the live Pareto frontier
+                vchamp = st.empty()    # 53.3 (v0.39) the live champion spec card
+                vtime = st.empty()  # B2 (SPEC.md 54.2) the wall-time cost strip
+            with lt_notes:
+                # live-interaction placeholders (SPEC.md 52, v0.38): the
+                # ETA/plateau caption (52.3) + the latest-candidate drill-down
+                # (52.1)
+                meta = st.empty()
+                drill = st.empty()
             focus_ph = None
-            if stream_mode:  # 55.1 (v0.41): the live freshness + sparkline
-                vfresh = st.empty()
-                vspark = st.empty()
-                vfresh.caption(freshness_caption(0, 0.0, done=False))
-                vspark.markdown(
-                    svg_live_sparkline(best_series, info.get("target"),
-                                       live=True, reduced_motion=reduced_motion),
-                    unsafe_allow_html=True)
             continue
 
         if kind == "update":
@@ -811,41 +854,52 @@ def _drain_live(record: dict, narrate: bool = False,
             # (a second key="focus_field" mid-drain would raise; the
             # position is deterministic for a given message set)
             if focus_ph is None and fields_seen(stream):
-                focus_ph = st.selectbox(
-                    "Focus field (filter the table + timeline)",
-                    ("All", *fields_seen(stream)), key="focus_field",
-                    help="Keep only the candidates that mutated this "
-                         "field — the live table and the mutation "
-                         "timeline both filter.")
+                with lt_notes:  # 69.2 (v0.55): the Notes & drill-down sub-tab
+                    focus_ph = st.selectbox(
+                        "Focus field (filter the table + timeline)",
+                        ("All", *fields_seen(stream)), key="focus_field",
+                        help="Keep only the candidates that mutated this "
+                             "field — the live table and the mutation "
+                             "timeline both filter.")
             if u.get("field_stats"):  # D1: per-field win-rate bars (SPEC.md 26.1)
                 vbars.bar_chart(
                     pd.DataFrame.from_dict(u["field_stats"], orient="index")
                     .sort_index())
             if u.get("field_value_stats"):  # V2 (SPEC.md 30.2)
                 vmatrix.markdown(
-                    svg_field_value_matrix(u["field_value_stats"]),
+                    _svg_html("Field x value matrix",
+                              svg_field_value_matrix(u["field_value_stats"])),
                     unsafe_allow_html=True)
             vtimeline.markdown(  # D3 (SPEC.md 26.3) + the 52.2.2 focus filter
-                svg_mutation_timeline(
-                    stream, field=None if focus == "All" else focus),
+                _svg_html("Mutation timeline",
+                          svg_mutation_timeline(
+                              stream, field=None if focus == "All" else focus)),
                 unsafe_allow_html=True)
-            vstrip.markdown(svg_score_strip(stream), unsafe_allow_html=True)
-            vscatter.markdown(svg_score_gap_scatter(stream), unsafe_allow_html=True)
-            vfrontier.markdown(svg_live_frontier(stream), unsafe_allow_html=True)
+            vstrip.markdown(_svg_html("Candidate score strip",
+                                     svg_score_strip(stream)),
+                            unsafe_allow_html=True)
+            vscatter.markdown(_svg_html("Score vs gen-gap",
+                                        svg_score_gap_scatter(stream)),
+                              unsafe_allow_html=True)
+            vfrontier.markdown(_svg_html("Live Pareto frontier",
+                                         svg_live_frontier(stream)),
+                               unsafe_allow_html=True)
             vtime.markdown(  # B2 (SPEC.md 54.2): the wall-time cost strip
-                svg_time_strip(stream, info.get("baseline_train_seconds")),
+                _svg_html("Wall-time cost strip",
+                          svg_time_strip(stream, info.get("baseline_train_seconds"))),
                 unsafe_allow_html=True)
             if u["accepted"]:
                 # 53.3 (v0.39): the champion card re-renders on every
                 # acceptance, the just-mutated field (the mutation's
                 # first field) highlighted (53.3.2)
                 hl = (u.get("mutation") or [None])[0]
-                vchamp.markdown(svg_architecture(
-                    runner.env.best_spec.to_dict(),
-                    runner.env.task.state_dim,
-                    runner.env.task.n_outputs,
-                    highlight=hl if isinstance(hl, str) else None),
-                    unsafe_allow_html=True)
+                vchamp.markdown(_svg_html("Champion spec",
+                                          svg_architecture(
+                                              runner.env.best_spec.to_dict(),
+                                              runner.env.task.state_dim,
+                                              runner.env.task.n_outputs,
+                                              highlight=hl if isinstance(hl, str) else None)),
+                                unsafe_allow_html=True)
             if vucb is not None and u.get("ucb"):  # D4: bandit UCB (SPEC.md 26.4)
                 trace = ucb_trace(stream, alpha=runner.policy.alpha)
                 vucb.line_chart(
@@ -899,8 +953,10 @@ def _drain_live(record: dict, narrate: bool = False,
                 vfresh.caption(freshness_caption(len(stream), _el,
                                                  done=False))
                 vspark.markdown(
-                    svg_live_sparkline(best_series, info.get("target"),
-                                       live=True, reduced_motion=reduced_motion),
+                    _svg_html("Live sparkline",
+                              svg_live_sparkline(best_series, info.get("target"),
+                                                 live=True,
+                                                 reduced_motion=reduced_motion)),
                     unsafe_allow_html=True)
             best_before = u["best_score"]  # the running best for the next row
             continue
@@ -1043,7 +1099,7 @@ def _render_result(res: dict) -> None:
     rl = res.get("rl")
     if rl:
         st.subheader("Reinforcement learning")
-        st.markdown(svg_task_returns(rl["returns"]), unsafe_allow_html=True)
+        _svg_block("Task returns", svg_task_returns(rl["returns"]))
         best = rl.get("best")
         if best:
             st.caption(
@@ -1058,377 +1114,399 @@ def _render_result(res: dict) -> None:
             data=rl["policy_bytes"], file_name="autorefine_policy.npz",
             mime="application/octet-stream", key="dl_policy")
         if rl.get("trace"):
-            st.markdown(
-                svg_action_probabilities(rl["trace"], top_k=8, n_steps=12),
-                unsafe_allow_html=True)
-            st.markdown(svg_policy_trace(rl["trace"]), unsafe_allow_html=True)
+            _svg_block("Action probabilities",
+                       svg_action_probabilities(rl["trace"], top_k=8, n_steps=12))
+            _svg_block("Policy trace", svg_policy_trace(rl["trace"]))
         _tasks = rl.get("task_names") or []
         st.caption(
             f"{rl['n_updates']} update(s) · {len(_tasks)} task(s): "
             f"{', '.join(_tasks) or '—'} · ε final {rl['epsilon_final']:.3f} "
             f"{'(resumed)' if rl.get('resumed') else '(fresh)'}")
 
-    # v0.23 (SPEC.md 37): the canonical recipe + the objective-set gate rows.
-    # Both via .get() — the restored view (SPEC.md 23.2) must re-render a
-    # result either with or without them (older payloads lack both keys).
-    if res.get("recipe"):  # 37.1.4: copy-pasteable `fit` re-run
-        st.caption("Reproduce (copy-paste)")
-        st.code(" ".join(res["recipe"]))
-    if res.get("gate"):  # 37.2: the per-objective acceptance rows
-        gate = res["gate"]
+
+    # 69.4.3 (v0.55, A59): the "Next steps" — the verdict's "so what?" —
+    # two always-on lines plus the verdict-specific guidance (a stopped run
+    # carries its partial-run line). Pure over the stored result (G2); the
+    # default path adds only this block (69.5).
+    st.caption("Next steps")
+    for _ns in next_steps("PASS" if res["verdict"] == "PASS" else "MISS",
+                          res.get("finished_reason")):
+        st.caption(f"- {_ns}")
+
+    # 69.1 (v0.55, A59): the result view grouped into six sub-tabs — the
+    # same sections in the same order as the pre-v0.55 scroll, each behind
+    # its tab for easier scanning. Every widget keeps its exact `key=`, and
+    # the subheader labels are unchanged (the key-based app tests are
+    # unaffected; the default healthy path renders the same content).
+    (r_export, r_plots, r_research, r_params, r_learning, r_advanced) =         st.tabs(["Export & artifacts", "Plots & decisions",
+                 "Research & conclusions", "Parameters & what-if",
+                 "Learning views", "Advanced analysis"])
+    with r_export:
+        # v0.23 (SPEC.md 37): the canonical recipe + the objective-set gate rows.
+        # Both via .get() — the restored view (SPEC.md 23.2) must re-render a
+        # result either with or without them (older payloads lack both keys).
+        if res.get("recipe"):  # 37.1.4: copy-pasteable `fit` re-run
+            st.caption("Reproduce (copy-paste)")
+            st.code(" ".join(res["recipe"]))
+        if res.get("gate"):  # 37.2: the per-objective acceptance rows
+            gate = res["gate"]
+            st.caption(
+                f"gate: {len(gate['objectives'])} objective(s)")
+            st.dataframe([{
+                "objective": r["name"],
+                "op": r["op"],
+                "threshold": r["threshold"],
+                "actual": ("n/a" if r["actual"] is None else round(r["actual"], 6)),
+                "result": "PASS" if r["pass"] else "MISS",
+            } for r in gate["objectives"]], width="stretch")
+
+        # SPEC.md 50.2 (v0.36): one-click exports — the GUI-for-exploration ->
+        # CLI-for-CI bridge, next to the copy-paste recipe above. The app writes
+        # nothing into the runs tree (23.1/49.2.1): the share bundle is
+        # in-memory + a download button; `autorefine share` stays the
+        # file-producing surface (47.4).
+        rd = Path(res["run_dir"])
+        rc_path = rd / "run_config.json"
+        if rc_path.is_file():
+            st.download_button("Download run_config.json",
+                               data=rc_path.read_bytes(),  # 50.2.2
+                               file_name="run_config.json",
+                               mime="application/json", key="dl_runconfig")
+        else:
+            st.caption("no run_config.json in this run dir — nothing to "
+                       "download")
+        if st.button("Build share bundle", key="build_share"):  # 50.2.3
+            try:
+                from autorefine.cli import _share_report_html  # 47.4.2: cli
+                from autorefine.sharing import (  # owns the HTML regeneration
+                    share_payload, zip_bundle_bytes)
+                payload = share_payload(rd, _share_report_html(rd))
+                bundle = zip_bundle_bytes(payload)
+                st.session_state["share_bundle_" + str(rd)] = (
+                    bundle, [[n, len(payload[n])] for n in sorted(payload)])
+            except Exception as exc:  # local, friendly (50.2.3)
+                st.error(f"share bundle failed: {exc}")
+        stored = st.session_state.get("share_bundle_" + str(rd))
+        if stored:
+            bundle, listing = stored
+            st.dataframe({"entry": [r[0] for r in listing],
+                          "bytes": [r[1] for r in listing]}, width="stretch")
+            st.download_button("Download share bundle (.zip)", data=bundle,
+                               file_name=f"{rd.name}-share.zip",
+                               mime="application/zip", key="dl_share")
+
+        # SPEC.md 56.1/56.4 (v0.42): the Provenance (certificate) expander (A.1)
+        # — the "what produced this result" block, rendered at view time from the
+        # run dir (summary.json + run_config.json). Nothing is written into the
+        # runs tree (the 47.4 file-producing surface stays `autorefine share`).
+        with st.expander("Provenance (certificate)", expanded=False):
+            try:
+                _sd = Path(res["run_dir"])
+                _summary = {}
+                _sjson = _sd / "summary.json"
+                if _sjson.is_file():
+                    _summary = json.loads(_sjson.read_text(encoding="utf-8"))
+                _rc = {}
+                _rcjson = _sd / "run_config.json"
+                if _rcjson.is_file():
+                    _rc = json.loads(_rcjson.read_text(encoding="utf-8"))
+                _payload = provenance_payload(
+                    env_provenance(),
+                    seed=_summary.get("seed"), task=_summary.get("task"),
+                    target=_summary.get("target", _rc.get("target")),
+                    run_config=_rc or None)
+                _svg_block("Provenance certificate",
+                           svg_provenance(_payload, **_palette_kwargs()))
+                st.code(provenance_card(_payload), language="text")
+            except Exception as exc:  # 56.4: a friendly error, not a page crash
+                st.error(f"provenance card unavailable: {exc}")
+
+        # SPEC.md 36.2 (v0.22, G2): the app's spec surface reads the field
+        # registry — one table for the field list, not a per-surface literal
+        from autorefine.improver.specspace import SPEC_FIELD_NAMES
         st.caption(
-            f"gate: {len(gate['objectives'])} objective(s)")
-        st.dataframe([{
-            "objective": r["name"],
-            "op": r["op"],
-            "threshold": r["threshold"],
-            "actual": ("n/a" if r["actual"] is None else round(r["actual"], 6)),
-            "result": "PASS" if r["pass"] else "MISS",
-        } for r in gate["objectives"]], width="stretch")
+            f"spec space: {len(SPEC_FIELD_NAMES)} fields — "
+            f"{', '.join(SPEC_FIELD_NAMES)}"
+        )
 
-    # SPEC.md 50.2 (v0.36): one-click exports — the GUI-for-exploration ->
-    # CLI-for-CI bridge, next to the copy-paste recipe above. The app writes
-    # nothing into the runs tree (23.1/49.2.1): the share bundle is
-    # in-memory + a download button; `autorefine share` stays the
-    # file-producing surface (47.4).
-    rd = Path(res["run_dir"])
-    rc_path = rd / "run_config.json"
-    if rc_path.is_file():
-        st.download_button("Download run_config.json",
-                           data=rc_path.read_bytes(),  # 50.2.2
-                           file_name="run_config.json",
-                           mime="application/json", key="dl_runconfig")
-    else:
-        st.caption("no run_config.json in this run dir — nothing to "
-                   "download")
-    if st.button("Build share bundle", key="build_share"):  # 50.2.3
+        st.subheader("Artifacts")
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.download_button("report.html", res["report_html"], mime="text/html",
+                           file_name="report.html")
+        c2.download_button("best_spec.json", res["artifacts"]["best_spec.json"],
+                           mime="application/json", file_name="best_spec.json")
+        c3.download_button("best_model.npz", res["artifacts"]["best_model.npz"],
+                           mime="application/octet-stream", file_name="best_model.npz")
+        c4.download_button("experiments.jsonl", res["artifacts"]["experiments.jsonl"],
+                           mime="application/jsonlines", file_name="experiments.jsonl")
+        # 58.3 (v0.44): the run dossier — the whole story of this run, one
+        # self-contained HTML file; a build failure is a friendly caption
+        # (the 49.4.3 pattern), never a page crash
         try:
-            from autorefine.cli import _share_report_html  # 47.4.2: cli
-            from autorefine.sharing import (  # owns the HTML regeneration
-                share_payload, zip_bundle_bytes)
-            payload = share_payload(rd, _share_report_html(rd))
-            bundle = zip_bundle_bytes(payload)
-            st.session_state["share_bundle_" + str(rd)] = (
-                bundle, [[n, len(payload[n])] for n in sorted(payload)])
-        except Exception as exc:  # local, friendly (50.2.3)
-            st.error(f"share bundle failed: {exc}")
-    stored = st.session_state.get("share_bundle_" + str(rd))
-    if stored:
-        bundle, listing = stored
-        st.dataframe({"entry": [r[0] for r in listing],
-                      "bytes": [r[1] for r in listing]}, width="stretch")
-        st.download_button("Download share bundle (.zip)", data=bundle,
-                           file_name=f"{rd.name}-share.zip",
-                           mime="application/zip", key="dl_share")
-
-    # SPEC.md 56.1/56.4 (v0.42): the Provenance (certificate) expander (A.1)
-    # — the "what produced this result" block, rendered at view time from the
-    # run dir (summary.json + run_config.json). Nothing is written into the
-    # runs tree (the 47.4 file-producing surface stays `autorefine share`).
-    with st.expander("Provenance (certificate)", expanded=False):
-        try:
-            _sd = Path(res["run_dir"])
-            _summary = {}
-            _sjson = _sd / "summary.json"
-            if _sjson.is_file():
-                _summary = json.loads(_sjson.read_text(encoding="utf-8"))
-            _rc = {}
-            _rcjson = _sd / "run_config.json"
-            if _rcjson.is_file():
-                _rc = json.loads(_rcjson.read_text(encoding="utf-8"))
-            _payload = provenance_payload(
-                env_provenance(),
-                seed=_summary.get("seed"), task=_summary.get("task"),
-                target=_summary.get("target", _rc.get("target")),
-                run_config=_rc or None)
-            st.markdown(svg_provenance(_payload, **_palette_kwargs()),
-                        unsafe_allow_html=True)
-            st.code(provenance_card(_payload), language="text")
-        except Exception as exc:  # 56.4: a friendly error, not a page crash
-            st.error(f"provenance card unavailable: {exc}")
-
-    # SPEC.md 36.2 (v0.22, G2): the app's spec surface reads the field
-    # registry — one table for the field list, not a per-surface literal
-    from autorefine.improver.specspace import SPEC_FIELD_NAMES
-    st.caption(
-        f"spec space: {len(SPEC_FIELD_NAMES)} fields — "
-        f"{', '.join(SPEC_FIELD_NAMES)}"
-    )
-
-    st.subheader("Plots")
-    # SPEC.md 51.4.4 (v0.37): the colorblind-safe re-render — when the Setup
-    # tab's `cb_palette` checkbox is on, the multi-series SVGs re-render from
-    # the stored data with `palette="okabe"` + the auto-detected dark mode;
-    # off (default) they render the stored pre-v0.37 SVGs byte-identically.
-    pal = _palette_kwargs()
-    st.markdown(
-        _pal_svg(pal, res["svg_score"],
-                 lambda: svg_score_curve(_load_entries(res["run_dir"]), **pal)),
-        unsafe_allow_html=True)
-    st.markdown(res["svg_pareto"], unsafe_allow_html=True)
-
-    # decision views, final state (SPEC.md 26.5) — pure over the stored
-    # update stream, so the restored view re-renders them with no new state
-    st.subheader("Decision views")
-    import pandas as pd  # a streamlit dependency, app-only
-    fs = res.get("field_stats")
-    if fs:  # D1: per-field win-rate bars (SPEC.md 26.1)
-        st.bar_chart(pd.DataFrame.from_dict(fs, orient="index").sort_index())
-    if res.get("field_value_svg"):  # V2: field x value matrix (SPEC.md 30.2)
-        st.markdown(res["field_value_svg"], unsafe_allow_html=True)
-    if res.get("family_bars_svg"):  # V5: model-family bars (SPEC.md 30.5)
-        st.markdown(res["family_bars_svg"], unsafe_allow_html=True)
-    if res.get("timeline_svg"):  # D3: mutation timeline (SPEC.md 26.3)
-        st.markdown(res["timeline_svg"], unsafe_allow_html=True)
-    ucb = res.get("ucb_trace")
-    if ucb:  # D4: bandit UCB trace (SPEC.md 26.4); None for the search policy
-        st.line_chart(pd.DataFrame({f: ucb[f] for f in sorted(ucb)})
-                      .astype("float64"))
-    # acceptance-gate views (SPEC.md 27): G1 + G2 always; G3 only when the
-    # run has a ladder (finish() returns None otherwise, SPEC.md 27.3)
-    if res.get("strip_svg"):  # G1: candidate score strip (SPEC.md 27.1)
-        st.markdown(
-            _pal_svg(pal, res["strip_svg"],
-                     lambda: svg_score_strip(res["updates"], **pal)),
-            unsafe_allow_html=True)
-    if res.get("scatter_svg"):  # G2: score vs gen-gap (SPEC.md 27.2)
-        st.markdown(
-            _pal_svg(pal, res["scatter_svg"],
-                     lambda: svg_score_gap_scatter(res["updates"], **pal)),
-            unsafe_allow_html=True)
-    if res.get("time_strip_svg"):  # B2 (SPEC.md 54.2): wall-time cost strip
-        st.markdown(
-            _pal_svg(pal, res["time_strip_svg"],
-                     lambda: svg_time_strip(res["updates"],
-                                            res.get("baseline_train_seconds"),
-                                            **pal)),
-            unsafe_allow_html=True)
-    if res.get("ladder_svg"):  # G3: curriculum ladder (SPEC.md 27.3)
-        st.markdown(res["ladder_svg"], unsafe_allow_html=True)
-
-    # SPEC.md 57 (v0.43): the research decision surfaces — pure derivations
-    # over the run's experiments.jsonl (57.5); no new logged data, no new
-    # widget (AppTest-safe), and outside the byte-identity-pinned report.
-    st.subheader("Research views")
-    try:
-        _ren = _load_entries(res["run_dir"])
-    except (ValueError, OSError) as exc:  # 49.4.3: a friendly error, not a crash
-        st.error(f"research views unavailable: {exc}")
-        _ren = []
-    st.markdown(svg_spec_lineage(spec_lineage(_ren), **pal),
-                unsafe_allow_html=True)
-    st.markdown(svg_field_response(field_response_stats(_ren), **pal),
-                unsafe_allow_html=True)
-    st.markdown(svg_gate_region(gate_region_candidates(_ren), **pal),
-                unsafe_allow_html=True)
-    _fs = res.get("field_stats")
-    if isinstance(_fs, dict) and _fs:
-        _ups = res.get("updates") or []
-        _ucb = (_ups[-1].get("ucb") or {}) if _ups else {}
-        st.markdown(svg_bandit_beliefs(bandit_beliefs(_fs, _ucb), **pal),
-                    unsafe_allow_html=True)
-    else:
-        st.caption("bandit belief bars need a bandit-policy run (field_stats)")
-
-    # The conclusion surfaces — four pure derivations over the same run
-    # data (no new logged data, no new widget, AppTest-safe): the verdict
-    # card, the decisive-knob ranking, the efficiency knee, and the
-    # rejection anatomy. A friendly caption on failure (the 49.4.3
-    # pattern), never a page crash.
-    st.subheader("Conclusions")
-    try:
-        _summ_c = res.get("summary") or {}
-        st.markdown(svg_run_verdict(run_verdict(_summ_c, _ren), **pal),
-                    unsafe_allow_html=True)
-        st.markdown(svg_knob_signal(knob_signal(_ren), **pal),
-                    unsafe_allow_html=True)
-        st.markdown(svg_efficiency_knee(
-            frontier_knee(_ren, state_dim=res.get("state_dim"),
-                          n_out=res.get("n_out"), grid=res.get("grid")),
-            **pal), unsafe_allow_html=True)
-        st.markdown(svg_rejection_anatomy(rejection_anatomy(_summ_c, _ren),
-                                          **pal),
-                    unsafe_allow_html=True)
-    except (ValueError, TypeError, KeyError) as exc:  # 49.4.3 pattern
-        st.error(f"conclusions unavailable: {exc}")
-
-    # SPEC.md 59.1 (v0.45): the parameter inspector — the two real layers
-    # (architecture `SPEC_FIELDS` + loop `KNOBS`) as one read-only block
-    # each. Pure derivation over the run's data (59.1); display-only
-    # (AppTest-safe); a friendly caption on failure (the 49.4.3 pattern),
-    # never a page crash.
-    st.subheader("Parameter inspector")
-    try:
-        _ins_entries = _ren  # the entries loaded in the Research views above
-        _ins_best = res.get("best_spec")
-        _ins_cfg = (res.get("summary") or {}).get("run_config")
-        _ins_fs = res.get("field_stats")
-        _ups_i = res.get("updates") or []
-        _ins_ucb = (_ups_i[-1].get("ucb") or {}) if _ups_i else {}
-        _rows = parameter_inspection(_ins_entries, _ins_best, _ins_cfg,
-                                     _ins_fs, _ins_ucb)
-    except (ValueError, TypeError, KeyError) as exc:  # 49.4.3
-        st.error(f"parameter inspector unavailable: {exc}")
-    else:
-        _ca, _cb = st.columns(2)
-        with _ca:
-            st.markdown("**Architecture**")
-            for r in _rows:
-                if r["layer"] == "architecture":
-                    _inspector_field(r)
-        with _cb:
-            st.markdown("**Loop** (the `KNOBS` registry)")
-            for r in _rows:
-                if r["layer"] == "loop":
-                    _inspector_field(r)
-
-    # SPEC.md 60 (v0.46): what-if & comparison — the spec space *steered*,
-    # not just read: the live what-if preview (60.1), the spec fingerprint
-    # "DNA" (60.2), the interaction heatmap (60.3), and the objective-
-    # weight reslice (60.4). Pure derivations over the run's data (60.5);
-    # display-only (AppTest-safe); a friendly caption on failure (the
-    # 49.4.3 pattern), never a page crash.
-    st.subheader("What-if & comparison")
-    try:
-        # 60.1 — the live what-if preview: one field, one value from its
-        # registry space, zero retraining
-        _wf_field = st.selectbox("What-if field", list(SPEC_FIELDS),
-                                 key="wf_field", index=3)
-        _wf_space = list(SPEC_FIELDS[_wf_field].space)
-        _wf_value = st.selectbox(
-            f"what-if value ({_wf_field})", _wf_space, key="wf_value",
-            index=min(2, len(_wf_space) - 1),
-            format_func=lambda v: ", ".join(str(x) for x in v)
-            if isinstance(v, (list, tuple)) else str(v))
-        try:
-            _wf = whatif_preview(_ren, res.get("best_spec"), _wf_field,
-                                 _wf_value)
-        except ValueError as exc:  # 49.4.3: a friendly error, not a crash
-            st.error(f"what-if preview: {exc}")
+            dossier = build_dossier(
+                res["run_dir"],
+                state_dim=res.get("state_dim"),
+                n_out=res.get("n_out"),
+                grid=res.get("grid"),
+                difficulty=res.get("difficulty"),
+                gallery=res.get("error_gallery"),
+                per_class_svg=res.get("per_class_svg"),
+                confusion_svg=res.get("confusion_svg"),
+            ).encode("utf-8")
+        except (ValueError, FileNotFoundError, OSError) as exc:
+            st.caption(f"dossier unavailable: {exc}")
         else:
-            _wfl, _wfr = st.columns(2)
-            with _wfl:
-                st.markdown("**Would-be candidate**")
-                if _wf["valid"]:
-                    st.markdown(svg_architecture(
-                        _wf["candidate"], res.get("state_dim"),
-                        res.get("n_out"), highlight=_wf_field),
-                        unsafe_allow_html=True)
-                else:
-                    st.error(f"invalid combination: {_wf['error']}")
-            with _wfr:
-                st.markdown("**Estimated effect (logged surface)**")
-                st.markdown(svg_whatif_effect(_wf, **pal),
-                            unsafe_allow_html=True)
-        # 60.2 — the spec fingerprint ("DNA"); optional A-vs-B compare
-        _fp_a = (res.get("best_spec") if isinstance(res.get("best_spec"),
-                                                    dict)
-                 else DEFAULT_SPEC.to_dict())
-        if st.checkbox("Compare champion vs baseline fingerprint",
-                       value=False, key="fp_compare"):
-            st.markdown(svg_spec_fingerprint(_fp_a, DEFAULT_SPEC.to_dict(),
-                                             **pal),
-                        unsafe_allow_html=True)
-        else:
-            st.markdown(svg_spec_fingerprint(_fp_a, **pal),
-                        unsafe_allow_html=True)
-        # 60.3 — the interaction heatmap (co-mutated field pairs)
-        st.markdown(svg_interaction_heatmap(interaction_matrix(_ren), **pal),
-                    unsafe_allow_html=True)
-        # 60.4 — the objective-weight reslice (interactive re-gater)
-        _wsc = st.slider("Objective weight: score", 0.0, 1.0, 0.5, 0.05,
-                         key="wobj_score")
-        _wtc = st.slider("Objective weight: train-time", 0.0, 1.0, 0.25, 0.05,
-                         key="wobj_train")
-        _wzc = st.slider("Objective weight: model-size", 0.0, 1.0, 0.25, 0.05,
-                         key="wobj_size")
-        _wtg = st.slider("Composite target", 0.5, 1.0, 0.75, 0.01,
-                         key="wobj_target")
+            c5.download_button("dossier.html", dossier, mime="text/html",
+                               file_name="dossier.html")
+        st.caption(
+            f"run dir: `{res['run_dir']}` — or CLI: "
+            f"`python -m autorefine report --run {res['run_dir']} --html`"
+        )
+
+    with r_plots:
+        st.subheader("Plots")
+        # SPEC.md 51.4.4 (v0.37): the colorblind-safe re-render — when the Setup
+        # tab's `cb_palette` checkbox is on, the multi-series SVGs re-render from
+        # the stored data with `palette="okabe"` + the auto-detected dark mode;
+        # off (default) they render the stored pre-v0.37 SVGs byte-identically.
+        pal = _palette_kwargs()
+        _svg_block("Score curve",
+                   _pal_svg(pal, res["svg_score"],
+                            lambda: svg_score_curve(_load_entries(res["run_dir"]),
+                                                    **pal)))
+        _svg_block("Pareto frontier", res["svg_pareto"])
+
+        # decision views, final state (SPEC.md 26.5) — pure over the stored
+        # update stream, so the restored view re-renders them with no new state
+        st.subheader("Decision views")
+        import pandas as pd  # a streamlit dependency, app-only
+        fs = res.get("field_stats")
+        if fs:  # D1: per-field win-rate bars (SPEC.md 26.1)
+            st.bar_chart(pd.DataFrame.from_dict(fs, orient="index").sort_index())
+        if res.get("field_value_svg"):  # V2: field x value matrix (SPEC.md 30.2)
+            _svg_block("Field x value matrix", res["field_value_svg"])
+        if res.get("family_bars_svg"):  # V5: model-family bars (SPEC.md 30.5)
+            _svg_block("Model family bars", res["family_bars_svg"])
+        if res.get("timeline_svg"):  # D3: mutation timeline (SPEC.md 26.3)
+            _svg_block("Mutation timeline", res["timeline_svg"])
+        ucb = res.get("ucb_trace")
+        if ucb:  # D4: bandit UCB trace (SPEC.md 26.4); None for the search policy
+            st.line_chart(pd.DataFrame({f: ucb[f] for f in sorted(ucb)})
+                          .astype("float64"))
+        # acceptance-gate views (SPEC.md 27): G1 + G2 always; G3 only when the
+        # run has a ladder (finish() returns None otherwise, SPEC.md 27.3)
+        if res.get("strip_svg"):  # G1: candidate score strip (SPEC.md 27.1)
+            _svg_block("Candidate score strip",
+                       _pal_svg(pal, res["strip_svg"],
+                                lambda: svg_score_strip(res["updates"], **pal)))
+        if res.get("scatter_svg"):  # G2: score vs gen-gap (SPEC.md 27.2)
+            _svg_block("Score vs gen-gap",
+                       _pal_svg(pal, res["scatter_svg"],
+                                lambda: svg_score_gap_scatter(res["updates"], **pal)))
+        if res.get("time_strip_svg"):  # B2 (SPEC.md 54.2): wall-time cost strip
+            _svg_block("Wall-time cost strip",
+                       _pal_svg(pal, res["time_strip_svg"],
+                                lambda: svg_time_strip(res["updates"],
+                                                       res.get("baseline_train_seconds"),
+                                                       **pal)))
+        if res.get("ladder_svg"):  # G3: curriculum ladder (SPEC.md 27.3)
+            _svg_block("Curriculum ladder", res["ladder_svg"])
+
+        # SPEC.md 57 (v0.43): the research decision surfaces — pure derivations
+        # over the run's experiments.jsonl (57.5); no new logged data, no new
+        # widget (AppTest-safe), and outside the byte-identity-pinned report.
+
+    with r_research:
+        st.subheader("Research views")
         try:
-            _wr2 = weighted_reslice(_ren, _wsc, _wtc, _wzc, _wtg,
-                                    state_dim=res.get("state_dim"),
-                                    n_out=res.get("n_out"),
-                                    grid=res.get("grid"))
-        except ValueError as exc:  # 49.4.3
-            st.error(f"objective reslice: {exc}")
+            _ren = _load_entries(res["run_dir"])
+        except (ValueError, OSError) as exc:  # 49.4.3: a friendly error, not a crash
+            st.error(f"research views unavailable: {exc}")
+            _ren = []
+        _svg_block("Spec lineage", svg_spec_lineage(spec_lineage(_ren), **pal))
+        _svg_block("Field response surfaces",
+                   svg_field_response(field_response_stats(_ren), **pal))
+        _svg_block("Gate-decision region",
+                   svg_gate_region(gate_region_candidates(_ren), **pal))
+        _fs = res.get("field_stats")
+        if isinstance(_fs, dict) and _fs:
+            _ups = res.get("updates") or []
+            _ucb = (_ups[-1].get("ucb") or {}) if _ups else {}
+            _svg_block("Bandit belief bars",
+                       svg_bandit_beliefs(bandit_beliefs(_fs, _ucb), **pal))
         else:
-            st.markdown(svg_weighted_reslice(_wr2, **pal),
-                        unsafe_allow_html=True)
-            if _wr2["pass"]:
-                st.success(f"{_wr2['passing']}/{_wr2['pool']} logged "
-                           f"candidate(s) pass the weighted gate; "
-                           f"counterfactual final = candidate "
-                           f"{_wr2['final']['cand']}")
+            st.caption("bandit belief bars need a bandit-policy run (field_stats)")
+
+        # The conclusion surfaces — four pure derivations over the same run
+        # data (no new logged data, no new widget, AppTest-safe): the verdict
+        # card, the decisive-knob ranking, the efficiency knee, and the
+        # rejection anatomy. A friendly caption on failure (the 49.4.3
+        # pattern), never a page crash.
+        st.subheader("Conclusions")
+        try:
+            _summ_c = res.get("summary") or {}
+            _svg_block("Run verdict",
+                       svg_run_verdict(run_verdict(_summ_c, _ren), **pal))
+            _svg_block("Decisive knobs", svg_knob_signal(knob_signal(_ren), **pal))
+            _svg_block("Efficiency knee",
+                       svg_efficiency_knee(
+                           frontier_knee(_ren, state_dim=res.get("state_dim"),
+                                         n_out=res.get("n_out"), grid=res.get("grid")),
+                           **pal))
+            _svg_block("Rejection anatomy",
+                       svg_rejection_anatomy(rejection_anatomy(_summ_c, _ren),
+                                             **pal))
+        except (ValueError, TypeError, KeyError) as exc:  # 49.4.3 pattern
+            st.error(f"conclusions unavailable: {exc}")
+
+        # SPEC.md 59.1 (v0.45): the parameter inspector — the two real layers
+        # (architecture `SPEC_FIELDS` + loop `KNOBS`) as one read-only block
+        # each. Pure derivation over the run's data (59.1); display-only
+        # (AppTest-safe); a friendly caption on failure (the 49.4.3 pattern),
+        # never a page crash.
+
+    with r_params:
+        st.subheader("Parameter inspector")
+        try:
+            _ins_entries = _ren  # the entries loaded in the Research views above
+            _ins_best = res.get("best_spec")
+            _ins_cfg = (res.get("summary") or {}).get("run_config")
+            _ins_fs = res.get("field_stats")
+            _ups_i = res.get("updates") or []
+            _ins_ucb = (_ups_i[-1].get("ucb") or {}) if _ups_i else {}
+            _rows = parameter_inspection(_ins_entries, _ins_best, _ins_cfg,
+                                         _ins_fs, _ins_ucb)
+        except (ValueError, TypeError, KeyError) as exc:  # 49.4.3
+            st.error(f"parameter inspector unavailable: {exc}")
+        else:
+            _ca, _cb = st.columns(2)
+            with _ca:
+                st.markdown("**Architecture**")
+                for r in _rows:
+                    if r["layer"] == "architecture":
+                        _inspector_field(r)
+            with _cb:
+                st.markdown("**Loop** (the `KNOBS` registry)")
+                for r in _rows:
+                    if r["layer"] == "loop":
+                        _inspector_field(r)
+
+        # SPEC.md 60 (v0.46): what-if & comparison — the spec space *steered*,
+        # not just read: the live what-if preview (60.1), the spec fingerprint
+        # "DNA" (60.2), the interaction heatmap (60.3), and the objective-
+        # weight reslice (60.4). Pure derivations over the run's data (60.5);
+        # display-only (AppTest-safe); a friendly caption on failure (the
+        # 49.4.3 pattern), never a page crash.
+        st.subheader("What-if & comparison")
+        try:
+            # 60.1 — the live what-if preview: one field, one value from its
+            # registry space, zero retraining
+            _wf_field = st.selectbox("What-if field", list(SPEC_FIELDS),
+                                     key="wf_field", index=3)
+            _wf_space = list(SPEC_FIELDS[_wf_field].space)
+            _wf_value = st.selectbox(
+                f"what-if value ({_wf_field})", _wf_space, key="wf_value",
+                index=min(2, len(_wf_space) - 1),
+                format_func=lambda v: ", ".join(str(x) for x in v)
+                if isinstance(v, (list, tuple)) else str(v))
+            try:
+                _wf = whatif_preview(_ren, res.get("best_spec"), _wf_field,
+                                     _wf_value)
+            except ValueError as exc:  # 49.4.3: a friendly error, not a crash
+                st.error(f"what-if preview: {exc}")
             else:
-                st.warning("no logged candidate passes the weighted gate")
-    except (ValueError, TypeError, KeyError) as exc:  # 49.4.3
-        st.error(f"what-if & comparison unavailable: {exc}")
+                _wfl, _wfr = st.columns(2)
+                with _wfl:
+                    st.markdown("**Would-be candidate**")
+                    if _wf["valid"]:
+                        _svg_block("Would-be candidate",
+                                   svg_architecture(
+                                       _wf["candidate"], res.get("state_dim"),
+                                       res.get("n_out"), highlight=_wf_field))
+                    else:
+                        st.error(f"invalid combination: {_wf['error']}")
+                with _wfr:
+                    st.markdown("**Estimated effect (logged surface)**")
+                    _svg_block("What-if effect", svg_whatif_effect(_wf, **pal))
+            # 60.2 — the spec fingerprint ("DNA"); optional A-vs-B compare
+            _fp_a = (res.get("best_spec") if isinstance(res.get("best_spec"),
+                                                        dict)
+                     else DEFAULT_SPEC.to_dict())
+            if st.checkbox("Compare champion vs baseline fingerprint",
+                           value=False, key="fp_compare"):
+                _svg_block("Fingerprint (champion vs baseline)",
+                           svg_spec_fingerprint(_fp_a, DEFAULT_SPEC.to_dict(),
+                                                **pal))
+            else:
+                _svg_block("Fingerprint (champion)",
+                           svg_spec_fingerprint(_fp_a, **pal))
+            # 60.3 — the interaction heatmap (co-mutated field pairs)
+            _svg_block("Interaction heatmap",
+                       svg_interaction_heatmap(interaction_matrix(_ren), **pal))
+            # 60.4 — the objective-weight reslice (interactive re-gater)
+            _wsc = st.slider("Objective weight: score", 0.0, 1.0, 0.5, 0.05,
+                             key="wobj_score")
+            _wtc = st.slider("Objective weight: train-time", 0.0, 1.0, 0.25, 0.05,
+                             key="wobj_train")
+            _wzc = st.slider("Objective weight: model-size", 0.0, 1.0, 0.25, 0.05,
+                             key="wobj_size")
+            _wtg = st.slider("Composite target", 0.5, 1.0, 0.75, 0.01,
+                             key="wobj_target")
+            try:
+                _wr2 = weighted_reslice(_ren, _wsc, _wtc, _wzc, _wtg,
+                                        state_dim=res.get("state_dim"),
+                                        n_out=res.get("n_out"),
+                                        grid=res.get("grid"))
+            except ValueError as exc:  # 49.4.3
+                st.error(f"objective reslice: {exc}")
+            else:
+                _svg_block("Objective-weight reslice",
+                           svg_weighted_reslice(_wr2, **pal))
+                if _wr2["pass"]:
+                    st.success(f"{_wr2['passing']}/{_wr2['pool']} logged "
+                               f"candidate(s) pass the weighted gate; "
+                               f"counterfactual final = candidate "
+                               f"{_wr2['final']['cand']}")
+                else:
+                    st.warning("no logged candidate passes the weighted gate")
+        except (ValueError, TypeError, KeyError) as exc:  # 49.4.3
+            st.error(f"what-if & comparison unavailable: {exc}")
 
-    # learning views (SPEC.md 28): computed once in finish(), re-rendered
-    # here from the stored result — the restored view shows the same views
-    if any(res.get(k) for k in ("loss_curves", "per_class_svg",
-                                "confusion_svg", "difficulty_svg",
-                                "boundary_svg", "error_gallery",
-                                "arch_svg")):
-        st.subheader("Learning views")
-        curves = res.get("loss_curves") or {}
-        if curves:  # C1 (SPEC.md 28.1): pick an experiment's train/holdout curves
-            pick = st.selectbox("Training curves — experiment",
-                                list(curves), key="curve_pick")
-            st.markdown(svg_loss_curves(curves[pick]),
-                        unsafe_allow_html=True)
-        if res.get("per_class_svg"):  # C2 (SPEC.md 28.2)
-            st.markdown(res["per_class_svg"], unsafe_allow_html=True)
-        if res.get("confusion_svg"):  # C2 (SPEC.md 28.2)
-            st.markdown(res["confusion_svg"], unsafe_allow_html=True)
-        if res.get("difficulty_svg"):  # 58.1 (v0.44): easiest -> hardest
-            st.markdown(res["difficulty_svg"], unsafe_allow_html=True)
-        if res.get("boundary_svg"):  # V3 (SPEC.md 30.3): where it fails on a 2-D plane
-            st.markdown(res["boundary_svg"], unsafe_allow_html=True)
-        gallery = res.get("error_gallery")
-        if gallery:  # C3 (SPEC.md 28.3): misclassified holdout items
-            _render_gallery(gallery)
-        if res.get("arch_svg"):  # C4 (SPEC.md 28.4): what we ended up building
-            st.markdown(res["arch_svg"], unsafe_allow_html=True)
 
-    # SPEC.md 49 (v0.35): the advanced analysis section — three panels,
-    # every action behind a button (inert until pressed, 49.4.2); shared
-    # by the live and restored views (49.4.1).
-    _render_advanced(res)
+    with r_learning:
+        # learning views (SPEC.md 28): computed once in finish(), re-rendered
+        # here from the stored result — the restored view shows the same views
+        if any(res.get(k) for k in ("loss_curves", "per_class_svg",
+                                    "confusion_svg", "difficulty_svg",
+                                    "boundary_svg", "error_gallery",
+                                    "arch_svg")):
+            st.subheader("Learning views")
+            curves = res.get("loss_curves") or {}
+            if curves:  # C1 (SPEC.md 28.1): pick an experiment's train/holdout curves
+                pick = st.selectbox("Training curves — experiment",
+                                    list(curves), key="curve_pick")
+                _svg_block("Training curves", svg_loss_curves(curves[pick]))
+            if res.get("per_class_svg"):  # C2 (SPEC.md 28.2)
+                _svg_block("Per-class accuracy", res["per_class_svg"])
+            if res.get("confusion_svg"):  # C2 (SPEC.md 28.2)
+                _svg_block("Confusion matrix", res["confusion_svg"])
+            if res.get("difficulty_svg"):  # 58.1 (v0.44): easiest -> hardest
+                _svg_block("Per-input difficulty", res["difficulty_svg"])
+            if res.get("boundary_svg"):  # V3 (SPEC.md 30.3): where it fails on a 2-D plane
+                _svg_block("Decision boundary", res["boundary_svg"])
+            gallery = res.get("error_gallery")
+            if gallery:  # C3 (SPEC.md 28.3): misclassified holdout items
+                _render_gallery(gallery)
+            if res.get("arch_svg"):  # C4 (SPEC.md 28.4): what we ended up building
+                _svg_block("Final architecture", res["arch_svg"])
 
-    st.subheader("Artifacts")
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.download_button("report.html", res["report_html"], mime="text/html",
-                       file_name="report.html")
-    c2.download_button("best_spec.json", res["artifacts"]["best_spec.json"],
-                       mime="application/json", file_name="best_spec.json")
-    c3.download_button("best_model.npz", res["artifacts"]["best_model.npz"],
-                       mime="application/octet-stream", file_name="best_model.npz")
-    c4.download_button("experiments.jsonl", res["artifacts"]["experiments.jsonl"],
-                       mime="application/jsonlines", file_name="experiments.jsonl")
-    # 58.3 (v0.44): the run dossier — the whole story of this run, one
-    # self-contained HTML file; a build failure is a friendly caption
-    # (the 49.4.3 pattern), never a page crash
-    try:
-        dossier = build_dossier(
-            res["run_dir"],
-            state_dim=res.get("state_dim"),
-            n_out=res.get("n_out"),
-            grid=res.get("grid"),
-            difficulty=res.get("difficulty"),
-            gallery=res.get("error_gallery"),
-            per_class_svg=res.get("per_class_svg"),
-            confusion_svg=res.get("confusion_svg"),
-        ).encode("utf-8")
-    except (ValueError, FileNotFoundError, OSError) as exc:
-        st.caption(f"dossier unavailable: {exc}")
-    else:
-        c5.download_button("dossier.html", dossier, mime="text/html",
-                           file_name="dossier.html")
-    st.caption(
-        f"run dir: `{res['run_dir']}` — or CLI: "
-        f"`python -m autorefine report --run {res['run_dir']} --html`"
-    )
+
+    with r_advanced:
+        # SPEC.md 49 (v0.35): the advanced analysis section — three panels,
+        # every action behind a button (inert until pressed, 49.4.2); shared
+        # by the live and restored views (49.4.1).
+        _render_advanced(res)
+
 
 
 def _load_entries(run_dir: str) -> list:
@@ -1703,9 +1781,9 @@ def _render_gallery(items: list[dict]) -> None:
                     continue
             wf = it.get("waveform")
             if wf:
-                st.markdown(svg_audio_waveform(wf, it.get("sample_rate"),
-                                               title=str(it.get("file", ""))),
-                            unsafe_allow_html=True)
+                _svg_block("Audio waveform",
+                           svg_audio_waveform(wf, it.get("sample_rate"),
+                                              title=str(it.get("file", ""))))
             st.caption(caption)
 
 
@@ -1767,7 +1845,7 @@ def _render_experiments(payload: dict) -> None:
     # last acceptance's first mutated field highlighted (53.3)
     if stream:
         st.subheader("Decision views")
-        st.markdown(svg_live_frontier(stream), unsafe_allow_html=True)
+        _svg_block("Live Pareto frontier", svg_live_frontier(stream))
     best_spec = (payload.get("res") or {}).get("best_spec")
     if best_spec:
         last_hl = None
@@ -1776,16 +1854,18 @@ def _render_experiments(payload: dict) -> None:
                 last_hl = u["mutation"][0]
                 break
         st.subheader("Champion spec")
-        st.markdown(svg_architecture(
-            best_spec, payload.get("state_dim", 1), payload.get("n_out", 1),
-            highlight=last_hl if isinstance(last_hl, str) else None),
-            unsafe_allow_html=True)
+        _svg_block("Champion spec",
+                   svg_architecture(
+                       best_spec, payload.get("state_dim", 1),
+                       payload.get("n_out", 1),
+                       highlight=last_hl if isinstance(last_hl, str) else None))
     # B2 (SPEC.md 54.2): the wall-time cost strip over the stored stream
     if stream:
         st.subheader("Wall-time cost strip")
-        st.markdown(svg_time_strip(
-            stream, (payload.get("res") or {}).get("baseline_train_seconds")),
-            unsafe_allow_html=True)
+        _svg_block("Wall-time cost strip",
+                   svg_time_strip(
+                       stream,
+                       (payload.get("res") or {}).get("baseline_train_seconds")))
 
 
 def _render_optin_views(path, label: str, target: float, policy: str,
@@ -1843,11 +1923,11 @@ def _render_optin_views(path, label: str, target: float, policy: str,
                 beats = sum(1 for s in sweep if s["final"] > s["baseline"])
                 st.caption(f"{len(sweep)} seeds · {passing} pass target "
                            f"{float(target):.1f} · {beats} beat their own baseline")
-                st.markdown(svg_seed_variance(sweep, target=float(target)),
-                            unsafe_allow_html=True)
+                _svg_block("Seed variance",
+                           svg_seed_variance(sweep, target=float(target)))
                 # V1 (SPEC.md 30.1): per-seed curves — when did they diverge?
-                st.markdown(svg_seed_curves(sweep, target=float(target)),
-                            unsafe_allow_html=True)
+                _svg_block("Per-seed curves",
+                           svg_seed_curves(sweep, target=float(target)))
 
     # --- D2: RL policy view, precomputed (SPEC.md 29.2) ----------------------
     st.subheader("RL policy view (precomputed — never runs RL live)")
@@ -1864,7 +1944,8 @@ def _render_optin_views(path, label: str, target: float, policy: str,
         present = [p for p in cands if p.exists()]
         if present:
             for p in present:
-                st.markdown(p.read_text(encoding="utf-8"), unsafe_allow_html=True)
+                _svg_block("Precomputed RL view",
+                           p.read_text(encoding="utf-8"))
         else:
             st.warning(f"{pd_} has no action_probabilities.svg / "
                        f"task_returns.svg — run `autorefine policy-report "
@@ -1901,9 +1982,8 @@ def _render_optin_views(path, label: str, target: float, policy: str,
                 except ValueError as exc:
                     st.error(str(exc))
                 else:
-                    st.markdown(
-                        svg_task_returns(mres["rl"]["returns"]),
-                        unsafe_allow_html=True)
+                    _svg_block("Task returns (shared policy)",
+                               svg_task_returns(mres["rl"]["returns"]))
                     st.download_button(
                         "Download the shared policy (.npz)",
                         data=mres["rl"]["policy_bytes"],
@@ -2157,6 +2237,16 @@ def main() -> None:
 
     path = _resolve_csv(upload, csv_path)
     result = st.session_state.get("result")
+    # 69.4 (v0.55, A59): the workflow strip — the four procedural steps and
+    # where the user is in them (data set? run in flight? result done?).
+    # Rendered on every screen, idle included, above the tabs.
+    _wrec = st.session_state.get("_worker")
+    _wrunning = (_wrec is not None and not _wrec["drained"]
+                 and _wrec.get("thread") is not None
+                 and _wrec["thread"].is_alive())
+    _wstate = workflow_state(path is not None, _wrunning,
+                             result is not None)
+    _svg_block("Workflow", svg_workflow_strip(_wstate))
     if path is None and result is None:
         # 65.2 (v0.51): the idle screen *is* the Quickstart — the same
         # four steps the README/CLI carry (one source, 65.1) + the
@@ -2321,6 +2411,10 @@ def main() -> None:
                          _rl_up.getvalue() if (_rl_up is not None
                                                and policy == "rl") else None))
         elif result is not None:
+            # 69.4 (v0.55, A59): the run is finished — point at the Results
+            # tab instead of a blank re-run area
+            st.info("Run finished — see the Results tab for the verdict, "
+                    "plots, and downloads.")
             # widget-triggered re-run (download click, sidebar change) — the
             # last completed result stays on screen (SPEC.md 23.2 persistence)
             if st.button("New run (clear result)", key="clear_button"):
