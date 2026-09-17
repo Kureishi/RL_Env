@@ -47,7 +47,12 @@ from .improver.curriculum import (  # 46.2 (v0.32): the three ladders
     SineCurriculum,
 )
 from .improver.policy import SearchPolicy
-from .improver.rl_policy import MetaRLPolicy, train_policy
+from .improver.rl_policy import (
+    MetaRLPolicy,
+    train_policy,
+    save_policy,  # 67.1 (v0.53, A57): policy persistence
+    load_policy,
+)
 from .steering import SteeringState, train_manual  # 59 (v0.45)
 from .accounting import account_run  # 39.2 (T4): decision accounting
 from .memory import KIND_BASELINE, KIND_EXPERIMENT, RunMemory
@@ -149,14 +154,32 @@ def _drive(args: argparse.Namespace, env: AutoRefineEnv) -> None:
     quiet = getattr(args, "quiet", False)  # 47.3 (run/fit only; safe elsewhere)
     if args.policy == "rl":
         # SPEC.md 15: meta-RL improver — policy trained on AutoRefineEnv itself
-        policy = MetaRLPolicy(seed=args.seed)
+        # SPEC.md 67.4 (v0.53, A57): `run`-only persistence + exploration —
+        # `--rl-load` resumes a saved policy (learn → persist → explore →
+        # reuse); `--rl-epsilon`/`--rl-epsilon-decay` enable ε-greedy;
+        # `--rl-save` writes the trained policy after training.
+        if getattr(args, "rl_load", None):
+            policy = load_policy(args.rl_load, seed=args.seed)
+        else:
+            policy = MetaRLPolicy(
+                seed=args.seed,
+                epsilon=getattr(args, "rl_epsilon", 0.0),
+                epsilon_decay=getattr(args, "rl_epsilon_decay", 1.0))
         if not quiet:
-            print(f"task    : {args.task}  (meta-RL, {args.rl_episodes} full-budget episodes)")
+            print(f"task    : {args.task}  (meta-RL, {args.rl_episodes} full-budget episodes"
+                  + (f", ε={policy.epsilon:g}" if policy.epsilon > 0.0 else "")
+                  + (
+                      f" (loaded from {args.rl_load})"
+                      if getattr(args, "rl_load", None) else ""))
         rl_summary = train_policy(env, policy, args.rl_episodes,
                                   verbose=not quiet)  # 47.3.2
         if not quiet:
             print(f"rl episodes: {rl_summary['episodes']}, returns: "
                   f"{[round(r, 4) for r in rl_summary['episode_returns']]}")
+        if getattr(args, "rl_save", None):  # 67.4: persist the trained policy
+            sp = save_policy(policy, args.rl_save)
+            if not quiet:
+                print(f"rl save   : policy written to {sp}")
         summary = env.memory.load_summary() if env.memory else {}
     else:
         state = env.reset()
@@ -2663,6 +2686,18 @@ def build_parser() -> argparse.ArgumentParser:
                             " or the meta-RL policy")
     p_run.add_argument("--rl-episodes", type=int, default=5,
                        help="meta-RL: number of full-budget episodes to train for")
+    p_run.add_argument("--rl-save", default=None, metavar="PATH",
+                       help="v0.53 (SPEC.md 67.4): save the trained policy "
+                            "(learn → persist → reuse)")
+    p_run.add_argument("--rl-load", default=None, metavar="PATH",
+                       help="v0.53 (SPEC.md 67.4): resume a policy saved with "
+                            "--rl-save before training")
+    p_run.add_argument("--rl-epsilon", type=float, default=0.0,
+                       help="v0.53 (SPEC.md 67.2): ε-greedy exploration in "
+                            "[0, 1] (0 = pure softmax, the default)")
+    p_run.add_argument("--rl-epsilon-decay", type=float, default=1.0,
+                       help="v0.53 (SPEC.md 67.2): per-episode ε decay "
+                            "factor in (0, 1] (1.0 = no decay)")
     p_run.add_argument("--seed", type=int, default=7)
     p_run.add_argument("--experiments", type=int, default=30)
     p_run.add_argument("--max-seconds", type=float, default=900.0)

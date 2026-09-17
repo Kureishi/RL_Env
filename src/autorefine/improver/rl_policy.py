@@ -10,8 +10,21 @@ trained with REINFORCE: sampled actions, return-to-go, running-mean baseline,
 gradient step at the end of each episode. Deterministic given a seed
 (SPEC.md G2, S3) — the RNG stream and the (seeded) environment together pin
 the whole meta-training run.
+
+v0.53 (SPEC.md 67, A57) — self-improving RL: the trained policy is no
+longer "train and forget".
+  * 67.1 persistence — `save_policy` / `load_policy` round-trip the full
+    state (weights, biases, task bias B, hyper-parameters, exploration) as
+    a tagged .npz; a load reconstructs a bit-exact policy.
+  * 67.2 exploration — opt-in ε-greedy over the family-relevant actions
+    (`epsilon`, `epsilon_decay`); the default `epsilon=0.0` keeps the exact
+    single-draw proposal path (A6 stays bit-identical).
+  * 67.3 checkpointing — `train_policy(..., best=True)` snapshots the
+    best-episode weights (opt-in; the default return dict is unchanged).
 """
 from __future__ import annotations
+
+from pathlib import Path
 
 import numpy as np
 
@@ -24,10 +37,28 @@ from .catalog import (
     relevant_actions,
 )
 
+# SPEC.md 67.1.2 (v0.53, A57): the npz format tag. A static string — NOT
+# autorefine.__version__ (importing autorefine from improver would be
+# circular: __init__ imports this module).
+FORMAT_TAG = "autorefine.meta_rl/1"
+
 
 class MetaRLPolicy:
     def __init__(self, seed: int, lr: float = 0.25, baseline_decay: float = 0.9,
-                 task_names: list[str] | None = None) -> None:
+                 task_names: list[str] | None = None,
+                 epsilon: float = 0.0, epsilon_decay: float = 1.0) -> None:
+        # SPEC.md 67.2 (v0.53, A57): opt-in ε-greedy exploration. Defaults
+        # (epsilon=0.0, epsilon_decay=1.0) short-circuit to the exact
+        # single-draw path — A6's bit-identical proposal stream (67.2.3).
+        if not 0.0 <= float(epsilon) <= 1.0:
+            raise ValueError(
+                f"epsilon must be in [0, 1], got {epsilon!r}")
+        if not 0.0 < float(epsilon_decay) <= 1.0:
+            raise ValueError(
+                f"epsilon_decay must be in (0, 1], got {epsilon_decay!r}")
+        self.epsilon = float(epsilon)
+        self.epsilon_decay = float(epsilon_decay)
+
         rng = np.random.default_rng(seed)
         n_hot = sum(len(v) for v in FIELD_CATALOG.values())
         self.state_dim = n_hot + 3
@@ -114,7 +145,17 @@ class MetaRLPolicy:
         tidx = self._task_idx(env_state)  # SPEC.md 20.2
         x = self.embed(env_state)
         p = self._probs(x, family, tidx)
-        a = int(self.rng.choice(self.n_actions, p=p))
+        if self.epsilon > 0.0:  # SPEC.md 67.2.1 (v0.53, A57): ε-greedy
+            # one uniform draw over the family's relevant actions (the same
+            # mask the softmax sees), else the usual softmax sample. The
+            # epsilon=0.0 default never reaches here (67.2.3 pin safety).
+            if self.rng.random() < self.epsilon:
+                rel = list(relevant_actions(family))
+                a = int(rel[int(self.rng.choice(len(rel)))])
+            else:
+                a = int(self.rng.choice(self.n_actions, p=p))
+        else:
+            a = int(self.rng.choice(self.n_actions, p=p))
         # D2 (SPEC.md 29.2): expose what was sampled (pure bookkeeping; set
         # *after* the RNG draw so the stream and the returned spec are unchanged)
         self.last_proposal = (a, p)
@@ -182,6 +223,9 @@ class MetaRLPolicy:
                 self.B[i] -= self.lr * (gb_task[i] / T)
         self.n_updates += 1
         self._traj = []
+        # SPEC.md 67.2.2 (v0.53, A57): geometric ε decay, one factor per
+        # episode (0 stays 0; the default decay 1.0 is a no-op)
+        self.epsilon = max(0.0, self.epsilon * self.epsilon_decay)
 
     def weights(self) -> tuple[np.ndarray, np.ndarray]:
         return self.w.copy(), self.b.copy()
@@ -192,15 +236,23 @@ class MetaRLPolicy:
 
 
 def train_policy(env, policy: MetaRLPolicy, n_episodes: int, verbose: bool = False,
-                 trace: list | None = None) -> dict:
+                 trace: list | None = None, best: bool = False) -> dict:
     """Drive `env` for `n_episodes` full runs, updating `policy` after each
     episode (SPEC.md 15: the improver learning from the loop itself).
 
     D2 (SPEC.md 29.2): when `trace` (a list) is given, append one record per
     step — `{"task", "action", "probs", "reward"}` — for the policy view. The
     return dict is **unchanged** when `trace is None` (the default), so every
-    existing caller stays bit-identical (G2)."""
+    existing caller stays bit-identical (G2).
+
+    SPEC.md 67.3 (v0.53, A57): `best=True` (opt-in; the D2-trace precedent)
+    also tracks the strictly-greater best episode and returns a `"best"`
+    snapshot — `{episode, return, w, b, B}` — in the result. The key is
+    added **only** when `best=True`, so the default return dict is
+    bit-identical (67.5). Multi-task `train_multi_policy` is deliberately
+    unextended: a per-task "best" is ambiguous there (67.3.2)."""
     returns = []
+    best_snap: dict | None = None
     for ep in range(n_episodes):
         state = env.reset()
         while not env.done:
@@ -217,14 +269,107 @@ def train_policy(env, policy: MetaRLPolicy, n_episodes: int, verbose: bool = Fal
                     "reward": float(reward),
                 })
         returns.append(policy.last_episode_return)
+        if best:  # SPEC.md 67.3.1 (v0.53, A57): strictly-greater snapshot
+            r = policy.last_episode_return
+            if best_snap is None or r > best_snap["return"]:
+                best_snap = {
+                    "episode": ep,
+                    "return": float(r),
+                    "w": policy.w.copy(),
+                    "b": policy.b.copy(),
+                    "B": policy.B.copy() if policy.B is not None else None,
+                }
         if verbose:
             print(f"  episode {ep + 1}/{n_episodes}: return {policy.last_episode_return:+.4f}")
-    return {
+    out = {
         "episodes": n_episodes,
         "episode_returns": returns,
         "policy_updates": policy.n_updates,
         "last_return": returns[-1] if returns else None,
     }
+    if best:  # SPEC.md 67.3.1: the key exists only in opt-in mode (67.5)
+        out["best"] = best_snap
+    return out
+
+
+# --- v0.53 (SPEC.md 67.1, A57): policy persistence -----------------------------
+
+def save_policy(policy: MetaRLPolicy, path) -> Path:
+    """SPEC.md 67.1 (v0.53, A57): persist a trained policy to `path` (npz).
+
+    67.1.1 one home — the full trainable state: `w`, `b`, the per-task bias
+    `B` (+ the comma-joined `task_names`) in multi-task mode, the
+    hyper-parameters (`lr`, `baseline_decay`), `n_updates`, and the
+    exploration schedule (`epsilon`, `epsilon_decay`). Tagged with
+    `FORMAT_TAG` so a foreign file is rejected on load (67.1.2)."""
+    p = Path(path)
+    arrays = {
+        "format": np.asarray(FORMAT_TAG),
+        "w": np.asarray(policy.w, dtype=np.float64),
+        "b": np.asarray(policy.b, dtype=np.float64),
+        "lr": np.float64(policy.lr),
+        "baseline_decay": np.float64(policy.baseline_decay),
+        "n_updates": np.int64(policy.n_updates),
+        "epsilon": np.float64(policy.epsilon),
+        "epsilon_decay": np.float64(policy.epsilon_decay),
+    }
+    if policy.B is not None:
+        arrays["B"] = np.asarray(policy.B, dtype=np.float64)
+        arrays["task_names"] = np.asarray(",".join(policy.task_names))
+    np.savez_compressed(p, **arrays)
+    return p
+
+
+def load_policy(path, seed: int = 0) -> MetaRLPolicy:
+    """SPEC.md 67.1 (v0.53, A57): reconstruct a policy bit-exactly from a
+    file written by `save_policy`.
+
+    67.1.2 contract — a `ValueError` on a missing / mismatched format tag or
+    an incompatible weight shape (the catalog length, SPEC.md 19.4); a
+    missing file raises `FileNotFoundError`. The reconstruction re-enters
+    `MetaRLPolicy.__init__` (hyper-parameter validation included) and then
+    overwrites `w` / `b` / `B` / `n_updates` with the saved arrays, so the
+    loaded policy is bit-exact: same-seed `propose` streams are identical to
+    the original's (67.1.3)."""
+    p = Path(path)
+    with np.load(p, allow_pickle=False) as z:
+        if "format" not in z or str(z["format"]) != FORMAT_TAG:
+            raise ValueError(
+                f"not an AutoRefine policy file (expected format tag "
+                f"{FORMAT_TAG!r}, got "
+                f"{None if 'format' not in z else str(z['format'])!r})")
+        w = z["w"].astype(np.float64)
+        b = z["b"].astype(np.float64)
+        if w.shape[1] != len(ACTIONS) or b.shape[0] != len(ACTIONS):
+            raise ValueError(
+                f"incompatible action dimension: weights {w.shape}, "
+                f"bias {b.shape} vs {len(ACTIONS)} catalog actions")
+        lr = float(z["lr"])
+        baseline_decay = float(z["baseline_decay"])
+        n_updates = int(z["n_updates"])
+        epsilon = float(z["epsilon"])
+        epsilon_decay = float(z["epsilon_decay"])
+        B = z["B"].astype(np.float64) if "B" in z else None
+        task_names = (
+            [t for t in str(z["task_names"]).split(",") if t]
+            if "task_names" in z else None
+        )
+    policy = MetaRLPolicy(seed, lr=lr, baseline_decay=baseline_decay,
+                          task_names=task_names,
+                          epsilon=epsilon, epsilon_decay=epsilon_decay)
+    if B is not None:
+        if policy.B is None:
+            raise ValueError(
+                "file carries a task bias B but no task_names")
+        if B.shape != (len(policy.task_names), len(ACTIONS)):
+            raise ValueError(
+                f"task bias B has shape {B.shape}, expected "
+                f"({len(policy.task_names)}, {len(ACTIONS)})")
+        policy.B = B
+    policy.w = w
+    policy.b = b
+    policy.n_updates = n_updates
+    return policy
 
 
 def train_multi_policy(envs: list, policy: MetaRLPolicy,

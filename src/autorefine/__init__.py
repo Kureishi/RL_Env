@@ -22,7 +22,13 @@ from .improver.meta_env import (
 )
 from .improver.policy import SearchPolicy
 from .improver.bandit import BanditPolicy
-from .improver.rl_policy import MetaRLPolicy, train_policy, train_multi_policy
+from .improver.rl_policy import (
+    MetaRLPolicy,
+    train_policy,
+    train_multi_policy,
+    save_policy,  # 67.1 (v0.53): policy persistence
+    load_policy,
+)
 from .improver.curriculum import (  # 46.2 (v0.32): the three ladders
     CartPoleCurriculum,
     ParityCurriculum,
@@ -166,8 +172,8 @@ from .tasks import (
 
 # SPEC.md 33.1 (C1): single version source — must equal pyproject.toml's
 # [project].version (enforced by the A23 test); one step per feature round
-# (v0.52 ⇒ 0.52.0, M55, SPEC.md 66)
-__version__ = "0.52.0"
+# (v0.53 ⇒ 0.53.0, M56, SPEC.md 67)
+__version__ = "0.53.0"
 
 __all__ = [
     "AutoRefineEnv",
@@ -180,6 +186,8 @@ __all__ = [
     "MetaRLPolicy",
     "train_policy",
     "train_multi_policy",
+    "save_policy",
+    "load_policy",
     "ParityCurriculum",
     "SineCurriculum",
     "CartPoleCurriculum",

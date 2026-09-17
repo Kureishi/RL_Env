@@ -73,6 +73,7 @@ numbers and carry none.)
 | M53 | v0.50   | 64     | A54 | tests/test_reporting_v050.py |
 | M54 | v0.51   | 65     | A55 | tests/test_quickstart_v051.py |
 | M55 | v0.52   | 66     | A56 | tests/test_reporting_v052.py |
+| M56 | v0.53   | 67     | A57 | tests/test_rl_selfimprove_v053.py |
 
 ---
 
@@ -6576,3 +6577,62 @@ No run semantics change: the loop, the gates, the budgets, the summary writer, a
 ### 66.5 Milestone (M55)
 
 **M55** — v0.52 "Decision robustness: does the verdict survive the seed band?": `uncertainty.verdict_robustness` (66.1) — the one-home classification of the GO/NO-GO verdict against the A54 seed band (`robust_go` / `marginal_go` / `marginal_no` / `robust_no` / `unassessable`, with the quoteable `one_liner` and the "what would flip this" `flip`) — integrated into the two decision surfaces where the verdict is rendered: the exec view (66.2.1) and the decision artifact (66.2.2), shown by the existing CLI paths with no new flags (66.2.3). Pure, deterministic (G2), no default-path behavior change (66.3) (A56).
+
+## 67. Self-improving RL — persistence, exploration, reuse (v0.53)
+
+The RL path (`run --policy rl`, SPEC.md 15) was "train and forget": `train_policy` drove the environment for N full-budget episodes, and the learned weights were discarded when the process exited. The environment improved a model every run but never improved *itself* across runs — the exact "self-improvement" the project is named for was missing from the RL loop. This round closes it with a learn → persist → explore → reuse cycle, in the one home for the policy (`improver/rl_policy.py`), opt-in end to end.
+
+The through-line: *the policy is state; make the state durable and steerable.* Persistence (67.1) round-trips the full trainable state bit-exactly; exploration (67.2) adds an opt-in ε-greedy escape from policy collapse with a geometric decay schedule; checkpointing (67.3) keeps the best episode's weights, not just the last; the CLI (67.4) exposes the whole cycle on `run`. All additive, opt-in, **no default-path behavior change** — A6's pinned `propose` stream and the default `train_policy` return dict stay bit-identical (67.5, the A57 pin anchor; A1–A56 green).
+
+### 67.1 Policy persistence (R1)
+
+**One home** (67.1.1) — `improver/rl_policy.py`: `save_policy(policy, path) -> Path` and `load_policy(path, seed=0) -> MetaRLPolicy` beside the policy they serve. The file is a `.npz` (stdlib `numpy` already there; no new dependency) carrying the full trainable state: `w`, `b`, the per-task bias `B` plus the comma-joined `task_names` (multi-task mode, SPEC.md 20.2), the hyper-parameters `lr` / `baseline_decay`, `n_updates`, and the exploration schedule `epsilon` / `epsilon_decay` (67.2). The format tag is the static `FORMAT_TAG = "autorefine.meta_rl/1"` — deliberately **not** `autorefine.__version__`: importing `autorefine` from `improver/` would be circular (`__init__` imports this module), and a policy must remain loadable across minor versions.
+
+**Save/load contract** (67.1.2) — `load_policy` validates before it trusts: a missing or mismatched format tag is a `ValueError` ("not an AutoRefine policy file"), as is an incompatible weight shape (`w.shape[1]` / `b.shape[0]` must equal `len(ACTIONS)`, the SPEC.md 19.4 catalog length) or a `B` matrix whose shape disagrees with the file's own `task_names`. A missing file raises `FileNotFoundError`. The reconstruction re-enters `MetaRLPolicy.__init__` — so hyper-parameter validation (67.2.1) applies to saved values too — then overwrites `w` / `b` / `B` / `n_updates` with the loaded arrays. `seed` is the reconstruction seed (it fixes `rng` for continued sampling); the saved weights are authoritative.
+
+**Bit-exactness** (67.1.3) — the round-trip is lossless and behavioral: `load_policy(save_policy(p))` yields a policy whose weights, biases, `B`, `task_names`, hyper-parameters, `n_updates`, and ε schedule are element-equal to the original, and whose same-seed `propose()` action stream on a fixed state sequence is identical to the original's. This is the deployment property: a policy trained (single- or multi-task) on one run can be resumed on a later run or task and continue sampling exactly where it left off.
+
+### 67.2 ε-greedy exploration with decay (R2)
+
+**The rule** (67.2.1) — `MetaRLPolicy.__init__` gains `epsilon: float = 0.0` and `epsilon_decay: float = 1.0`, validated (`ValueError` outside `[0, 1]` / `(0, 1]`). In `propose()`, when `epsilon > 0`: draw `u = rng.random()`; if `u < epsilon`, take one uniform draw over `relevant_actions(family)` — the same family mask the softmax sees (SPEC.md 18.2) — else take the usual softmax sample `rng.choice(n_actions, p=p)`. Pure softmax sampling can collapse onto a single action (today handled only env-side by the duplicate penalty, `meta_env.py`); ε-greedy guarantees a floor of exploration over the legal catalog. `probabilities()` stays **pure** — ε is a sampling-time effect, not a change to the policy's belief vector (G2).
+
+**The decay** (67.2.2) — at the end of each `_update()` (i.e. per episode), `epsilon = max(0.0, epsilon * epsilon_decay)`: a geometric schedule, 0 stays 0, the default decay 1.0 is an exact no-op. So `epsilon=0.5, decay=0.5` after N episodes is `0.5·0.5ᴺ` — exploration fades as the policy learns.
+
+**Pin safety** (67.2.3) — with the defaults (`epsilon=0.0`, `epsilon_decay=1.0`) the ε branch is never entered and the decay multiply is a no-op: the proposal RNG stream is the exact pre-v0.53 single-draw path, and A6's determinism pins hold bit-identically (67.5).
+
+### 67.3 Best-episode checkpoint (R3)
+
+**Opt-in `best`** (67.3.1) — `train_policy(env, policy, n_episodes, verbose=False, trace=None, best=False)` gains a final keyword (the D2-trace precedent, SPEC.md 29.2). When `best=True`, the driver tracks the **strictly-greater** maximum of `policy.last_episode_return` across episodes and returns a `"best"` snapshot — `{"episode", "return", "w", "b", "B"}` (with copies of the arrays; `B` is `None` in single-task mode). The key is added to the return dict **only** when `best=True`; the default return dict is byte-identical to the pre-v0.53 shape (67.5).
+
+**Out of scope** (67.3.2) — `train_multi_policy` is deliberately unextended: with round-robin episodes over several tasks, "the best episode" is ambiguous (best per task? best overall? which task's weights?). The single-task checkpoint plus the 67.1 round-trip already cover the "keep the good policy" need.
+
+### 67.4 The self-improving loop in the CLI (R4)
+
+Four flags on `run` (the `fit` path is deliberately untouched — `fit` is a gated single-shot contract, not a learning surface; `policy-report` is untouched too, D2's view): `--rl-save PATH` writes the trained policy after `train_policy` returns; `--rl-load PATH` loads a saved policy **before** training (resume / continue-improving); `--rl-epsilon` and `--rl-epsilon-decay` enable the 67.2 schedule. The canonical chain is the self-improving cycle itself:
+
+```
+autorefine run --task parity-v1 --policy rl --rl-episodes 5 --rl-save pol.npz
+autorefine run --task parity-v1 --policy rl --rl-episodes 5 --rl-load pol.npz
+```
+
+Multi-task transfer rides the same path: a policy trained with `policy-report --multi` (or `train_multi_policy`) carries `B` + `task_names` in the npz, so a loaded policy resumes task-conditioned sampling exactly (67.1.3). Errors stay CLI-faithful: an unloadable file is a `ValueError`/`FileNotFoundError` surfaced by the existing error path (exit 1), not a silent fallback to a fresh policy.
+
+### 67.5 The default path is untouched (the A57 pin anchor)
+
+A1–A56 stay green because every v0.53 addition is opt-in or default-identical: the `epsilon` / `epsilon_decay` parameters default to `(0.0, 1.0)` and the ε branch is never entered (67.2.3); `train_policy`'s `best` keyword defaults to `False` and the `"best"` key never appears in the default return dict (67.3.1); `save_policy` / `load_policy` are new functions no existing caller invokes; the four `run` flags default to `None` / `0.0` / `1.0`, so `run --policy rl`'s policy construction is the pre-v0.53 `MetaRLPolicy(seed=args.seed)` exactly (67.4). A6's construction, determinism, valid-spec, and weight-update pins are re-verified by the suite without modification.
+
+### 67.6 Acceptance (A57)
+
+- **67.1 round-trip (single-task)** — `load_policy(save_policy(p))` on a trained policy: `w` / `b` element-equal (`np.array_equal`), `lr` / `baseline_decay` / `n_updates` / `epsilon` / `epsilon_decay` restored, `B is None` preserved, and the same-seed `propose()` action stream on a fixed state sequence identical to the original's (67.1.3). The saved file carries the `FORMAT_TAG`.
+- **67.1 round-trip (multi-task)** — a `MetaRLPolicy(task_names=[...])` policy with a non-trivial `B` and moved bias rows: the loaded policy's `task_names`, `B`, `w`, `b` are element-equal, and task-conditioned `propose()` (states carrying each task name) is identical across the round-trip (67.1.3).
+- **67.1 guards** — a file with a wrong / missing format tag ⇒ `ValueError`; a file whose weight shape disagrees with `len(ACTIONS)` ⇒ `ValueError`; a missing path ⇒ `FileNotFoundError` (67.1.2).
+- **67.2 ε-greedy** — `epsilon=1.0`: over many draws, every sampled action lies in `relevant_actions(family)` (both for `mlp` and a non-`mlp` family state); same-seed draws are deterministic; and for at least one seed the ε=1.0 stream differs from the ε=0.0 stream (exploration actually samples). Construction guards: `epsilon` outside `[0, 1]` or `epsilon_decay` outside `(0, 1]` ⇒ `ValueError` (67.2.1).
+- **67.2 decay** — `epsilon=0.5, decay=0.5` driven through N episodes of `train_policy` on a tiny parity env ⇒ `policy.epsilon == 0.5·0.5**N` (67.2.2); the default policy's ε stays `0.0` through training (67.2.3).
+- **67.3 checkpoint** — `best=False` (default) return dict has **no** `"best"` key and its key set equals the pre-v0.53 shape; `best=True` on a multi-episode drive returns `best["return"] == max(episode_returns)` and `best["w"]` / `best["b"]` equal to the policy's weights at the end of that strictly-greatest episode (replayed independently), with `best["episode"]` the 0-based index (67.3.1).
+- **67.4 CLI** — `run --task parity-v1 --policy rl --rl-episodes 2 --experiments 2 --runs-dir <tmp> --rl-save <tmp>/pol.npz`: rc 0, the file exists, `load_policy` loads it with `n_updates >= 1`; a follow-up `run ... --rl-load <that file> --rl-episodes 1` exits 0 (the save→load chain, 67.4); `--rl-epsilon` / `--rl-epsilon-decay` are accepted on `run --help`.
+- **67.5 pin** — A6's suite (`tests/test_rl_policy.py`) passes unmodified: default construction, determinism, and the default `train_policy` return dict are bit-identical (67.5).
+- **exports + version** — `save_policy` / `load_policy` are in `autorefine.__all__` (33.1) and resolvable; the version steps to `0.53.0` in both sources (33.1); the A25 index advances (53 acceptance rows; `defined == set(range(1, 58))`).
+
+### 67.7 Milestone (M56)
+
+**M56** — v0.53 "Self-improving RL": the policy is now durable and steerable — `save_policy` / `load_policy` round-trip the full trainable state bit-exactly as a tagged npz (67.1, R1); opt-in ε-greedy exploration with geometric decay over the family-legal catalog (67.2, R2); a best-episode checkpoint via opt-in `train_policy(..., best=True)` (67.3, R3); and the CLI cycle `run --rl-save` → `--rl-load` with the ε flags (67.4, R4) — learn → persist → explore → reuse, in the one home `improver/rl_policy.py`. All opt-in; the default RL path and A6's pins stay bit-identical (67.5) (A57).

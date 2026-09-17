@@ -481,5 +481,5 @@ def test_version_round_conclusion():
     """A47 (33.1): the version is pinned and byte-identical in both sources
     (the conclusion surfaces are an additive, pin-safe round)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.52.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.53.0"
     assert re.search(r"\bA47\b", Path(__file__).read_text(encoding="utf-8"))
