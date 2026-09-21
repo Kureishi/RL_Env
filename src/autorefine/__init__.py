@@ -64,6 +64,8 @@ from .plotting import (
     svg_efficiency_knee,  # the efficiency knee (bang for buck)
     svg_rejection_anatomy,  # the rejection mix + stall story
     svg_is_well_formed,  # 69.3 (v0.55) the SVG render guard
+    visual_card,  # 71.1.2 (v0.57, A61) the visual-card wrapper
+    VISUAL_CSS,  # 71.1 (v0.57, A61) the shared visual-card stylesheet
 )
 from .dossier import build_dossier  # 58.3 (v0.44) the run dossier
 from .provenance import (
@@ -189,8 +191,8 @@ from .rl_dashboard import (  # 68 (v0.54, A58): the RL loop in the dashboard
 
 # SPEC.md 33.1 (C1): single version source — must equal pyproject.toml's
 # [project].version (enforced by the A23 test); one step per feature round
-# (v0.56 ⇒ 0.56.0, M59, SPEC.md 70)
-__version__ = "0.56.0"
+# (v0.57 ⇒ 0.57.0, M60, SPEC.md 71)
+__version__ = "0.57.0"
 
 __all__ = [
     "AutoRefineEnv",
@@ -319,5 +321,7 @@ __all__ = [
     "WORKFLOW_STEPS", "STEP_DONE", "STEP_CURRENT", "STEP_TODO",
     "workflow_state", "svg_workflow_strip", "next_steps",
     "svg_is_well_formed",
+    # v0.57: the visual-card interface (SPEC.md 71, A61)
+    "visual_card", "VISUAL_CSS",
     "__version__",
 ]

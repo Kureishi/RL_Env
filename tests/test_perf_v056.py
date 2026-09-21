@@ -246,13 +246,13 @@ def test_fixed_loop_benchmark_completes(tmp_path):
 # --- 33.1 version + SPEC index (A60) --------------------------------------------
 
 def test_version_and_spec_cite_a60():
-    """A60 (33.1): the version steps to `0.56.0` in both sources;
+    """A60 (33.1): the version steps to `0.57.0` in both sources;
     SPEC §70 cites A60; the A25 index row for M59 lands."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.56.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.57.0"
     init = (REPO / "src" / "autorefine" / "__init__.py").read_text(
         encoding="utf-8")
-    assert '"0.56.0"' in init
+    assert '"0.57.0"' in init
     spec = SPEC.read_text(encoding="utf-8")
     assert "### 70.6 Acceptance (A60)" in spec
     assert "## 70. Hot-path execution performance (v0.56)" in spec

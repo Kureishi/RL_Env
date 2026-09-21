@@ -129,6 +129,8 @@ from autorefine.plotting import (
     svg_efficiency_knee,  # the efficiency knee (bang for buck)
     svg_rejection_anatomy,  # the rejection mix + stall story
     svg_is_well_formed,  # 69.3 (v0.55, A59): the SVG render guard
+    visual_card,  # 71.1.2 (v0.57, A61): the visual-card wrapper
+    VISUAL_CSS,  # 71.1 (v0.57, A61): the shared visual-card stylesheet
 )
 # SPEC.md 56.1 (v0.42): the provenance certificate — the app's Provenance
 # expander (56.4) is a thin renderer over these pure core functions.
@@ -422,27 +424,46 @@ def _pal_svg(pal: dict, stored: str, recompute) -> str:
 
 
 def _svg_html(title: str, html) -> str:
-    """69.3 (v0.55, A59): the SVG render guard, placeholder form — a
-    well-formed SVG passes through unchanged; a truncated/empty fragment
+    """69.3 (v0.55, A59) + 71.1.2 (v0.57, A61): the SVG render guard,
+    placeholder form — a well-formed SVG is wrapped in the visual card
+    (emphasized title + scroll window, 71.1); a truncated/empty fragment
     (or a non-string) degrades to a friendly inline note, so the live
-    placeholders never paint a broken partial. Pure over the renderer's
-    output; the healthy path returns the identical SVG (69.5)."""
+    placeholders never paint a broken partial (69.3.2)."""
     if svg_is_well_formed(html):
-        return html
+        return visual_card(title, html)
     return (f"<p style='color:#777'>{title}: plot unavailable — the "
             "renderer returned no complete SVG</p>")
 
 
 def _svg_block(title: str, html) -> None:
-    """69.3 (v0.55, A59): the SVG render guard, page form — renders a
-    well-formed SVG, or a friendly caption on malformed output (the app
-    never crashes or paints a broken fragment). The healthy path renders
-    the identical SVG (69.5)."""
+    """69.3 (v0.55, A59) + 71.1 (v0.57, A61): the SVG render guard, page
+    form — a well-formed SVG renders inside the visual card (71.1.2:
+    emphasized title, vertical spacing, horizontal scroll window so a
+    chart wider than its column scrolls instead of clipping); malformed
+    output degrades to the friendly caption (69.3.2)."""
     if svg_is_well_formed(html):
-        st.markdown(html, unsafe_allow_html=True)
+        st.markdown(visual_card(title, html), unsafe_allow_html=True)
     else:
         st.caption(f"{title}: plot unavailable — the renderer returned "
                    "no complete SVG")
+
+
+def _svg_pair(left: tuple | None, right: tuple | None) -> None:
+    """71.2 (v0.57, A61): the side-by-side pair — two compact visuals
+    (each a `(title, svg)` entry) render in equal columns; a single
+    present entry renders full width; neither renders nothing. The
+    per-entry guard/caption behavior is unchanged (69.3.2)."""
+    present = [pair for pair in (left, right) if pair is not None]
+    if not present:
+        return
+    if len(present) == 1:
+        title, html = present[0]
+        _svg_block(title, html)
+        return
+    cols = st.columns(2)
+    for col, (title, html) in zip(cols, present):
+        with col:
+            _svg_block(title, html)
 
 
 
@@ -1486,14 +1507,19 @@ def _render_result(res: dict) -> None:
                 pick = st.selectbox("Training curves — experiment",
                                     list(curves), key="curve_pick")
                 _svg_block("Training curves", svg_loss_curves(curves[pick]))
-            if res.get("per_class_svg"):  # C2 (SPEC.md 28.2)
-                _svg_block("Per-class accuracy", res["per_class_svg"])
-            if res.get("confusion_svg"):  # C2 (SPEC.md 28.2)
-                _svg_block("Confusion matrix", res["confusion_svg"])
-            if res.get("difficulty_svg"):  # 58.1 (v0.44): easiest -> hardest
-                _svg_block("Per-input difficulty", res["difficulty_svg"])
-            if res.get("boundary_svg"):  # V3 (SPEC.md 30.3): where it fails on a 2-D plane
-                _svg_block("Decision boundary", res["boundary_svg"])
+            # 71.3 (v0.57, A61): the compact learning views render as
+            # side-by-side pairs (71.2) — both 'how well per class' and
+            # both 'where it struggles' read best next to each other.
+            _svg_pair(
+                ("Per-class accuracy", res["per_class_svg"])  # C2 (SPEC.md 28.2)
+                if res.get("per_class_svg") else None,
+                ("Confusion matrix", res["confusion_svg"])  # C2 (SPEC.md 28.2)
+                if res.get("confusion_svg") else None)
+            _svg_pair(
+                ("Per-input difficulty", res["difficulty_svg"])
+                if res.get("difficulty_svg") else None,
+                ("Decision boundary", res["boundary_svg"])
+                if res.get("boundary_svg") else None)
             gallery = res.get("error_gallery")
             if gallery:  # C3 (SPEC.md 28.3): misclassified holdout items
                 _render_gallery(gallery)
@@ -2077,6 +2103,10 @@ def _render_quickstart(seed: int, runs_dir: str) -> None:
 def main() -> None:
     st.set_page_config(page_title="AutoRefine dashboard", page_icon=":gear:",
                        layout="wide")
+    # 71.1 (v0.57, A61): the shared visual-card stylesheet — emphasized
+    # titles, vertical spacing, and the horizontal scroll window for
+    # every rendered SVG on the page (71.1.3).
+    st.markdown(f"<style>{VISUAL_CSS}</style>", unsafe_allow_html=True)
     st.title("AutoRefine — autonomous model improvement")
     st.caption(
         f"AutoRefine v{__version__} — upload a CSV (or point at a "

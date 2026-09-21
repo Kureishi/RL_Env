@@ -77,6 +77,7 @@ numbers and carry none.)
 | M57 | v0.54   | 68     | A58 | tests/test_rl_dashboard_v054.py |
 | M58 | v0.55   | 69     | A59 | tests/test_workflow_v055.py |
 | M59 | v0.56   | 70     | A60 | tests/test_perf_v056.py |
+| M60 | v0.57   | 71     | A61 | tests/test_visuals_v057.py |
 
 ---
 
@@ -6821,3 +6822,59 @@ Deliberately out of scope (prior house ruling, high pin risk / low measured gain
 ### 70.7 Milestone (M59)
 
 **M59** — v0.56 "Hot-path execution performance": the training hot path no longer pays for work that changes no result — lazy optimizer state (70.1, R1), cached row indices + the label-smoothing fast path (70.2, R2), hoisted activation dispatch (70.3, R3) — the fixed-loop benchmark improves 482 ms → 115 ms (≈4.2×) (70.5, R4), and all 1110 tests including A6's bit-exact pins pass unmodified (70.4) (A60).
+
+## 71. The visuals interface — cards, spacing, side-by-side layout (v0.57)
+
+Directive: *upgrade the interface for visuals (especially "Results → Learning views"); arrange charts beside each other where their rendered size suits it; give every visual emphasized spacing and a title with no text cutoff; keep text unconstrained with scrolling inside the visuals.*
+
+The dashboard's ~40 hand-rolled SVGs were rendered bare — an anonymous `st.markdown(svg)` with no title, no guaranteed spacing, and a chart wider than its column clipped at the edge. v0.57 gives every rendered SVG a standard **visual card**: an emphasized title, vertical breathing room, and a horizontal scroll window — and re-lays out the Learning views so the compact companions read as pairs:
+
+- **71.1** `VISUAL_CSS` (the shared card stylesheet) + `visual_card(title, svg, caption=None)` (the card wrapper) — pure, streamlit-free, in `plotting` (71.1.1–71.1.4);
+- **71.2** the app's `_svg_pair` helper — two compact visuals side by side, one present full width, neither renders nothing (71.2.1);
+- **71.3** the Learning views arrangement — the per-class/confusion pair and the difficulty/boundary pair (71.3.1);
+- **71.4** the card is applied app-wide by upgrading the two existing guard helpers (`_svg_html` / `_svg_block`), so every section — not only Learning views — gains title + spacing + scroll, and the 69.3 degrade contract is preserved;
+- **71.5** A1–A60 stay green: additive core, two helper rewrites, one section rearrangement; every pinned token (`def _svg_html(`, `def _svg_block(`, the "plot unavailable" caption) survives verbatim (71.7);
+- **71.6** G2 — `visual_card` is pure and deterministic: identical inputs give byte-identical markup; the default rendering path is untouched for malformed input (the same friendly note as 69.3.2).
+
+### 71.1 The visual card (core, streamlit-free)
+
+`plotting.py` — next to the 69.3 guard (`svg_is_well_formed`):
+
+- **71.1.1 `VISUAL_CSS`** — the stylesheet constant: `.ar-visual` (vertical spacing), `.ar-visual-title` (emphasized: bold, larger, bottom border), `.ar-visual-scroll` (`overflow-x: auto; max-width: 100%`) with `.ar-visual-scroll svg { display: block; max-width: none }` — a chart keeps its natural width and **scrolls instead of being clipped** in a narrow column (71.1.3) — and `.ar-visual-cap` (the optional caption line). Integer px values and hex colors only (the 35.2 app-language scan forbids fractional literals in non-docstring strings).
+- **71.1.2 `visual_card(title, svg, caption=None)`** — a well-formed SVG (71.1, the 69.3 guard) is wrapped in the card markup: title div, scroll window, optional caption; a truncated/empty fragment (or non-string) returns the same friendly "plot unavailable" note the app's guards already use (69.3.2), so the card never paints a broken partial. Pure and deterministic (71.6, G2); no new dependency (66.5).
+- **71.1.3 no text cutoff** — the scroll window means a 640 px chart in a 300 px column is fully reachable by horizontal scrolling, and the emphasized title and caption are HTML text outside the scroll window, so they wrap instead of truncating.
+- **71.1.4 exports** — both names are in `autorefine.__all__` and re-export the very objects (33.1).
+
+### 71.2 Side-by-side pairs (app)
+
+- **71.2.1 `_svg_pair(left, right)`** — each argument is a `(title, svg)` entry or `None`: both present render in two equal `st.columns`; one present renders full width; neither renders nothing. Each entry keeps the per-entry guard/caption behavior (69.3.2).
+
+### 71.3 The Learning views arrangement (app)
+
+- **71.3.1** the `Results → Learning views` subtab now reads top-down as: Training curves (full width) → **Per-class accuracy | Confusion matrix** (pair — both say "how well per class") → **Per-input difficulty | Decision boundary** (pair — both say "where it struggles") → Error gallery (full width) → Final architecture (full width). The pairing rationale is rendered size: the paired views are the compact ones (bars 640 px, matrix 56 px cells, ranking rows, 640×560 boundary); the wide/full views keep a full-width row. The section's `st.subheader` and the outer data-presence guard are unchanged.
+
+### 71.4 App-wide card treatment (app)
+
+- **71.4.1** `main()` injects the `<style>` block once, immediately after `st.set_page_config` — every page (Setup, Run, Results, Compare, Experiments) carries the card rules.
+- **71.4.2** the two 69.3 guard helpers are the only render seams: `_svg_html` (placeholder form, live drain) returns `visual_card(title, html)` on the healthy path; `_svg_block` (page form) renders `st.markdown(visual_card(title, html))`. The malformed paths are byte-identical to 69.3.2 (the inline note / the "plot unavailable" caption). Upgrading the two helpers therefore upgrades **every** visual on the page — the live placeholders, the Research & conclusion views, the Parameters & what-if panels — not only the Learning views.
+
+### 71.5 A1–A60 stay green (the A61 pin anchor)
+
+Every addition is additive core or app-structural: `visual_card` / `VISUAL_CSS` are new names no existing caller invokes (the 33.1 export pattern); `_svg_html` / `_svg_block` keep their `def` lines and their malformed-path output verbatim (the A59 pins `def _svg_html(`, `def _svg_block(`, and the "plot unavailable" caption assertion pass unmodified); the Learning views rearrangement changes only DOM order of four existing views (the pinned `Learning views` subheader and the six subtab labels survive); the bandit/search default run, the worker protocol, and the 35.2 app-language scan (now covering the new constants — integer px + hex only) pass. The full suite (1120 tests) runs green (71.7).
+
+### 71.6 Purity and determinism (G2)
+
+`visual_card` is a pure string function: same `title`/`svg`/`caption` give byte-identical markup; no globals are read or written; the `caption=None` default is the common path (all app call sites today pass no caption), so the default path of the app is unchanged apart from the card wrapper itself (71.4.2).
+
+### 71.7 Acceptance (A61)
+
+- **71.1.1 stylesheet** — `VISUAL_CSS` contains all five card rules (`.ar-visual`, `.ar-visual-title`, `.ar-visual-scroll`, `.ar-visual-scroll svg`, `.ar-visual-cap`), uses integer px values and hex colors only, and passes the 35.2 app-language banned + bare-section scans over its exact text.
+- **71.1.2 card** — `visual_card` on a well-formed SVG yields markup carrying the emphasized title div, the scroll window, and the SVG exactly once; with a caption it appends the caption line; on a truncated fragment (or non-string) it returns the "plot unavailable" note; identical inputs give byte-identical output (71.6).
+- **71.4 app wiring** — AppTest (streamlit optional-skipped): after a tiny run on the quadrant CSV fixture, the page carries the `<style>` card block and the Learning-views pair titles in card markup (`.ar-visual-title`); with a renderer monkeypatched (bound-name, pre-`run()`) to emit truncated markup, the app completes without exception and a "plot unavailable" caption appears (69.3.2 preserved).
+- **71.2–71.3 layout** — a source scan asserts the app wires `VISUAL_CSS` into `main()` and imports `visual_card`, defines `_svg_pair(`, and renders the two Learning-views pairs.
+- **71.5 pins** — the A59 suite (`tests/test_workflow_v055.py`) passes unmodified; `tests/test_app_language.py`'s module scan passes (35.2); the version steps to `0.57.0` in both sources (33.1); the A25 index advances (`defined == set(range(1, 62))`, 57 acceptance rows).
+- **exports** — `visual_card` / `VISUAL_CSS` are in `autorefine.__all__` (33.1) and resolvable as the very objects.
+
+### 71.8 Milestone (M60)
+
+**M60** — v0.57 "Visuals interface": every rendered SVG on the dashboard gains a standard visual card — emphasized title, vertical spacing, and a horizontal scroll window so charts scroll instead of clipping (71.1, R1); the compact Learning views read as two side-by-side pairs (71.3, R2); the card is applied app-wide through the two existing guard seams with the 69.3 degrade contract preserved verbatim (71.4, R3); and all 1120+ tests including the A59 pins pass (71.5, R4) (A61).

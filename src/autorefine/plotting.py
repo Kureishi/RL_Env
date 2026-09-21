@@ -175,6 +175,57 @@ def svg_is_well_formed(svg) -> bool:
     return True
 
 
+# SPEC.md 71.1 (v0.57, A61): the dashboard's shared visual-card stylesheet.
+# Every rendered SVG is wrapped in a card (71.1.2) carrying an emphasized
+# title, vertical spacing, and a horizontal scroll window — a chart wider
+# than its column scrolls instead of being clipped (71.1.3). Integer px
+# values and hex colors only (the app-language scan forbids unitless or
+# fractional literals in non-docstring strings; 66.5).
+VISUAL_CSS: str = """
+.ar-visual { margin: 10px 0 22px; }
+.ar-visual-title {
+  font-weight: 600;
+  font-size: 16px;
+  margin: 0 0 8px;
+  padding-bottom: 6px;
+  border-bottom: 2px solid #d0d2d7;
+}
+.ar-visual-scroll { overflow-x: auto; max-width: 100%; }
+.ar-visual-scroll svg { display: block; max-width: none; }
+.ar-visual-cap { margin-top: 6px; font-size: 13px; color: #666673; }
+""".strip() + "\n"
+
+
+def visual_card(title: str, svg: str, caption: str | None = None) -> str:
+    """SPEC.md 71.1.2 (v0.57, A61): the visual card — the standard page
+    wrapper for one hand-rolled SVG.
+
+    A well-formed SVG (71.1, `svg_is_well_formed`) is wrapped in
+    `.ar-visual` markup: an emphasized title (`.ar-visual-title`), a
+    scroll window (`.ar-visual-scroll`) so the chart keeps its natural
+    width and scrolls instead of being cut off in a narrow column
+    (71.1.3), and an optional caption line (`.ar-visual-cap`). A
+    truncated/empty fragment (or a non-string) returns the same friendly
+    "plot unavailable" note the app's guards already use (69.3.2), so
+    the card never paints a broken partial. Pure and deterministic (G2);
+    identical inputs give identical markup (71.6); no new dependency
+    (66.5)."""
+    if not svg_is_well_formed(svg):
+        return (f"<p style='color:#777777'>{title}: plot unavailable — the "
+                "renderer returned no complete SVG</p>")
+    parts = [
+        '<div class="ar-visual">',
+        f'<div class="ar-visual-title">{title}</div>',
+        '<div class="ar-visual-scroll">',
+        svg,
+        "</div>",
+    ]
+    if caption:
+        parts.append(f'<div class="ar-visual-cap">{caption}</div>')
+    parts.append("</div>")
+    return "\n".join(parts)
+
+
 @contextmanager
 def _styled(palette: str = "default", dark: bool = False):
     """SPEC.md 51.4.1/51.4.2 (v0.37): scoped palette + dark-mode overrides.
