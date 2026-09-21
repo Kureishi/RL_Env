@@ -76,6 +76,7 @@ numbers and carry none.)
 | M56 | v0.53   | 67     | A57 | tests/test_rl_selfimprove_v053.py |
 | M57 | v0.54   | 68     | A58 | tests/test_rl_dashboard_v054.py |
 | M58 | v0.55   | 69     | A59 | tests/test_workflow_v055.py |
+| M59 | v0.56   | 70     | A60 | tests/test_perf_v056.py |
 
 ---
 
@@ -6756,3 +6757,67 @@ A1–A58 stay green because every v0.55 addition is additive or app-structural: 
 ### 69.7 Milestone (M58)
 
 **M58** — v0.55 "Workflow efficiency + result-view tabs": the Results page is grouped into six named subtabs with all deliverables in one (69.1, R1); the live drain splits into Live / Decision views / Notes subtabs (69.2, R2); a pure SVG well-formedness guard turns broken images into graceful captions at ~30 render sites (69.3, R3); and the streamlit-free `workflow` core — state machine, step strip, next-steps advice — makes the procedure legible on every screen (69.4, R4). The bandit/search default path, the worker protocol, and every source-wire pin stay intact (69.5) (A59).
+
+## 70. Hot-path execution performance (v0.56)
+
+Directive: *optimize all code where feasible for faster/efficient execution*. Profiling the fixed DashboardRunner loop (baseline + 2 experiments; cProfile: 154,297 calls, 0.123 s of which `models/` dominated) localized the Python-level cost to per-call allocations and dispatch inside the training hot path — `np.zeros_like` 9800 calls (≈8400 of them from `dict.get(key, default)` defaults evaluated on *every* call even when the key was already present), `np.arange` 1496 calls, and per-layer activation string dispatch (3008 calls). v0.56 removes that waste **without changing a single computed value**:
+
+- **70.1** Momentum/Adam optimizer state is created lazily — the zero vector is allocated only on a parameter's first step;
+- **70.2** the MLP + ConvNet softmax branch caches `np.arange(n)` per batch size and reuses the one-hot array directly when `label_smoothing == 0.0` (bit-identical: `x * 1.0` and `x + 0.0` are exact);
+- **70.3** activation dispatch is hoisted — the bound `act` / `act_grad` function pairs are resolved once at construction instead of per layer, per call;
+- **70.4** A1–A59 stay green: every fix is semantics-identical (same ops, same order, same RNG draws — G2-safe), proven by the full suite including A6's bit-exact pins;
+- **70.5** the fixed-loop benchmark drops 482 ms → 115 ms (≈4.2×) with `np.zeros_like` calls 9800 → 1412.
+
+The through-line: *make it faster by removing work that changes no result — never by reordering work that does.* The A6 bit-exact training-sequence pins are the safety net and pass unmodified; the full test suite itself also runs faster (3:53 vs 4:57 pre-round).
+
+### 70.1 Lazy optimizer state (R1)
+
+`optimizers.py` — Momentum and Adam wrote `state.get("v", np.zeros_like(param))`. `dict.get`'s default argument is **evaluated on every call**, so each parameter step allocated a fresh zero vector even when the state already existed (≈8400 of the 9800 `np.zeros_like` calls in the 2-experiment loop). The fix allocates only when the state is absent:
+
+```python
+v = state.get("v")
+if v is None:
+    v = np.zeros_like(param)
+```
+
+Identical semantics: a parameter's first step starts from zeros, later steps reuse the stored state — same ops, same order, same values (the 70.6 acceptance asserts first-step equality against an explicit-zeros reference).
+
+### 70.2 MLP + ConvNet softmax hot path (R2)
+
+`mlp.py` and `convnet.py` (the two `loss_and_grads` implementations) share the fix:
+- **70.2.1** `onehot[np.arange(n), y] = 1.0` — `np.arange(n)` was rebuilt on every call although batch size is constant within a training run; the module-level `_row_idx(n)` cache (keyed by batch size) now returns the same array.
+- **70.2.2** the smoothing line `target = (1.0 - eps) * onehot + eps / n_out` — for `eps == 0.0` (the default and the common case) this is **bit-identical** to `onehot` (multiply-by-1.0 / add-0.0 are exact on a 0/1 array), so the common path skips two array passes: `target = onehot if eps == 0.0 else ...`.
+
+### 70.3 Hoisted activation dispatch (R3)
+
+`mlp.py` defines bound function pairs per activation — `_ACT_FNS`: tanh → `(np.tanh, tanh_grad)`, relu → `(relu_act, relu_grad)` — the same expressions the string-dispatch helpers used. `MLP.__init__` / `MLP.load` and `ConvNet.__init__` / `ConvNet.load` bind `self._act_fn` / `self._act_grad_fn` once, and `forward` / `loss_and_grads` call the bound functions: no per-layer, per-call string compare + branch (3008 dispatches per loop). The public `_activation` / `_activation_grad` helpers are unchanged (ConvNet still imports them; external callers keep working).
+
+### 70.4 A1–A59 stay green (the A60 pin anchor)
+
+Every fix is semantics-preserving: same arithmetic, same order, same RNG draws (G2-safe — no fusion, no reduction reordering, no draw-count change). The 1110-test suite — A6's bit-exact training-sequence pins, the T2 weight pin, the A41–A59 source-wire and app suites — passes unmodified. The suite's own wall time improves (3:53 vs 4:57).
+
+### 70.5 Measured impact (R4)
+
+Fixed benchmark — 120-row classification CSV, baseline + 2 experiments, `search_quality="legacy"`, `Budget(2, 300.0, 30.0)`, same machine/session:
+
+| metric | before (v0.55) | after (v0.56) |
+|---|---|---|
+| loop wall time | 482 ms | 115 ms (≈4.2×) |
+| profiled calls | 154,297 | 110,749 |
+| `np.zeros_like` calls | 9800 | 1412 |
+| `np.arange` calls (top-30) | 1496 | 0 |
+| optimizer `step` cumtime | 0.027 s (8400 calls) | 0.013 s (8400 calls) |
+
+Deliberately out of scope (prior house ruling, high pin risk / low measured gain): fused MLP forward/backward, vectorized tree bagging (any float-order change breaks bit-identical determinism), and lazy `__init__` imports (fresh-subprocess import ≈153 ms total; the 1.4 s figure was cold-start/AV, and facade surgery is not worth it).
+
+### 70.6 Acceptance (A60)
+
+- **70.1 optimizers** — Momentum and Adam first steps on a fresh state equal the explicit-zeros reference bit-for-bit (`np.array_equal` on params and state); the state dict gains its entries only after the first step; repeated steps are deterministic.
+- **70.2 fast paths** — MLP softmax `loss_and_grads` with `label_smoothing=0`, `0.0`, and the pre-round explicit expression returns byte-identical loss and gradients (`.tobytes()`); `_row_idx(n)` is correct and deterministic; the relu + mse paths stay finite.
+- **70.3 dispatch** — for both activations, MLP and ConvNet `forward` / `loss_and_grads` agree with the `_activation` / `_activation_grad` reference path on identical weights/inputs (the hoisted functions compute the same values); `MLP.save/load` and `ConvNet.save/load` round-trips preserve the bound dispatch (load → identical `forward`).
+- **70.4 pins** — A1–A59 (incl. A6's bit-exact sequence) pass unmodified; `tests/test_app_language.py`'s module scan passes (35.2); the version steps to `0.56.0` in both sources (33.1); the A25 index advances (`defined == set(range(1, 61))`).
+- **70.5 benchmark** — the fixed-loop benchmark completes with a verdict (sanity: the optimized loop is functionally intact); no new exports are required (the fixes are internal to `models/`), so the 33.1 re-export pins stay unchanged.
+
+### 70.7 Milestone (M59)
+
+**M59** — v0.56 "Hot-path execution performance": the training hot path no longer pays for work that changes no result — lazy optimizer state (70.1, R1), cached row indices + the label-smoothing fast path (70.2, R2), hoisted activation dispatch (70.3, R3) — the fixed-loop benchmark improves 482 ms → 115 ms (≈4.2×) (70.5, R4), and all 1110 tests including A6's bit-exact pins pass unmodified (70.4) (A60).

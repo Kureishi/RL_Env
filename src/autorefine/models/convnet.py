@@ -23,7 +23,9 @@ import numpy as np
 
 from ..config import CONV_FILTERS, SpecError
 
-from .mlp import HEADS, _activation, _activation_grad
+from .mlp import (
+    HEADS, _ACT_FNS, _activation, _activation_grad, _row_idx,
+)
 
 # SPEC.md 25.3: FC hidden size is fixed (deliberately off the spec surface)
 FC_HIDDEN = 32
@@ -115,6 +117,7 @@ class ConvNet:
         self.c1, self.c2 = c1, c2
         self.n_out = int(n_out)
         self.activation = activation
+        self._act_fn, self._act_grad_fn = _ACT_FNS[activation]  # SPEC.md 70
         self.head = head
         self.init_scale = float(init_scale)
         self.flat_dim = flat_dim
@@ -167,14 +170,15 @@ class ConvNet:
             return out.transpose(0, 2, 1).reshape(n, w.shape[0], oh, ow), (oh, ow)
 
         z1, (oh1, ow1) = _conv(x, w1, b1)
-        a1 = _activation(self.activation, z1)
+        act = self._act_fn  # SPEC.md 70: dispatch hoisted out of the pipeline
+        a1 = act(z1)
         p1 = _avg_pool(a1)
         z2, (oh2, ow2) = _conv(p1, w2, b2)
-        a2 = _activation(self.activation, z2)
+        a2 = act(z2)
         p2 = _avg_pool(a2)
         f = p2.reshape(n, self.flat_dim)
         zf = f @ wf + bf
-        af = _activation(self.activation, zf)
+        af = act(zf)
         logits = af @ wh + bh
         self._cache = {
             "x": x, "z1": z1, "a1": a1, "p1": p1, "oh1": oh1, "ow1": ow1,
@@ -197,19 +201,21 @@ class ConvNet:
             z = logits - logits.max(axis=1, keepdims=True)
             logz = z - np.log(np.exp(z).sum(axis=1, keepdims=True))
             onehot = np.zeros_like(logz)
-            onehot[np.arange(n), y] = 1.0
+            onehot[_row_idx(n), y] = 1.0  # SPEC.md 70: cached arange
             eps = float(label_smoothing)
-            target = (1.0 - eps) * onehot + eps / self.n_out
+            # SPEC.md 70: eps == 0.0 is bit-identical to `onehot` (see mlp).
+            target = onehot if eps == 0.0 else (1.0 - eps) * onehot + eps / self.n_out
             loss = float(-(target * logz).sum(axis=1).mean())
             p = np.exp(logz)
             dz = (p - target) / n
 
         c = self._cache
+        act_grad = self._act_grad_fn  # SPEC.md 70
         # head
         gw_h = c["af"].T @ dz
         gb_h = dz.sum(axis=0)
         daf = dz @ self.layers[3][0].T
-        daf = daf * _activation_grad(self.activation, c["zf"], c["af"])
+        daf = daf * act_grad(c["zf"], c["af"])
         # fc
         gw_f = c["f"].T @ daf
         gb_f = daf.sum(axis=0)
@@ -218,12 +224,12 @@ class ConvNet:
         # pool2 backprop (2x2 avg: scatter each output's grad to its 2x2 window,
         # divided by the true block size so it matches the forward `.mean`)
         da2 = _avg_pool_grad(dp2, c["a2"].shape[2], c["a2"].shape[3])
-        da2 = da2 * _activation_grad(self.activation, c["z2"], c["a2"])
+        da2 = da2 * act_grad(c["z2"], c["a2"])
         # conv2
         dw2, db2, da1 = _conv_grad(c["p1"], da2, self.layers[1][0], c["oh2"], c["ow2"])
         # pool1 backprop
         da1 = _avg_pool_grad(da1, c["a1"].shape[2], c["a1"].shape[3])
-        da1 = da1 * _activation_grad(self.activation, c["z1"], c["a1"])
+        da1 = da1 * act_grad(c["z1"], c["a1"])
         # conv1
         dw1, db1, _dx = _conv_grad(c["x"], da1, self.layers[0][0], c["oh1"], c["ow1"])
 
@@ -269,6 +275,7 @@ class ConvNet:
         m.c1, m.c2 = c1, c2
         m.n_out = n_out
         m.activation = activation
+        m._act_fn, m._act_grad_fn = _ACT_FNS[activation]  # SPEC.md 70
         m.head = head
         m.init_scale = init_scale
         m.flat_dim = flat_dim

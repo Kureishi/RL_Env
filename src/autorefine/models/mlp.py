@@ -31,6 +31,39 @@ def _activation_grad(name: str, x: np.ndarray, out: np.ndarray) -> np.ndarray:
     raise SpecError(f"unknown activation {name!r}")
 
 
+# --- SPEC.md 70: hot-path helpers (bit-identical values, less per-call work) ---
+_ARANGE_CACHE: dict[int, np.ndarray] = {}
+
+
+def _row_idx(n: int) -> np.ndarray:
+    """Cached `np.arange(n)`: batch size is stable within a training run, so
+    re-creating it on every `loss_and_grads` call was pure overhead."""
+    idx = _ARANGE_CACHE.get(n)
+    if idx is None:
+        idx = _ARANGE_CACHE[n] = np.arange(n)
+    return idx
+
+
+def _tanh_grad(x: np.ndarray, out: np.ndarray) -> np.ndarray:
+    return 1.0 - out * out
+
+
+def _relu_act(x: np.ndarray) -> np.ndarray:
+    return np.maximum(x, 0.0)
+
+
+def _relu_grad(x: np.ndarray, out: np.ndarray) -> np.ndarray:
+    return (x > 0).astype(np.float64)
+
+
+# Bound function pairs per activation: hoists the name lookup out of the
+# per-layer loop (identical results to `_activation` / `_activation_grad`).
+_ACT_FNS: dict[str, tuple] = {
+    "tanh": (np.tanh, _tanh_grad),
+    "relu": (_relu_act, _relu_grad),
+}
+
+
 class MLP:
     """input (n, d_in) -> hidden layers -> (n, n_out) logits."""
 
@@ -60,6 +93,7 @@ class MLP:
             b = np.zeros(fan_out)
             self.layers.append((w, b))
         self.activation = activation
+        self._act_fn, self._act_grad_fn = _ACT_FNS[activation]  # SPEC.md 70
         self.in_dim = in_dim
         self.n_out = n_out
         self.head = head
@@ -69,9 +103,10 @@ class MLP:
     def forward(self, x: np.ndarray) -> np.ndarray:
         self._cache = []
         a = x
+        act = self._act_fn  # SPEC.md 70: dispatch hoisted out of the loop
         for i, (w, b) in enumerate(self.layers[:-1]):
             z = a @ w + b
-            h = _activation(self.activation, z)
+            h = act(z)
             self._cache.append((a, z, h))
             a = h
         logits = a @ self.layers[-1][0] + self.layers[-1][1]
@@ -102,9 +137,12 @@ class MLP:
             z = logits - logits.max(axis=1, keepdims=True)
             logz = z - np.log(np.exp(z).sum(axis=1, keepdims=True))
             onehot = np.zeros_like(logz)
-            onehot[np.arange(n), y] = 1.0
+            onehot[_row_idx(n), y] = 1.0  # SPEC.md 70: cached arange
             eps = float(label_smoothing)
-            target = (1.0 - eps) * onehot + eps / self.n_out
+            # SPEC.md 70: with eps == 0.0 the smoothing expression is
+            # bit-identical to `onehot` (x*1.0, x+0.0 are exact), so skip
+            # the two extra array passes in the common case.
+            target = onehot if eps == 0.0 else (1.0 - eps) * onehot + eps / self.n_out
             loss = float(-(target * logz).sum(axis=1).mean())
             # dL/dlogits for mean softmax CE with smoothed targets
             p = np.exp(logz)
@@ -122,7 +160,7 @@ class MLP:
                 # chain through the PREVIOUS layer's nonlinearity (its z/h)
                 z_prev = self._cache[i - 1][1]
                 h_prev = self._cache[i - 1][2]
-                d = (d @ w.T) * _activation_grad(self.activation, z_prev, h_prev)
+                d = (d @ w.T) * self._act_grad_fn(z_prev, h_prev)  # SPEC.md 70
             grads.append((gw, gb))
         grads.reverse()
         return loss, grads
@@ -156,6 +194,7 @@ class MLP:
         m = cls.__new__(cls)
         m.layers = layers
         m.activation = activation
+        m._act_fn, m._act_grad_fn = _ACT_FNS[activation]  # SPEC.md 70
         m.in_dim = in_dim
         m.n_out = n_out
         m.head = head  # default keeps pre-extension checkpoints loadable

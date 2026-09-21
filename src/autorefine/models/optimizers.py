@@ -24,7 +24,12 @@ class Momentum:
         self.lr = lr
 
     def step(self, param: np.ndarray, grad: np.ndarray, state: dict, t: int) -> None:
-        v = state.get("v", np.zeros_like(param))
+        # SPEC.md 70: lazy default — `dict.get(key, default)` evaluates the
+        # default on EVERY call; create the zero vector only on the first step
+        # (identical semantics, no per-step allocation).
+        v = state.get("v")
+        if v is None:
+            v = np.zeros_like(param)
         v = self.mu * v + grad
         state["v"] = v
         param -= self.lr * v
@@ -40,8 +45,13 @@ class Adam:
         self.lr = lr
 
     def step(self, param: np.ndarray, grad: np.ndarray, state: dict, t: int) -> None:
-        m = state.get("m", np.zeros_like(param))
-        v = state.get("v", np.zeros_like(param))
+        # SPEC.md 70: lazy defaults (see Momentum.step) — identical semantics.
+        m = state.get("m")
+        if m is None:
+            m = np.zeros_like(param)
+        v = state.get("v")
+        if v is None:
+            v = np.zeros_like(param)
         m = self.b1 * m + (1 - self.b1) * grad
         v = self.b2 * v + (1 - self.b2) * grad * grad
         mhat = m / (1 - self.b1 ** t)
