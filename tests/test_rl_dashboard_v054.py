@@ -577,7 +577,7 @@ def test_app_compare_multi_task_panel(tmp_path):
 def test_exports_and_version():
     """A58 (33.1): the five new names are in `autorefine.__all__` and
     resolvable (the package re-exports the very objects); the version
-    steps to `0.57.0` in both sources."""
+    steps to `0.58.0` in both sources."""
     for name in ("RLRunner", "RLMultiRunner", "describe_policy",
                  "policy_to_bytes", "policy_from_bytes"):
         assert name in autorefine.__all__
@@ -590,4 +590,4 @@ def test_exports_and_version():
     assert autorefine.policy_to_bytes is rp.policy_to_bytes
     assert autorefine.policy_from_bytes is rp.policy_from_bytes
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.57.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.60.0"

@@ -1,0 +1,93 @@
+{
+  "baseline_effective": 77.48730964999413,
+  "baseline_score": 77.5,
+  "best_score_at_1s": 77.5,
+  "best_spec": {
+    "activation": "tanh",
+    "architecture": [
+      16,
+      8
+    ],
+    "batch_size": 32,
+    "early_stopping_patience": 0,
+    "gradient_clipping": 0.0,
+    "init_scale": 1.0,
+    "input_noise": 0.02,
+    "knn_k": 5,
+    "label_smoothing": 0.0,
+    "learning_rate": 0.001,
+    "lr_schedule": "constant",
+    "model_family": "mlp",
+    "optimizer": "momentum",
+    "train_steps": 400,
+    "weight_decay": 0.0001
+  },
+  "effective_improvement_factor": 1.0,
+  "efficiency_at_1s": 1.0,
+  "experiments_run": 1,
+  "final_best_effective": 77.48730964999413,
+  "final_best_score": 77.5,
+  "finished_reason": "duplicate_stall",
+  "improvement_factor": 1.0,
+  "mutation_win_rate": {
+    "architecture": {
+      "trials": 1,
+      "wins": 0
+    },
+    "model_family": {
+      "trials": 1,
+      "wins": 0
+    }
+  },
+  "pareto_frontier": [
+    {
+      "score": 77.5,
+      "spec_hash": "362bf6efd9c24720",
+      "train_seconds": 0.025380700011737645
+    }
+  ],
+  "run_config": {
+    "autorefine_version": "0.59.0",
+    "biases": [],
+    "block_size": 512,
+    "ci_blocks": 8,
+    "constraints": [],
+    "curriculum": false,
+    "dataset_size": 1920,
+    "efficiency_weight": 0.5,
+    "ensemble_top_k": 0,
+    "gen_gap_penalty": 0.5,
+    "kfold": 0,
+    "max_experiments": 24,
+    "max_train_seconds": 25.0,
+    "max_wall_seconds": 1800.0,
+    "pins": [],
+    "policy": "rl",
+    "rl_episodes": 8,
+    "schema": "autorefine.run_config/1",
+    "screen_frac": 1.0,
+    "seed": 7,
+    "stall_patience": null,
+    "target": 95.0,
+    "task": "csv",
+    "task_config": {
+      "label": "label",
+      "path": "examples\\sin20\\sin20_train.csv"
+    },
+    "z_accept": 1.0
+  },
+  "search_quality": {
+    "block_size": 512,
+    "ci_blocks": 8,
+    "efficiency_weight": 0.5,
+    "gen_gap_penalty": 0.5,
+    "z_accept": 1.0
+  },
+  "seed": 7,
+  "task": "csv",
+  "task_config": {
+    "label": "label",
+    "path": "examples\\sin20\\sin20_train.csv"
+  },
+  "wall_seconds": 0.067
+}

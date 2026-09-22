@@ -215,7 +215,7 @@ class ConvNet:
         gw_h = c["af"].T @ dz
         gb_h = dz.sum(axis=0)
         daf = dz @ self.layers[3][0].T
-        daf = daf * act_grad(c["zf"], c["af"])
+        daf *= act_grad(c["zf"], c["af"])  # SPEC.md 74: in-place (bit-identical)
         # fc
         gw_f = c["f"].T @ daf
         gb_f = daf.sum(axis=0)
@@ -224,12 +224,12 @@ class ConvNet:
         # pool2 backprop (2x2 avg: scatter each output's grad to its 2x2 window,
         # divided by the true block size so it matches the forward `.mean`)
         da2 = _avg_pool_grad(dp2, c["a2"].shape[2], c["a2"].shape[3])
-        da2 = da2 * act_grad(c["z2"], c["a2"])
+        da2 *= act_grad(c["z2"], c["a2"])  # SPEC.md 74: in-place (bit-identical)
         # conv2
         dw2, db2, da1 = _conv_grad(c["p1"], da2, self.layers[1][0], c["oh2"], c["ow2"])
         # pool1 backprop
         da1 = _avg_pool_grad(da1, c["a1"].shape[2], c["a1"].shape[3])
-        da1 = da1 * act_grad(c["z1"], c["a1"])
+        da1 *= act_grad(c["z1"], c["a1"])  # SPEC.md 74: in-place (bit-identical)
         # conv1
         dw1, db1, _dx = _conv_grad(c["x"], da1, self.layers[0][0], c["oh1"], c["ow1"])
 

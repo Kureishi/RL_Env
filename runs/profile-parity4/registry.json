@@ -1,0 +1,17 @@
+[
+  {
+    "run_id": "parity-v1-seed7-20260922-144010",
+    "task": "parity-v1",
+    "seed": 7,
+    "policy": "bandit",
+    "final_score": 71.728515625,
+    "target": null,
+    "met_target": null,
+    "finished_reason": "budget_exhausted",
+    "experiments_run": 8,
+    "wall_seconds": 0.593,
+    "config_fp": "d5ded2dd96e4",
+    "parent_run": null,
+    "timestamp": "2026-09-22T18:40:11Z"
+  }
+]

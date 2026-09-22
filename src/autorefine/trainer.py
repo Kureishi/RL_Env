@@ -161,22 +161,37 @@ def _train_neural(
     best_layers: list[tuple[np.ndarray, np.ndarray]] | None = None
     bad = 0  # consecutive non-improving val steps
 
-    for t in range(1, spec.train_steps + 1):
-        idx = rng.integers(0, n_tr, spec.batch_size)
+    # SPEC.md 74: hoist loop-invariant spec reads (values unchanged; the
+    # per-step attribute lookups were pure Python overhead)
+    batch = spec.batch_size
+    noise = spec.input_noise
+    smoothing = spec.label_smoothing
+    wd = spec.weight_decay
+    base_lr = spec.learning_rate
+    # SPEC.md 74: `_scheduled_lr` returns base_lr for EVERY t when
+    # schedule == "constant" (or total <= 0) — its own early return — so a
+    # single assignment before the loop is value-identical to the per-step
+    # assignment (no per-step function call / attribute write).
+    if schedule == "constant" or T <= 0:
+        opt.lr = base_lr
+        scheduled = False
+    else:
+        scheduled = True
+
+    for t in range(1, T + 1):
+        idx = rng.integers(0, n_tr, batch)
         xb = X[idx]
-        if spec.input_noise > 0.0:
-            xb = xb + rng.normal(0.0, spec.input_noise, xb.shape)
+        if noise > 0.0:
+            xb = xb + rng.normal(0.0, noise, xb.shape)
         yb = y[idx]
 
-        loss, grads = model.loss_and_grads(
-            xb, yb, label_smoothing=spec.label_smoothing
-        )
+        loss, grads = model.loss_and_grads(xb, yb, label_smoothing=smoothing)
         final_loss = loss
-        # SPEC.md 19.1: per-step LR schedule ("constant" returns base_lr, so
-        # the legacy stream/numerics are unchanged)
-        opt.lr = _scheduled_lr(schedule, spec.learning_rate, t, int(spec.train_steps))
+        # SPEC.md 19.1: per-step LR schedule ("constant" = base_lr every step)
+        if scheduled:
+            opt.lr = _scheduled_lr(schedule, base_lr, t, T)
         for i, ((gw, gb), (w, _b)) in enumerate(zip(grads, model.layers)):
-            gw = gw + spec.weight_decay * w  # weight decay on weights only
+            gw = gw + wd * w  # weight decay on weights only
             grads[i] = (gw, gb)
         if clip > 0.0:
             grads = _clip_grads(grads, clip)  # SPEC.md 19.1 (no-op at 0.0)

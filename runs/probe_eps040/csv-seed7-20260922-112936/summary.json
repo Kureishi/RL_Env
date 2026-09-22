@@ -1,0 +1,155 @@
+{
+  "baseline_effective": 77.48715765000088,
+  "baseline_score": 77.5,
+  "best_score_at_1s": 88.75,
+  "best_spec": {
+    "activation": "tanh",
+    "architecture": [
+      32,
+      16
+    ],
+    "batch_size": 128,
+    "early_stopping_patience": 0,
+    "gradient_clipping": 0.0,
+    "init_scale": 1.0,
+    "input_noise": 0.02,
+    "knn_k": 5,
+    "label_smoothing": 0.0,
+    "learning_rate": 0.01,
+    "lr_schedule": "constant",
+    "model_family": "mlp",
+    "optimizer": "momentum",
+    "train_steps": 400,
+    "weight_decay": 0.0
+  },
+  "effective_improvement_factor": 1.1443765972231703,
+  "efficiency_at_1s": 1.0,
+  "experiments_run": 24,
+  "final_best_effective": 88.67448980000336,
+  "final_best_score": 88.75,
+  "finished_reason": "budget_exhausted",
+  "improvement_factor": 1.1451612903225807,
+  "mutation_win_rate": {
+    "architecture": {
+      "trials": 6,
+      "wins": 3
+    },
+    "batch_size": {
+      "trials": 4,
+      "wins": 1
+    },
+    "early_stopping_patience": {
+      "trials": 1,
+      "wins": 0
+    },
+    "input_noise": {
+      "trials": 2,
+      "wins": 0
+    },
+    "knn_k": {
+      "trials": 1,
+      "wins": 0
+    },
+    "label_smoothing": {
+      "trials": 1,
+      "wins": 0
+    },
+    "learning_rate": {
+      "trials": 5,
+      "wins": 1
+    },
+    "model_family": {
+      "trials": 2,
+      "wins": 0
+    },
+    "train_steps": {
+      "trials": 3,
+      "wins": 0
+    },
+    "weight_decay": {
+      "trials": 1,
+      "wins": 1
+    }
+  },
+  "pareto_frontier": [
+    {
+      "score": 66.25,
+      "spec_hash": "afe7e857d111c185",
+      "train_seconds": 0.014527899911627173
+    },
+    {
+      "score": 77.5,
+      "spec_hash": "e44b17d4b5c72b8d",
+      "train_seconds": 0.025204800069332123
+    },
+    {
+      "score": 86.25,
+      "spec_hash": "0bfd6a29f7c68048",
+      "train_seconds": 0.03610260004643351
+    },
+    {
+      "score": 86.66666666666667,
+      "spec_hash": "73f8d35881cb612c",
+      "train_seconds": 0.03981710004154593
+    },
+    {
+      "score": 87.5,
+      "spec_hash": "5ebe955c5c58092f",
+      "train_seconds": 0.14101070002652705
+    },
+    {
+      "score": 87.91666666666667,
+      "spec_hash": "7b1cfde020c1c905",
+      "train_seconds": 0.15049940010067075
+    },
+    {
+      "score": 88.75,
+      "spec_hash": "9b664ccbff923cc3",
+      "train_seconds": 0.15102039999328554
+    }
+  ],
+  "run_config": {
+    "autorefine_version": "0.58.0",
+    "biases": [],
+    "block_size": 512,
+    "ci_blocks": 8,
+    "constraints": [],
+    "curriculum": false,
+    "dataset_size": 1920,
+    "efficiency_weight": 0.5,
+    "ensemble_top_k": 0,
+    "gen_gap_penalty": 0.5,
+    "kfold": 0,
+    "max_experiments": 24,
+    "max_train_seconds": 25.0,
+    "max_wall_seconds": 1800.0,
+    "pins": [],
+    "policy": "rl",
+    "rl_episodes": 8,
+    "schema": "autorefine.run_config/1",
+    "screen_frac": 1.0,
+    "seed": 7,
+    "stall_patience": null,
+    "target": 95.0,
+    "task": "csv",
+    "task_config": {
+      "label": "label",
+      "path": "C:\\Users\\kurei\\Documents\\Machine_Deep Learning\\RL_Env\\examples\\sin20\\sin20_train.csv"
+    },
+    "z_accept": 1.0
+  },
+  "search_quality": {
+    "block_size": 512,
+    "ci_blocks": 8,
+    "efficiency_weight": 0.5,
+    "gen_gap_penalty": 0.5,
+    "z_accept": 1.0
+  },
+  "seed": 7,
+  "task": "csv",
+  "task_config": {
+    "label": "label",
+    "path": "C:\\Users\\kurei\\Documents\\Machine_Deep Learning\\RL_Env\\examples\\sin20\\sin20_train.csv"
+  },
+  "wall_seconds": 2.458
+}

@@ -326,7 +326,8 @@ def test_app_source_wires_53():
         "vfrontier = st.empty()",
         "vchamp = st.empty()",
         'if u["accepted"]:',
-        "runner.env.best_spec.to_dict()",
+        "champ = runner.env.best_spec",  # 72.5 (v0.58): capture-once guard
+        "champ.to_dict()",
         '"state_dim": runner.env.task.state_dim',
         '"n_out": runner.env.task.n_outputs',
         "info[\"target\"]",
@@ -344,7 +345,7 @@ def test_version_round_v039():
     """A43 (SPEC.md 53.5, 33.1): the version stepped to `0.39.0` in
     both sources (v0.39 ⇒ `0.39.0`, M42, SPEC.md 53)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.57.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.60.0"
 
 
 def test_spec_cites_a43_and_round():

@@ -30,7 +30,11 @@ class Momentum:
         v = state.get("v")
         if v is None:
             v = np.zeros_like(param)
-        v = self.mu * v + grad
+        # SPEC.md 74: in-place moment update — element-wise bit-identical to
+        # `v = self.mu * v + grad` (same two ops, same order, per element),
+        # with one fewer temporary allocation.
+        v *= self.mu
+        v += grad
         state["v"] = v
         param -= self.lr * v
 
@@ -52,8 +56,16 @@ class Adam:
         v = state.get("v")
         if v is None:
             v = np.zeros_like(param)
-        m = self.b1 * m + (1 - self.b1) * grad
-        v = self.b2 * v + (1 - self.b2) * grad * grad
+        # SPEC.md 74: in-place moment updates — element-wise bit-identical to
+        # `m = b1*m + (1-b1)*grad` and `v = b2*v + (1-b2)*grad*grad` (same
+        # ops, same per-element order), with two fewer temporary
+        # allocations per call.
+        m *= self.b1
+        m += (1 - self.b1) * grad
+        v *= self.b2
+        vg = (1 - self.b2) * grad
+        vg *= grad
+        v += vg
         mhat = m / (1 - self.b1 ** t)
         vhat = v / (1 - self.b2 ** t)
         state["m"] = m

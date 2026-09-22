@@ -214,14 +214,14 @@ def test_app_source_wires_71():
 def test_exports_and_version():
     """A61 (71.1.4 + 33.1): the new names are in `autorefine.__all__`
     and resolvable (the package re-exports the very objects); the
-    version steps to `0.57.0` in both sources; SPEC §71 cites A61 and
+    version steps to `0.58.0` in both sources; SPEC §71 cites A61 and
     the index row resolves to this file."""
     for name in ("visual_card", "VISUAL_CSS"):
         assert name in autorefine.__all__, name
     assert autorefine.visual_card is visual_card
     assert autorefine.VISUAL_CSS is VISUAL_CSS
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.57.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.60.0"
     spec = SPEC.read_text(encoding="utf-8")
     assert "### 71.7 Acceptance (A61)" in spec
     row = next(l for l in spec.splitlines()

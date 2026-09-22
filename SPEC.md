@@ -78,6 +78,9 @@ numbers and carry none.)
 | M58 | v0.55   | 69     | A59 | tests/test_workflow_v055.py |
 | M59 | v0.56   | 70     | A60 | tests/test_perf_v056.py |
 | M60 | v0.57   | 71     | A61 | tests/test_visuals_v057.py |
+| M61 | v0.58   | 72     | A62 | tests/test_rl_taskmask_v058.py |
+| M62 | v0.59   | 73     | A63 | tests/test_rl_noop_v059.py |
+| M63 | v0.60   | 74     | A64 | tests/test_perf_v060.py |
 
 ---
 
@@ -6878,3 +6881,158 @@ Every addition is additive core or app-structural: `visual_card` / `VISUAL_CSS` 
 ### 71.8 Milestone (M60)
 
 **M60** — v0.57 "Visuals interface": every rendered SVG on the dashboard gains a standard visual card — emphasized title, vertical spacing, and a horizontal scroll window so charts scroll instead of clipping (71.1, R1); the compact Learning views read as two side-by-side pairs (71.3, R2); the card is applied app-wide through the two existing guard seams with the 69.3 degrade contract preserved verbatim (71.4, R3); and all 1120+ tests including the A59 pins pass (71.5, R4) (A61).
+
+## 72. RL task-aware action masking — the learning-collapse fix (v0.58)
+
+Directive: *provide an example of a classically hard problem to model, train it using the system, and make sure it utilizes the RL/self-improvement capabilities* (`examples/sin20/`). Running the RL improver (`fit --policy rl`) on flat CSV data exposed a **learning collapse**: on `runs/csv-seed7-*` the `invalid_spec` rejection counts *grow across episodes* (10 → 16 → 478 → 70 → 699 → 917 → 28,023 → 28,756). The policy learns to stop proposing valid specs.
+
+The mechanism (verified in source): on a flat task the bandit offers only `mlp`/`tree`/`boost` (25.5, `relevant_families`), but `MetaRLPolicy` masks actions by the best spec's *family* only (18.2), and the neural families expose the full field set (`FAMILY_FIELDS`) — so the `model_family → convnet` action is **not** masked for an `mlp` best spec. The env rejects a convnet spec on a flat task as an *invalid* spec: reward `0.0`, no budget spent, no stall guard (25.4). Meanwhile every valid experiment that scores below the running best yields a *negative* reward. With the REINFORCE running-mean baseline (`≈ g/T`), the free 0.0 steps carry **positive advantage** and the valid negative steps carry negative advantage — REINFORCE therefore *rewards the invalid action and penalizes valid work*. The exploit compounds across episodes: the more it proposes invalid specs, the higher their relative advantage. The bandit has no equivalent exposure: it never offers a family the task does not offer.
+
+The fix is **policy-side** and mirrors the bandit's existing task-aware principle (25.5): the policy offers only the families the task offers.
+
+### 72.1 The mask (core)
+
+- **72.1.1 `MetaRLPolicy._allowed_actions(family, task_name)`** — the 18.2 family mask **∩** the 25.5 task mask: a `model_family → F` action is allowed only when `F ∈ relevant_families(task_name)`; every other (field, value) action is unaffected. The set is never empty — every family's relevant set includes the `model_family` field, and `mlp` is always offered — so the softmax is always well-defined.
+- **72.1.2 threading** — `propose` reads `task_name = env_state["task"]` (the key `_state` always carries, 20.1/20.2), passes it to `_probs` and to the 67.2 ε-greedy uniform draw (the same mask the softmax sees), and appends it to the trajectory entry (`(x, a, r, family, tidx, task_name)`); `_update` reads it back with the existing length-tolerant unpack, so it re-computes the *same* mask the action was sampled under (G2); `probabilities` (29.2) applies the same mask, so the D2 trace, the app's RL policy view, and the update all agree.
+
+### 72.2 Scope and what does not change
+
+- **72.2.1 env contract unchanged** — an invalid spec proposed by an external agent (gym adapter, hand-written dict) is still a logged rejection with reward 0.0, never a crash (25.4). The fix removes the *learned* exploit at its source; it does not widen or narrow the env's acceptance.
+- **72.2.2 no new stall guard, no reward change** — the invalid-rejection path, `MAX_CONSECUTIVE_DUPLICATES`, and the loop's rewards are untouched (the smallest pin surface that kills the collapse).
+- **72.2.3 grid tasks unchanged** — `image`/`audio` are `grid_capable`, so their policy action set is identical to pre-v0.58 (all five families offered); only flat tasks (csv / parity / sine / cartpole / text) lose the two non-offered family actions.
+- **72.2.4 app champion-card guard (consequence of 72.3)** — the new trajectory reaches a previously-unreached code path: the dashboard's live champion card (`dashboard_app._drain_live`) read the **live** `runner.env.best_spec` on the main thread while the worker thread drives `env.reset()`, which nulls `best_spec` (68.1.2) before re-training the episode baseline. The render now captures `best_spec` once and skips the card when it is `None` (a mid-reset render), so the drain is race-safe; `finish()` renders the final champion authoritatively in the result view. The A43 source-token pin is updated to the new capture-once wiring (`champ = runner.env.best_spec` / `champ.to_dict()`).
+
+### 72.3 The collapse is gone (behavioral pin)
+
+On a tiny flat-CSV env, a full `train_policy` episode drives `propose → step` until `done`: **zero** `invalid_spec` rejections are logged, every proposed spec is family-valid for the task, all policy weights stay finite, and the episode return is finite. Determinism (G2): the same seed reproduces the identical action stream and weights.
+
+### 72.4 Mask semantics (unit)
+
+- **72.4.1 flat task** — `probabilities` at a `mlp` best spec with `task="csv"` puts ~0 on the `model_family → knn` and `model_family → convnet` actions, positive mass on `mlp/tree/boost` family actions, and sums to 1; `propose` sampled many times never returns a spec whose `model_family ∉ {mlp, tree, boost}`.
+- **72.4.2 grid task** — with `task="image"` the `knn`/`convnet` family actions are **not** masked (25.3/25.5), i.e. all five family actions carry positive mass.
+- **72.4.3 legacy env_state** — an env_state *without* the `task` key keeps the exact 18.2 family mask (all five family actions available for `mlp`/`convnet` best specs): pre-v0.58 callers see no distribution change (72.5).
+
+### 72.5 A1–A61 stay green (the A62 pin anchor)
+
+The change touches only `MetaRLPolicy` internals: `relevant_actions` (18.2), `relevant_families` (25.5), `apply_action`, the env, the bandit, the gym adapter, and the 67.1/67.2/68.2 policy persistence format are all untouched; saved policies (FORMAT_TAG `autorefine.meta_rl/1`) load unchanged — the mask is computed at inference time, not stored. The A6 bit-exact proposal pin and the 67.5/68.1.2 cross-consistency pins are determinism/same-code pins (both sides of each assertion run under the same source), so they pass unmodified. The full suite (≈1130 tests) runs green (72.6).
+
+### 72.6 Purity and determinism (G2)
+
+`_allowed_actions` is a pure function of `(family, task_name)` reading only the registry (25.5); `_probs`/`propose`/`probabilities` remain deterministic given the seed — no new RNG draws, no new global state, no new dependency (66.5).
+
+### 72.7 Acceptance (A62)
+
+- **72.4.1 flat mask** — `probabilities` at an `mlp` best spec with `task="csv"`: ~0 on `model_family → knn/convnet`, positive on `mlp/tree/boost` family actions, sum 1; 60 seeded `propose` draws never leave `{mlp, tree, boost}`.
+- **72.4.2 grid mask** — `task="image"` leaves all five family actions unmasked for an `mlp` best spec.
+- **72.4.3 legacy** — an env_state without `task` yields the full 18.2 mask (byte-identical allowed set to pre-v0.58 semantics).
+- **72.3 episode** — one full `train_policy` episode on a tiny quadrant-XOR CSV env logs zero `invalid_spec` rejections, keeps weights finite, and is bit-reproducible for a fixed seed (action stream + weights).
+- **72.5 pins** — A1–A61 pass unmodified (incl. A6's bit-exact sequence, 67.5, 68.1.2); the version steps to `0.58.0` in both sources (33.1); the A25 index advances (`defined == set(range(1, 63))`, 62 acceptance rows).
+- **72.2.4 app race-safety** — a `policy="rl"` dashboard run completes without the champion-card render raising `AttributeError` when the worker is mid episode-boundary reset; `test_rl_dashboard_v054::test_app_rl_run_exposes_policy_download` and `test_decisions_v039::test_app_source_wires_53` (updated token) pass.
+- **exports** — no new public names: the mask is internal to `MetaRLPolicy` (72.1.1), so the 33.1 re-export pins stay unchanged.
+
+### 72.8 Milestone (M61)
+
+**M61** — v0.58 "RL task-aware action masking": the policy offers only the families the task offers (72.1, R1) — the bandit's 25.5 principle, mirrored into `MetaRLPolicy` — killing the free-0.0 invalid-spec exploit that drove the REINFORCE learning collapse (72.3, R2); the env contract, the persistence format, and the grid-task action set are unchanged (72.2, R3); the dashboard's live champion card is made race-safe against the episode-boundary reset the new trajectory exposes (72.2.4, R3b); and all ≈1130 tests including A6's bit-exact pins pass unmodified (72.5, R4) (A62).
+
+## 73. RL no-op step exclusion + REINFORCE sign correction — the collapse-root-cause fix (v0.59)
+
+Directive: *fix the mentioned "collapse root cause"*. The v0.58 round (72) closed the **invalid-spec** channel of a broader exploit class: *free no-op steps carry positive advantage under the REINFORCE running-mean baseline and reinforce the action being repeated*. The **duplicate** channel of the same class remained (73.2 closes it), and investigating why the post-fix sin20 run *still* collapsed exposed the deeper root cause: the REINFORCE update has the **wrong sign** — it descends on expected return, so the policy anti-learns (73.8 closes it). Both ship as A63.
+
+### 73.1 Problem (the sin20 evidence)
+
+CLI run `runs/csv-seed7-20260922-112353-5` (`fit --policy rl` on `examples/sin20/sin20_train.csv`): episode 1 return −244.94; episodes 2–8 **all** −23.75 — one real `lr → 0.0001` candidate at score 53.75 (reward ≈ −23.75 vs baseline 77.5) plus **32 free duplicate re-proposals** (reward 0.0, no budget spent) until `duplicate_stall`; final best = baseline 77.5. The same task with `ε=0.25` (the public API of 67.2) learns to 88.3–89.6/episode (`runs/sin20-rl-eps025-20260922-113118/`).
+
+The math: with the running-mean baseline at b ≈ −23.75 (driven by the one real step), each duplicate's advantage is 0.0 − b ≈ +23.75. T = 33 steps, so the gradient is dominated by 32 × (+23.75) on the *duplicated* `lr → 0.0001` action against one × (≈ 0) real step — the policy is pushed exactly where the stall then traps it. Duplicates are free (no budget, no training), so this is strictly more exploitable than the invalid-spec channel 72 closed: the policy learns the collapse, and the env's stall guard merely caps its payoff.
+
+### 73.2 Design (policy-side; the env contract is unchanged — the 72.1 precedent)
+
+- **73.2.1 the contract signal** — verified against every `step()` return path in `improver/meta_env.py`: a step with **`info["candidate_score"] is None`** is a free no-op (duplicate / `duplicate_stall` / `stopped` / invalid-spec rejection / the done-after-dedup edge: no experiment happened, reward 0.0, no budget spent). A real experiment and a screened rejection (`_reject_screened`, which spends budget) always set `candidate_score` — including a legitimate 0.0 score — so the check is `is None`, never falsy, and screened rejections correctly stay decision points.
+- **73.2.2 `observe(reward, done, no_op=False)`** — when `no_op=True`, the action proposed for that step (appended to the trajectory at `propose()` time) is **dropped from the trajectory** and the reward backfill is skipped: the no-op is invisible to the gradient. When `done` also holds, `_update()` still flushes. The default `no_op=False` is the exact pre-v0.59 path (pin-safe; 73.4).
+- **73.2.3 the T == 0 flush** — a pure-no-op episode (every step dropped) ends with an empty trajectory: `_update` now sets `last_episode_return = 0.0`, `n_updates += 1`, clears the trajectory, and applies the one per-episode ε decay (67.2.2 "one factor per episode") — previously dead code. Without the return reset, a no-op-only episode would leak the *previous* episode's return into `train_policy`'s log.
+- **73.2.4 driver wiring** — all four internal driver loops pass `no_op=info.get("candidate_score") is None`: `train_policy` and `train_multi_policy` (improver/rl_policy.py) and both `RLRunner`/`MultiTaskRLRunner` step methods (rl_dashboard.py). The D2 per-step trace records are left as-is: a no-op in the trace is informative, and leaving it is zero pin risk.
+
+### 73.3 Fit ergonomics (73.3)
+
+`fit` gains `--rl-epsilon` (float, **default 0.1** — see 73.9) and `--rl-epsilon-decay` (float, default 1.0), mirroring `run`'s 67.2 flags. The shared `_drive` rl branch already reads `getattr(args, "rl_epsilon", 0.0)` / `rl_epsilon_decay`, so the parser addition alone wires it. `run --rl-epsilon` keeps its 0.0 default (67.4: `run` is the explicit-exploration surface; `fit` is one-shot and must not deadlock — 73.9). (`--rl-save`/`--rl-load` stay `run`-only per 67.4 — `fit` is one-shot by design.)
+
+### 73.4 Scope — what does not change
+
+The env contract (`step()`'s 4-tuple, rewards, budget, `MAX_CONSECUTIVE_DUPLICATES`), the gym adapter, the 67.1 persistence format (FORMAT_TAG `autorefine.meta_rl/1`; saved policies load unchanged — `observe` is not in the format), `propose()` and its RNG stream, the bandit/search policies, and every non-RL driver are untouched. A6's bit-exact proposal pin is safe: no new RNG draw exists anywhere in the fix. External proposers (gym/CLI dicts) are unaffected — the exclusion lives in how the *built-in* drivers call `observe`; a hand-rolled `observe` loop keeps the legacy semantics via the default argument.
+
+### 73.5 Pin notes
+
+The behavioral change (no-ops excluded from the update) is a **bug fix that ships as default**, per the 72 precedent (v0.58 updated pins directly rather than gating). Reconnaissance found **no absolute return-value pins** anywhere in the suite — the A62 pins are structural (reproducibility, key sets, finiteness) and re-derive against themselves, so they survive the behavior change; the 40 version-pinning test files advance `0.58.0 → 0.59.0` mechanically (33.1); the A25 index advances (`defined == set(range(1, 64))`, 59 acceptance rows). If any unexpected pin breaks, it is re-derived and noted here (72 precedent).
+
+The 73.8 sign flip is the same kind of break (weights move in the opposite direction after the first update): the full-suite run after the flip found exactly **one** casualty — a version literal (`autorefine 0.58.0`) in `tests/test_ergonomics_v033.py::test_version_flag` that the mechanical bump missed — re-derived to `0.59.0`. No test pins post-update weight *values* or a *learning direction*; the A6 episode fingerprint (A62) is a same-seed reproducibility check and survives. The new ascent/descent pin (73.8.3) is the suite's first statement of the sign contract.
+
+### 73.6 Acceptance (A63)
+
+- **73.2.2 unit** — `observe(reward, done, no_op=True)` drops the last trajectory entry: a pure-no-op episode ends with `last_episode_return == 0.0`, `n_updates == 1`, and **bit-identical weights** (zero gradient); the legacy 2-argument `observe` call is unchanged.
+- **73.2 behavioral pin (the key one)** — a duck-typed scripted env of [1 real step (`candidate_score` set, reward −23.75), 5 no-ops (`candidate_score: None`, 0.0), done]: `train_policy` leaves the weights **bit-identical** to a second run over [1 real step, done] with the same policy seed — "no-ops are invisible to the update".
+- **73.2.4 drivers** — `fit`'s parser exposes `--rl-epsilon` (**default 0.1**, 73.9) and `--rl-epsilon-decay` (default 1.0); a parse of `--rl-epsilon 0.3` yields `args.rl_epsilon == 0.3`.
+- **73.8 sign pin (the key one)** — a scripted policy that always proposes the same action and always earns +10 for it converges **on** that action (`pi → 1.0`, argmax = the target); the mirror (always −10) converges off it (`pi → 0`). Under the pre-v0.59 sign the first case did the opposite (the anti-learning evidence, 73.8.2).
+- **pins** — A1–A62 pass (incl. A6's bit-exact stream, 67.5, 68.1.2, A62's A62 episode pin); the version steps to `0.59.0` in both sources (33.1); the A25 index advances (`defined == set(range(1, 64))`, 59 rows, M62 row resolving to `tests/test_rl_noop_v059.py`); the full suite is green (1141 tests) with the one 73.5 re-derivation.
+- **real-task verification** — the collapsing sin20 CLI command (73.1) re-run with the fixes (73.2 + 73.8 + 73.9) no longer locks onto one bad action: the run logs **0 `invalid_spec`** and a *mix* of real experiments (11) whose best (78.33) **beats the 77.5 baseline** (pre-fix: every episode locked at 77.5); returns trend up (−83.75 → −52.08) — the policy is learning, not collapsing; the `ε=0.25` smoke reaches **88.33** ≥ 88 (the wide-MLP region, 73.8.5); results recorded in `examples/sin20/README.md`.
+
+### 73.7 Milestone (M62)
+
+**M62** — v0.59 "RL collapse-root-cause fix": (a) free no-op steps (duplicate / duplicate_stall / stopped / invalid rejections — the env's `candidate_score is None` contract) are excluded from the REINFORCE trajectory so they can no longer carry positive advantage and reinforce the duplicated action (73.2, R1), closing the duplicate channel of the v0.58 exploit class; pure-no-op episodes flush as zero-return, zero-gradient updates with one ε decay (73.2.3, R2); `fit` gains `--rl-epsilon`/`--rl-epsilon-decay` with pin-safe defaults (73.3, R3); (b) the REINFORCE update is corrected from descent to **ascent** on expected return (73.8, R4) — the deeper root cause: the pre-v0.59 `-=` applied the expected-return gradient inverted, so the policy anti-learned and mode-collapsed onto bad actions; the env contract, persistence format, and proposal RNG stream are unchanged in both halves (73.4, R5); A1–A62 stay green (one 73.5 re-derivation), the ascent pin is added, the sin20 real-task verification passes (73.6, R6), and the version is `0.59.0` (33.1) (A63).
+
+### 73.8 REINFORCE sign correction (v0.59, A63 umbrella)
+
+- **73.8.1 the bug** — `_update` accumulates `gw += A_t · ∇_w log π(a_t|x)` (with `A_t = return-to-go − running-mean baseline`; the env's reward is positive-for-good, `meta_env.py`: `reward = (eff − prev_best_eff) + NOVELTY_BONUS`) — that sum **is** the gradient of the expected return w.r.t. `w` (and likewise `b`, `B`). REINFORCE maximization requires `w += lr · (gw/T)`. The code (present since the first commit) applied `w −= lr · (gw/T)`: a **descent** on expected return. Good actions' probabilities were pushed *down* and bad ones *up*.
+- **73.8.2 evidence** — three independent confirmations: (1) the algebra above; (2) the post-73.2 sin20 re-run still collapsed with episodes 2–8 locking onto one *bad* action (`model_family → tree`, 0.951 → 0.999 softmax mass) — a policy that *learned* the exploit; (3) a controlled test: 30 scripted episodes in which one action always earns +10 drove its probability to **0.0** and moved the argmax *away* from it. The v0.53 `ε=0.25` sin20 "learning" (88.3–89.6/episode) is re-explained: exploration (25% random draws over 24 experiments) did the work, not the gradient.
+- **73.8.3 the fix + pin** — the three application lines flip to ascent (`self.w += …`, `self.b += …`, `self.B[i] += …`), SPEC-cited in place. The suite's first sign-contract test (`tests/test_rl_noop_v059.py::test_reinforce_update_is_ascent_not_descent`): always-rewarded ⇒ `pi > 0.999` and argmax = target; always-punished ⇒ `pi < 0.001`. After the fix the same controlled test converges to `pi = 1.0` in one episode.
+- **73.8.4 scope & pins** — `_update` is the sole application site; the update *shape* (T-normalization, baseline, ε decay, T==0 flush, task-row sparsity) is unchanged — only the sign. Saved policies load unchanged (weights are state, and the 67.1 format is untouched); a policy *trained* under the old sign simply starts from different weights and now learns correctly. Break surface: 73.5 (one version literal; no value-locked pins existed). `train_policy`/`train_multi_policy`/`RLRunner` drivers are unchanged (the sign lives in `_update`).
+- **73.8.5 verification expectation** — with ascent + no-op exclusion, `fit --policy rl` on sin20 should spend full budgets, stop locking onto bad actions, and converge toward the good candidate region (≈88, the wide-MLP region exploration found in v0.53) rather than the 77.5 baseline; recorded in `examples/sin20/README.md` (73.6).
+
+### 73.9 The ε=0 deadlock — why `fit` defaults to ε=0.1 (v0.59)
+
+- **73.9.1 the failure mode** — with `ε=0`, `fit --policy rl` on sin20 still collapses, in a *third* shape: every episode proposes the same greedy action from the unchanged initial state, the env's `duplicate_stall` guard (32 consecutive duplicates) ends the episode, and the policy never receives enough real decisions to learn — `experiments_run: 1`, `final_best = 77.5`, every episode return ≈ 0. This is a *deadlock*, not a collapse: the sign (73.8) and no-op (73.2) fixes are correct, but a pure-greedy policy that proposes no novel action cannot escape its own attractor, and the stall guard merely caps the damage. The v0.53 `ε=0.25` "learning" (88.3–89.6/episode) is the same story: exploration did the work.
+- **73.9.2 the fix** — `fit --rl-epsilon` defaults to **0.1** (decay default 1.0: exploration persists across the fit run). Rationale: `fit` is the one-shot user surface (73.3) and its rl path is *not* pin-anchored (A6's bit-exact pins anchor the `run`/`train_policy` construction path, which keeps `ε=0` available via `--rl-epsilon 0`). A small constant ε is the minimal change that makes the loop functional end-to-end: it breaks the duplicate attractor (a random draw is a *fresh* proposal — the stall streak resets) while keeping 90% of decisions policy-driven. `run --rl-epsilon` keeps its 0.0 default (67.4 pin safety: explicit exploration there is opt-in by design).
+- **73.9.3 pin notes** — the `fit` parser default change is CLI-surface only: the 73.6 test updates its default expectation from 0.0 to 0.1 (the explicit-parse case is unchanged); `MetaRLPolicy`'s constructor default (`epsilon=0.0`) and the `run` flags are untouched, so A6's construction/stream pins and every other RL pin are unaffected.
+- **73.9.4 verification** — the canonical sin20 command with the new default: 11 real experiments, 0 `invalid_spec`, final best **78.33** > baseline 77.5, returns trending up (73.6); `--rl-epsilon 0.25` reaches **88.33** (73.8.5's ≈88 region). Both recorded in `examples/sin20/README.md`.
+
+## 74. Training hot path, round 2 — loop invariants, in-place moments, in-place chains (v0.60)
+
+Directive: *"Optimize all code to improve runtime execution efficiency."* This is the second execution of that directive (the first round, 70, removed lazy-state allocation, cached row indices, and per-call dispatch). This round's profile (74.1) points at the remaining pure-Python overhead in the training loop and per-step optimizers: per-step `ModelSpec` attribute reads, a per-step `_scheduled_lr` call that always returns a constant, moment-update temporary allocations, and backward-chain temporary arrays. All four fixes are **bit-identical** (the 70.4/G2 precedent — same ops, same per-element order, fewer temporaries): A1–A63 incl. A6's bit-exact sequence pass unmodified, and the 11-training pin battery is byte-stable (74.3.1).
+
+### 74.1 Problem (profile evidence)
+
+- **The hot path is the training loop.** A cProfile over 12 fixed trainings (≈877 ms total, post-70) shows the remaining pure-Python cost: `optimizers.step` 0.347 s over 72k calls (Momentum/Adam moment updates), `MLP.loss_and_grads` 0.206 s over 12k, `MLP.forward` 0.142 s over 12.6k — plus per-step `ModelSpec` attribute reads and a per-step `_scheduled_lr` call inside `_train_neural`.
+- **The "464 entry_points calls" red herring is resolved.** The earlier profile reading (≈8%) was **one** `entry_points()` call at startup (`cli.main → register_tasks`) whose internal machinery scans 464 installed distributions — ≈55 ms once per process, not per experiment (verified by stack capture). Not a hot-path target.
+- **The remainder is numpy dispatch on small arrays** (97k ufunc reductions in 0.086 s) — the deferred high-pin-risk class (float-order changes; the 68/70 precedent: skip, or gate behind its own pin). Out of scope this round (74.4).
+
+### 74.2 Design (four bit-identical edits)
+
+- **74.2.1 trainer loop invariants** — `_train_neural` hoists `batch`, `noise`, `smoothing`, `wd`, `base_lr` (and reuses the precomputed `T`) before the step loop: the per-step `ModelSpec` attribute reads were pure Python overhead, and every value is loop-invariant by construction.
+- **74.2.2 constant-schedule short-circuit** — `_scheduled_lr`'s own early return **proves** it returns `base_lr` for every `t` when `schedule == "constant"` (or `total <= 0`). The trainer therefore assigns `opt.lr = base_lr` once before the loop and skips the per-step function call + attribute write for the constant schedule; non-constant schedules still call `_scheduled_lr(schedule, base_lr, t, T)` every step (19.1, unchanged).
+- **74.2.3 in-place moment updates** — `Momentum.step`: `v *= mu; v += grad` (was `v = mu * v + grad`); `Adam.step`: `m *= b1; m += (1-b1)*grad; v *= b2; vg = (1-b2)*grad; vg *= grad; v += vg` (was `m = b1*m + (1-b1)*grad`, `v = b2*v + (1-b2)*grad*grad`). Element-wise bit-identical — same ops, same per-element order — with 1–2 fewer temporary allocations per call.
+- **74.2.4 in-place backward chains + hoisted head flag** — `MLP.loss_and_grads`: `d = d @ w.T; d *= act_grad(...)` (was `d = (d @ w.T) * act_grad(...)`); `ConvNet`'s three `* act_grad(...)` multiplies made in-place (`daf`, `da2`, `da1`); `MLP` gains a `_is_mse` flag (set in `__init__` **and** `load()`), replacing the per-call `self.head == "mse"` string compare.
+
+**Why each is bit-identical (the 70.4 precedent).** All four edits change *when* a value is computed or *where* a result lives, not *how* it is computed: 74.2.1 reads the same attributes with the same values; 74.2.2's value identity is proven by `_scheduled_lr`'s own early return (pinned by 74.5); 74.2.3/74.2.4 apply the same floating-point ops to the same inputs in the same per-element order — in-place `*=`/`+=` on an array the code already owns is the same computation with one fewer temporary. One candidate was **not** bit-identical and was caught and reverted before shipping (74.3.4): an in-place `_tanh_grad` (`g = out*out; g -= 1.0`) computes `h²−1` where the code needs `1−h²` — a sign flip the pin battery exposed (every tanh run diverged, every relu run matched).
+
+### 74.3 Evidence
+
+- **74.3.1 the bit-pin battery** — 11 fixed trainings covering all four edit surfaces (adam/momentum/sgd × tanh/relu × constant/cosine/warmup_cosine, early stopping, gradient clipping; the boost/tree/knn families; softmax **and** mse heads), fingerprinted by a 16-hex weight digest + `repr(final_loss)` + `steps_run`: **all 11 byte-identical** pre/post (scratchpad `pin_capture.py` → `pins_BEFORE.json` / `pins_AFTER.json`); the reference values are locked into `tests/test_perf_v060.py`.
+- **74.3.2 the controlled A/B** — the pre-round loop body (verbatim) vs the current `_train_neural`, same model/dataset/seed, 1000 steps: **73.2 ms → 70.2 ms (≈1.04×)** with bit-identical weights (scratchpad `loop_ab.py`).
+- **74.3.3 end-to-end wall time** — parity12: 1.06–1.08 s → **1.03–1.04 s**; sin20 fit8: 0.88–0.91 s → **0.875–0.88 s**. Modest end-to-end: process startup (≈0.3 s: interpreter, numpy, the one `entry_points()` scan) dominates short runs; the loop body is where the win is (74.3.2).
+- **74.3.4 the caught bug** — the 74.2.4 `_tanh_grad` sign flip: found by the 74.3.1 battery, reverted to `1.0 - out*out`, re-verified. Lesson recorded: in-place ≠ free — the pin battery is what catches it.
+- **74.3.5 the suite** — 1142/1142 pass (≈287 s), incl. A6's bit-exact sequence and A60's performance pins, unmodified.
+
+### 74.4 Deliberately not changed
+
+- **Fused MLP forward/backward, vectorized ops** — float-order changes; the high-pin-risk class 68/70 deferred (gate behind its own pin if ever demanded).
+- **`entry_points` caching / lazy `__init__`** — one ≈55 ms startup call per process (74.1) and ≈20 ms of import overhead: marginal against the API/staleness risk.
+
+### 74.5 Acceptance (A64)
+
+- **74.2.1/74.2.2 trainer** — `_scheduled_lr("constant", base, t, total) == base` for every `t` and every `total` (incl. `total <= 0`) — the value identity the short-circuit relies on; a fixed-seed constant-schedule training is bit-stable across two consecutive runs.
+- **74.2.3 optimizers** — the first Momentum and Adam steps from a fresh state equal the pre-round out-of-place expressions bit-for-bit (`np.array_equal` on parameters **and** state), across multiple steps; state accumulation is deterministic.
+- **74.2.4 models** — `MLP.loss_and_grads` equals a hand-spelled out-of-place backprop reference byte-for-byte (loss + every `gw`/`gb`), for both activations and both heads; `MLP.save/load` round-trips keep the `_is_mse` flag in sync (an mse checkpoint loads as mse and forwards identically); `ConvNet.loss_and_grads` is byte-stable across fresh instances.
+- **74.3.1 battery** — the 11-training pin battery matches the locked reference (hash, `repr(final_loss)`, `steps_run`) — the round's bit-identity proof lives inside the suite.
+- **33.1 / A25 index** — A1–A63 stay green (A6's bit-exact sequence, A60's performance pins unmodified); the version steps to `0.60.0` in both sources (33.1); the index advances (`defined == set(range(1, 65))`, 60 acceptance rows, M63 resolving to `tests/test_perf_v060.py`).
+
+### 74.6 Milestone (M63)
+
+**M63** — v0.60 "Training hot path, round 2": the training loop no longer pays for per-step `ModelSpec` attribute reads or the constant-schedule `_scheduled_lr` call (74.2.1/74.2.2, R1); Momentum/Adam moment updates and the MLP/ConvNet backward chains run in-place with a hoisted `_is_mse` dispatch flag (74.2.3/74.2.4, R2); the controlled loop-body A/B improves 73.2 ms → 70.2 ms (≈1.04×) with bit-identical weights (74.3.2, R3); the 11-training pin battery is byte-stable against locked references, and the one non-bit-identical candidate (a `_tanh_grad` sign flip) was caught and reverted before shipping (74.3.1/74.3.4, R4); and all 1142 tests incl. A6's bit-exact sequence pass unmodified (74.3.5) (A64).

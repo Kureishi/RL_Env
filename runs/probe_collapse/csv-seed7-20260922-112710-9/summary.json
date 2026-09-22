@@ -1,0 +1,94 @@
+{
+  "baseline_effective": 66.0,
+  "baseline_score": 66.0,
+  "best_score_at_1s": 77.5,
+  "best_spec": {
+    "activation": "tanh",
+    "architecture": [
+      16,
+      8
+    ],
+    "batch_size": 32,
+    "early_stopping_patience": 0,
+    "gradient_clipping": 0.0,
+    "init_scale": 1.0,
+    "input_noise": 0.02,
+    "knn_k": 5,
+    "label_smoothing": 0.0,
+    "learning_rate": 0.001,
+    "lr_schedule": "constant",
+    "model_family": "mlp",
+    "optimizer": "adam",
+    "train_steps": 400,
+    "weight_decay": 0.0001
+  },
+  "effective_improvement_factor": 1.1742424242424243,
+  "efficiency_at_1s": 1.0,
+  "experiments_run": 1,
+  "final_best_effective": 77.5,
+  "final_best_score": 77.5,
+  "finished_reason": "duplicate_stall",
+  "improvement_factor": 1.1742424242424243,
+  "mutation_win_rate": {
+    "optimizer": {
+      "trials": 1,
+      "wins": 1
+    }
+  },
+  "pareto_frontier": [
+    {
+      "score": 66.0,
+      "spec_hash": "362bf6efd9c24720",
+      "train_seconds": 0.021565499948337674
+    },
+    {
+      "score": 77.5,
+      "spec_hash": "2532bd7ad0dce72c",
+      "train_seconds": 0.03195370000321418
+    }
+  ],
+  "run_config": {
+    "autorefine_version": "0.58.0",
+    "biases": [],
+    "block_size": 512,
+    "ci_blocks": 0,
+    "constraints": [],
+    "curriculum": false,
+    "dataset_size": 60,
+    "efficiency_weight": 0.0,
+    "ensemble_top_k": 0,
+    "gen_gap_penalty": 0.0,
+    "kfold": 0,
+    "max_experiments": 24,
+    "max_train_seconds": 25.0,
+    "max_wall_seconds": 1800.0,
+    "pins": [],
+    "policy": null,
+    "rl_episodes": null,
+    "schema": "autorefine.run_config/1",
+    "screen_frac": 1.0,
+    "seed": 7,
+    "stall_patience": null,
+    "target": null,
+    "task": "csv",
+    "task_config": {
+      "label": "label",
+      "path": "C:\\Users\\kurei\\Documents\\Machine_Deep Learning\\RL_Env\\examples\\sin20\\sin20_train.csv"
+    },
+    "z_accept": 0.0
+  },
+  "search_quality": {
+    "block_size": 512,
+    "ci_blocks": 0,
+    "efficiency_weight": 0.0,
+    "gen_gap_penalty": 0.0,
+    "z_accept": 0.0
+  },
+  "seed": 7,
+  "task": "csv",
+  "task_config": {
+    "label": "label",
+    "path": "C:\\Users\\kurei\\Documents\\Machine_Deep Learning\\RL_Env\\examples\\sin20\\sin20_train.csv"
+  },
+  "wall_seconds": 0.059
+}

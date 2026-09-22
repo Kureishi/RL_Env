@@ -323,7 +323,7 @@ def test_app_source_wires_69():
 def test_exports_and_version():
     """A59 (33.1): the new names are in `autorefine.__all__` and
     resolvable (the package re-exports the very objects); the version
-    steps to `0.57.0` in both sources; SPEC §69 cites A59."""
+    steps to `0.58.0` in both sources; SPEC §69 cites A59."""
     for name in ("workflow_state", "svg_workflow_strip", "next_steps",
                  "WORKFLOW_STEPS", "STEP_DONE", "STEP_CURRENT",
                  "STEP_TODO", "svg_is_well_formed"):
@@ -336,9 +336,9 @@ def test_exports_and_version():
     assert autorefine.WORKFLOW_STEPS is wf.WORKFLOW_STEPS
     assert autorefine.svg_is_well_formed is svg_is_well_formed
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.57.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.60.0"
     init = (REPO / "src" / "autorefine" / "__init__.py").read_text(
         encoding="utf-8")
-    assert '"0.57.0"' in init
+    assert '"0.60.0"' in init
     spec = SPEC.read_text(encoding="utf-8")
     assert "### 69.6 Acceptance (A59)" in spec

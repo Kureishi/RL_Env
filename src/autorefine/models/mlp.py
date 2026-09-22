@@ -97,6 +97,7 @@ class MLP:
         self.in_dim = in_dim
         self.n_out = n_out
         self.head = head
+        self._is_mse = head == "mse"  # SPEC.md 74: dispatch hoisted to a flag
         self._cache: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
 
     # --- forward -----------------------------------------------------------
@@ -127,7 +128,7 @@ class MLP:
         """
         n = x.shape[0]
         logits = self.forward(x)
-        if self.head == "mse":
+        if self._is_mse:  # SPEC.md 74: flag instead of per-call string compare
             target = np.asarray(y, dtype=np.float64).reshape(n, self.n_out)
             diff = logits - target
             loss = float((diff * diff).mean())
@@ -160,7 +161,8 @@ class MLP:
                 # chain through the PREVIOUS layer's nonlinearity (its z/h)
                 z_prev = self._cache[i - 1][1]
                 h_prev = self._cache[i - 1][2]
-                d = (d @ w.T) * self._act_grad_fn(z_prev, h_prev)  # SPEC.md 70
+                d = d @ w.T
+                d *= self._act_grad_fn(z_prev, h_prev)  # SPEC.md 70 + 74
             grads.append((gw, gb))
         grads.reverse()
         return loss, grads
@@ -198,5 +200,6 @@ class MLP:
         m.in_dim = in_dim
         m.n_out = n_out
         m.head = head  # default keeps pre-extension checkpoints loadable
+        m._is_mse = head == "mse"  # SPEC.md 74 (keeps the 74 flag in sync)
         m._cache = []
         return m

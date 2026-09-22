@@ -203,7 +203,16 @@ def _render_past_runs(runs_dir: str) -> None:
             st.write(f"score A **{d['score_a']:.2f}** vs B **{d['score_b']:.2f}** "
                      f"(Δ {d['score_delta']:+.2f})")
         if d["spec_diff"]:
-            st.dataframe(d["spec_diff"], width="stretch")
+            # display-only: stringify the differing values with the same
+            # `_spec_v` the N-run compare (50.1.5) uses — a list-valued
+            # field (e.g. `architecture: [128, 64]`) cannot share one
+            # pyarrow column with a scalar, so the raw `a`/`b` values must
+            # not be handed to `st.dataframe` (SPEC.md 72.2.4)
+            st.dataframe([
+                {"field": r["field"], "a": _spec_v(r["a"]),
+                 "b": _spec_v(r["b"])}
+                for r in d["spec_diff"]
+            ], width="stretch")
         else:
             st.caption("`best_spec` is identical — the runs differ only in "
                        "non-spec settings (compare the recipes: each run's "
@@ -913,14 +922,22 @@ def _drain_live(record: dict, narrate: bool = False,
                 # 53.3 (v0.39): the champion card re-renders on every
                 # acceptance, the just-mutated field (the mutation's
                 # first field) highlighted (53.3.2)
+                # SPEC.md 72.5 (v0.58): `best_spec` is a *live* env field
+                # the worker thread nulls during an episode-boundary reset
+                # (68.1.2, meta_env.reset) before re-training the baseline,
+                # so read it once and guard — a mid-reset render skips the
+                # card instead of crashing (finish() renders the final
+                # champion authoritatively in the result view)
                 hl = (u.get("mutation") or [None])[0]
-                vchamp.markdown(_svg_html("Champion spec",
-                                          svg_architecture(
-                                              runner.env.best_spec.to_dict(),
-                                              runner.env.task.state_dim,
-                                              runner.env.task.n_outputs,
-                                              highlight=hl if isinstance(hl, str) else None)),
-                                unsafe_allow_html=True)
+                champ = runner.env.best_spec
+                if champ is not None:
+                    vchamp.markdown(_svg_html("Champion spec",
+                                              svg_architecture(
+                                                  champ.to_dict(),
+                                                  runner.env.task.state_dim,
+                                                  runner.env.task.n_outputs,
+                                                  highlight=hl if isinstance(hl, str) else None)),
+                                    unsafe_allow_html=True)
             if vucb is not None and u.get("ucb"):  # D4: bandit UCB (SPEC.md 26.4)
                 trace = ucb_trace(stream, alpha=runner.policy.alpha)
                 vucb.line_chart(

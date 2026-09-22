@@ -1,0 +1,17 @@
+[
+  {
+    "run_id": "csv-seed7-20260922-145229",
+    "task": "csv",
+    "seed": 7,
+    "policy": "bandit",
+    "final_score": 85.41666666666666,
+    "target": 95.0,
+    "met_target": false,
+    "finished_reason": "budget_exhausted",
+    "experiments_run": 6,
+    "wall_seconds": 0.471,
+    "config_fp": "e7a71064c55c",
+    "parent_run": null,
+    "timestamp": "2026-09-22T18:52:29Z"
+  }
+]

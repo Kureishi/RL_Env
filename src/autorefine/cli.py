@@ -2941,6 +2941,17 @@ def build_parser() -> argparse.ArgumentParser:
                        help="improver: UCB field-bandit (default), v1 search, or meta-RL")
     p_fit.add_argument("--rl-episodes", type=int, default=5,
                        help="meta-RL: number of full-budget episodes to train for")
+    p_fit.add_argument("--rl-epsilon", type=float, default=0.1,
+                       help="v0.59 (SPEC.md 73.3): ε-greedy exploration in "
+                            "[0, 1] for the meta-RL improver (default 0.1 — "
+                            "SPEC.md 73.9: ε=0 deadlocks the loop — the greedy "
+                            "policy re-proposes its initial action, the "
+                            "duplicate-stall guard ends the episode, and the "
+                            "policy never learns; pass --rl-epsilon 0 to "
+                            "restore the pre-v0.59 pure-softmax path)")
+    p_fit.add_argument("--rl-epsilon-decay", type=float, default=1.0,
+                       help="v0.59 (SPEC.md 73.3): per-episode ε decay "
+                            "factor in (0, 1] (1.0 = no decay)")
     p_fit.add_argument("--seed", type=int, default=7)
     p_fit.add_argument("--experiments", type=int, default=30)
     p_fit.add_argument("--max-seconds", type=float, default=900.0)

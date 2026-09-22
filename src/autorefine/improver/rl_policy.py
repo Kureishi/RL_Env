@@ -21,6 +21,40 @@ longer "train and forget".
     single-draw proposal path (A6 stays bit-identical).
   * 67.3 checkpointing — `train_policy(..., best=True)` snapshots the
     best-episode weights (opt-in; the default return dict is unchanged).
+
+v0.58 (SPEC.md 72, A62) — task-aware action masking: the policy offers
+only the families the task offers (SPEC.md 25.5, the bandit's principle).
+A `model_family -> convnet` action on a flat task (csv, parity, …) is an
+*invalid* spec — the env logs a rejection with reward 0.0 and no budget
+spent (SPEC.md 25.4), while every valid experiment below baseline yields a
+*negative* reward. With the REINFORCE running-mean baseline, the free 0.0
+steps carry positive advantage and the policy learns to propose invalid
+specs — the v0.58 learning collapse. Masking the non-offered family actions
+removes the exploit at its source (policy side; the env contract for
+gym/external proposers is unchanged). An env_state without a `task` key
+keeps the exact SPEC.md 18.2 family mask (72.5 pin safety).
+
+v0.59 (SPEC.md 73, A63) — no-op step exclusion: free no-op steps
+(duplicate re-proposals, the done-after-dedup edge — the env signals them
+with `info["candidate_score"] is None`, the same contract class 72 closed
+for invalid specs) carry positive advantage under the REINFORCE running-
+mean baseline and reinforce the duplicated action (the sin20 collapse:
+32 free duplicates swamped one real step). `observe(reward, done, no_op=True)`
+drops the step's proposed action from the trajectory so no-ops are
+invisible to the gradient (policy side; the env contract is unchanged
+again, 72.1). The default `no_op=False` keeps the exact pre-v0.59 update
+(pin-safe).
+
+v0.59 also corrects the REINFORCE sign (SPEC.md 73.8): `_update`
+accumulates the expected-return GRADIENT (SUM_t A_t * grad_log_pi) but
+applied it with `-=` — a descent. Good actions were pushed down and bad
+ones up (a controlled test drove an always-rewarded action's probability
+to 0.0); with the corrected `+=` the policy ascends and the sin20 run
+converges onto good candidates instead of locking onto bad actions. This
+is the second, deeper half of the sin20 collapse fix; 73.6's acceptance
+re-derives the affected pins (A6's suite stays green — its pins are
+reproducibility/coverage, not value-locked — and the new test pins the
+ascent behavior).
 """
 from __future__ import annotations
 
@@ -36,6 +70,7 @@ from .catalog import (
     apply_action,
     index_of_value,
     relevant_actions,
+    relevant_families,
 )
 
 # SPEC.md 67.1.2 (v0.53, A57): the npz format tag. A static string — NOT
@@ -103,6 +138,26 @@ class MetaRLPolicy:
         name = env_state.get("task", self.task_names[0])
         return self.task_index.get(name, 0)
 
+    def _allowed_actions(self, family: str, task_name: str | None) -> tuple[int, ...]:
+        """SPEC.md 72.1: the SPEC.md 18.2 family mask ∩ the SPEC.md 25.5
+        task mask. A `model_family -> F` action is allowed only when `F`
+        is a family the task offers (`relevant_families`): flat tasks
+        (csv / parity / sine / cartpole / text) offer mlp/tree/boost, so on
+        them the policy cannot propose the `knn` / `convnet` family
+        actions — the convnet one is an invalid spec (a free 0.0-reward
+        rejection, SPEC.md 25.4) that REINFORCE would learn to exploit
+        (72.3, the collapse). `task_name=None` (a legacy env_state without
+        the `task` key) keeps the exact 18.2 mask — 72.5 pin safety.
+        The set is never empty: every family's relevant set includes the
+        `model_family` field, and `mlp` is always offered."""
+        if task_name is None:
+            return tuple(relevant_actions(family))
+        offered = set(relevant_families(task_name))
+        return tuple(
+            i for i in relevant_actions(family)
+            if ACTIONS[i][0] != "model_family" or ACTIONS[i][1] in offered
+        )
+
     # --- state embedding ------------------------------------------------------
     def embed(self, env_state: dict) -> np.ndarray:
         v = np.zeros(self.state_dim)
@@ -120,16 +175,19 @@ class MetaRLPolicy:
         return v
 
     def _probs(self, x: np.ndarray, family: str = "mlp",
-               task_idx: int | None = None) -> np.ndarray:
+               task_idx: int | None = None,
+               task_name: str | None = None) -> np.ndarray:
         """Softmax over catalog actions; SPEC.md 18.2 masks the actions the
         best spec's family ignores to -inf (the action space is len(ACTIONS)
         — 54 in v0.5, SPEC.md 19.4 — so weight shapes and saved policy
-        state remain loadable). SPEC.md 20.2: adds the task's bias row."""
+        state remain loadable). SPEC.md 20.2: adds the task's bias row.
+        SPEC.md 72.1: the family mask is further intersected with the
+        task mask (`task_name`; the 72.5 legacy mask when None)."""
         logits = x @ self.w + self.b
         if task_idx is not None:
             logits = logits + self.B[task_idx]
         rel = np.zeros(self.n_actions, dtype=bool)
-        rel[list(relevant_actions(family))] = True
+        rel[list(self._allowed_actions(family, task_name))] = True
         logits = np.where(rel, logits, -np.inf)
         z = logits - logits.max()
         p = np.exp(z)
@@ -139,20 +197,23 @@ class MetaRLPolicy:
     def propose(self, env_state: dict) -> dict:
         """Sample an action and return the candidate spec (dict).
 
-        The best spec's family at proposal time is stored in the trajectory
-        so `_update` re-computes the same masked probabilities (G2)."""
+        The best spec's family at proposal time — and the env state's task
+        name (SPEC.md 72.1) — are stored in the trajectory so `_update`
+        re-computes the same masked probabilities (G2)."""
         best = env_state.get("best_spec") or {}
         family = str(best.get("model_family", "mlp"))
         tidx = self._task_idx(env_state)  # SPEC.md 20.2
+        task_name = env_state.get("task")  # SPEC.md 72.1 (72.5 mask when None)
         x = self.embed(env_state)
-        p = self._probs(x, family, tidx)
+        p = self._probs(x, family, tidx, task_name)
         if self.epsilon > 0.0:  # SPEC.md 67.2.1 (v0.53, A57): ε-greedy
-            # one uniform draw over the family's relevant actions (the same
-            # mask the softmax sees), else the usual softmax sample. The
-            # epsilon=0.0 default never reaches here (67.2.3 pin safety).
+            # one uniform draw over the allowed actions (the same
+            # family ∩ task mask the softmax sees, 72.1), else the usual
+            # softmax sample. The epsilon=0.0 default never reaches here
+            # (67.2.3 pin safety).
             if self.rng.random() < self.epsilon:
-                rel = list(relevant_actions(family))
-                a = int(rel[int(self.rng.choice(len(rel)))])
+                allowed = list(self._allowed_actions(family, task_name))
+                a = int(allowed[int(self.rng.choice(len(allowed)))])
             else:
                 a = int(self.rng.choice(self.n_actions, p=p))
         else:
@@ -160,27 +221,44 @@ class MetaRLPolicy:
         # D2 (SPEC.md 29.2): expose what was sampled (pure bookkeeping; set
         # *after* the RNG draw so the stream and the returned spec are unchanged)
         self.last_proposal = (a, p)
-        self._traj.append((x, a, 0.0, family, tidx))
+        self._traj.append((x, a, 0.0, family, tidx, task_name))
         return apply_action(env_state["best_spec"], a)
 
     def probabilities(self, env_state: dict) -> np.ndarray:
         """D2 (SPEC.md 29.2): the full action-probability vector (length
         `n_actions`) that `propose()` would sample from at this state — the
         exact masked softmax (family mask per SPEC.md 18.2, task bias per
-        SPEC.md 20.2). **Pure**: no sampling, no RNG draw, no state change
-        (G2); masked actions read ~0 and the relevant actions sum to 1."""
+        SPEC.md 20.2, task mask per SPEC.md 72.1). **Pure**: no sampling,
+        no RNG draw, no state change (G2); masked actions read ~0 and the
+        allowed actions sum to 1."""
         best = env_state.get("best_spec") or {}
         family = str(best.get("model_family", "mlp"))
         tidx = self._task_idx(env_state)
-        return self._probs(self.embed(env_state), family, tidx)
+        task_name = env_state.get("task")  # SPEC.md 72.1
+        return self._probs(self.embed(env_state), family, tidx, task_name)
 
-    def observe(self, reward: float, done: bool) -> None:
+    def observe(self, reward: float, done: bool, no_op: bool = False) -> None:
         """Record a step's reward; flush the gradient when the episode ends.
 
-        The full entry is preserved (family mask, SPEC.md 18.2, and task
-        index, SPEC.md 20.2) so `_update` re-computes exactly the masked,
-        task-conditioned probabilities the action was sampled under."""
-        if self._traj:
+        The full entry is preserved (family mask, SPEC.md 18.2; task index,
+        SPEC.md 20.2; task name, SPEC.md 72.1) so `_update` re-computes
+        exactly the masked, task-conditioned probabilities the action was
+        sampled under.
+
+        SPEC.md 73.2 (v0.59, A63): `no_op=True` marks a *free* no-op step —
+        the env's `info["candidate_score"] is None` (duplicate /
+        duplicate_stall / stopped / invalid-spec rejection: no experiment
+        happened, reward 0.0, no budget). The action proposed for that
+        step is dropped from the trajectory (it was appended at
+        `propose()` time), so it carries no advantage and the reward
+        backfill is skipped; a pure-no-op episode flushes as a zero-return,
+        zero-gradient update (73.2.3). Screened rejections and real
+        experiments set `candidate_score` and keep the default path —
+        exact pre-v0.59 behavior (pin-safe default)."""
+        if no_op:
+            if self._traj:
+                self._traj.pop()
+        elif self._traj:
             entry = list(self._traj[-1])
             entry[2] = float(reward)
             self._traj[-1] = tuple(entry)
@@ -192,6 +270,16 @@ class MetaRLPolicy:
         traj = self._traj
         T = len(traj)
         if T == 0:
+            # SPEC.md 73.2.3 (v0.59, A63): pure-no-op episode — no decision
+            # points to update, but the episode still ends: flush as a
+            # zero-return, zero-gradient update (dead code pre-v0.59). One
+            # ε decay per episode keeps the 67.2.2 "one factor per
+            # episode" invariant, and `last_episode_return` is reset so a
+            # following real episode can't leak the previous one.
+            self.last_episode_return = 0.0
+            self.n_updates += 1
+            self._traj = []
+            self.epsilon = max(0.0, self.epsilon * self.epsilon_decay)
             return
         # return-to-go (gamma = 1: the loop's own reward already is the delta)
         adv = [0.0] * T
@@ -209,19 +297,30 @@ class MetaRLPolicy:
             x, a, _r = entry[0], entry[1], entry[2]
             family = entry[3] if len(entry) > 3 else "mlp"  # SPEC.md 18.2 masking
             tidx = entry[4] if len(entry) > 4 else None       # SPEC.md 20.2
-            p = self._probs(x, family, tidx)
+            task_name = entry[5] if len(entry) > 5 else None  # SPEC.md 72.1
+            p = self._probs(x, family, tidx, task_name)
             delta = -p
             delta[a] += 1.0
             gw += adv[t] * np.outer(x, delta)
             gb += adv[t] * delta
             if tidx is not None:
                 gb_task[tidx] += adv[t] * delta
-        self.w -= self.lr * (gw / T)
-        self.b -= self.lr * (gb / T)
+        # SPEC.md 73.8 (v0.59, A63): REINFORCE ASCENT. gw/gb (and gb_task)
+        # accumulate SUM_t A_t * grad_log_pi, the gradient of the expected
+        # return w.r.t. w/b (A_t = return-to-go - running-mean baseline;
+        # the env's reward is positive-for-good, meta_env.py:620). Maximize
+        # => w += lr * grad. The pre-v0.59 `-=` was a sign inversion (a
+        # descent on expected return, present since the first commit): it
+        # pushed good actions' probabilities DOWN and bad ones UP, which is
+        # the root cause of the sin20 learning collapse (73.1) beyond the
+        # no-op channel 73.2 closes. Controlled check (always +10 reward
+        # on one action): pi(action) -> 0.0 under the old sign, -> 1.0 now.
+        self.w += self.lr * (gw / T)
+        self.b += self.lr * (gb / T)
         if self.B is not None:
             # only the rows of tasks that appeared in this episode move
             for i in range(len(self.task_names)):
-                self.B[i] -= self.lr * (gb_task[i] / T)
+                self.B[i] += self.lr * (gb_task[i] / T)
         self.n_updates += 1
         self._traj = []
         # SPEC.md 67.2.2 (v0.53, A57): geometric ε decay, one factor per
@@ -260,7 +359,10 @@ def train_policy(env, policy: MetaRLPolicy, n_episodes: int, verbose: bool = Fal
             step_task = state.get("task")  # the env_state the proposal is made under
             action = policy.propose(state)
             state, reward, done, info = env.step(action)
-            policy.observe(reward, done)
+            # SPEC.md 73.2 (v0.59, A63): free no-op steps (candidate_score
+            # unset) are invisible to the update; the D2 trace still
+            # records them (informative, 73.4).
+            policy.observe(reward, done, no_op=info.get("candidate_score") is None)
             if trace is not None:
                 a, p = policy.last_proposal
                 trace.append({
@@ -446,7 +548,8 @@ def train_multi_policy(envs: list, policy: MetaRLPolicy,
         while not env.done:
             action = policy.propose(state)
             state, reward, done, info = env.step(action)
-            policy.observe(reward, done)
+            # SPEC.md 73.2 (v0.59, A63): no-op exclusion (73.2.4, per-task)
+            policy.observe(reward, done, no_op=info.get("candidate_score") is None)
             if trace is not None:  # D2 (SPEC.md 29.2), per-step record
                 a, p = policy.last_proposal
                 trace.append({

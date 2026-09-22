@@ -294,7 +294,10 @@ class RLRunner:
         prev_best = self.env.best_spec.to_dict() if self.env.best_spec else {}
         action_dict = action if isinstance(action, dict) else action.to_dict()
         self._state, reward, done, info = self.env.step(action)
-        self.policy.observe(reward, done)
+        # SPEC.md 73.2 (v0.59, A63): free no-op steps are invisible to the
+        # update; the D2 trace below still records them.
+        self.policy.observe(reward, done,
+                            no_op=info.get("candidate_score") is None)
         # D2 (SPEC.md 29.2): the live policy views' per-step record
         a, p = self.policy.last_proposal
         self._trace.append({
@@ -661,7 +664,9 @@ class RLMultiRunner:
         prev_best = env.best_spec.to_dict() if env.best_spec else {}
         action_dict = action if isinstance(action, dict) else action.to_dict()
         self._state, reward, done, info = env.step(action)
-        self.policy.observe(reward, done)
+        # SPEC.md 73.2 (v0.59, A63): no-op exclusion (per-task, 73.2.4)
+        self.policy.observe(reward, done,
+                            no_op=info.get("candidate_score") is None)
         a, p = self.policy.last_proposal
         self._trace.append({
             "task": task,
