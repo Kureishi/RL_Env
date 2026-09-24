@@ -1880,6 +1880,16 @@ def _load_convnet(path: str):
     return ConvNet.load(path)
 
 
+def _load_gp(path: str):
+    from .models.gp import GP
+    return GP.load(path)
+
+
+def _load_gam(path: str):
+    from .models.gam import GAM
+    return GAM.load(path)
+
+
 def _task_from_summary(summary: dict):
     """The task a run trained (SPEC.md 22.1/28.4): `task`/`seed`/`task_config`
     reconstruction with the curriculum-level fallback (SPEC.md 20.1) —
@@ -1914,6 +1924,8 @@ def _best_model_loaders() -> dict:
         "boost": lambda p: _load_boost(p),  # SPEC.md 19.2
         "knn": lambda p: _load_knn(p),      # SPEC.md 25.2
         "convnet": lambda p: _load_convnet(p),  # SPEC.md 25.3
+        "gp": lambda p: _load_gp(p),        # SPEC.md 75 (v0.61)
+        "gam": lambda p: _load_gam(p),      # SPEC.md 75 (v0.61)
     }
 
 

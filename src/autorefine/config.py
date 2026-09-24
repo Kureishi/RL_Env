@@ -11,14 +11,20 @@ from typing import Any, Mapping
 
 # --- allowed value spaces (SPEC.md 5.1 table) -----------------------------
 HIDDEN_LAYER_SIZES = (8, 16, 32, 64, 128)
-OPTIMIZERS = ("sgd", "momentum", "adam")
+OPTIMIZERS = ("sgd", "momentum", "adam", "adamw")
 ACTIVATIONS = ("tanh", "relu")
 BATCH_SIZES = (16, 32, 64, 128)
 # Model families (SPEC.md 15, 19.2): "mlp" is the neural family; an mlp with a
 # depth-0 architecture is a *linear model*. "tree" is a bagged decision-tree
 # ensemble; "boost" is a gradient-boosted (residual) decision-tree ensemble
 # (SPEC.md 19.2 — a genuinely stronger answer than bagging on parity/sine).
-MODEL_FAMILIES = ("mlp", "tree", "boost", "knn", "convnet")
+# v0.61 (SPEC.md 75): two non-parametric families added for research /
+# application — "gp" (Gaussian Process, one-vs-rest, native predictive
+# variance) and "gam" (generalized additive model, interpretable per-feature
+# smooth effects). Both are blocking-fit like knn (25.2): validated for
+# every spec, consumed only by their family, offered by the bandit only via
+# the spec surface / catalog (not the flat/grid relevant_families draw).
+MODEL_FAMILIES = ("mlp", "tree", "boost", "knn", "convnet", "gp", "gam")
 
 # --- SPEC.md 25: modality-aware families (v0.11) ---------------------------
 # knn: allowed k values (SPEC.md 25.2); default 5 keeps pre-v0.11 spec JSON
@@ -36,8 +42,11 @@ LABEL_SMOOTHING_RANGE = (0.0, 0.15)
 # depth 0 is allowed: a depth-0 mlp is a linear model (SPEC.md 15)
 DEPTH_RANGE = (0, 3)
 # --- SPEC.md 19.1: new spec fields (each defaults to the v0.4/legacy behavior)
-# LR schedule for the mlp family; "constant" = fixed learning_rate each step
-LR_SCHEDULES = ("constant", "cosine", "warmup_cosine")
+# LR schedule for the mlp family; "constant" = fixed learning_rate each step.
+# v0.61 (SPEC.md 75): three additive schedules (pure, deterministic — no RNG;
+# the legacy three keep the §18.7 bit-exact pin green).
+LR_SCHEDULES = ("constant", "cosine", "warmup_cosine",
+                "step", "exponential", "cyclic")
 # multiplicative scale on the Glorot init bound; 1.0 = plain Glorot
 INIT_SCALE_RANGE = (0.5, 2.0)
 # global L2-norm cap on per-step gradients; 0.0 = no clipping
@@ -117,6 +126,11 @@ class ModelSpec:
                          f"convnet filter size {c} not in {CONV_FILTERS}")
         elif self.model_family == "knn":
             # knn: architecture is ignored (SPEC.md 25.2) — accept any shape.
+            pass
+        elif self.model_family in ("gp", "gam"):
+            # v0.61 (SPEC.md 75): non-parametric families — architecture is
+            # ignored (like knn, 25.2); their kernel/spline parameters are
+            # fixed internal constants, so no architecture is validated here.
             pass
         else:
             # mlp: depth 0..3; depth 0 is a linear model (SPEC.md 15)

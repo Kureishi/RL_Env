@@ -144,6 +144,12 @@ def _spec_in_words(spec) -> str:
         return "a gradient-boosted tree ensemble"
     if family == "convnet":
         return "a small convolutional network"
+    if family == "gp":  # SPEC.md 75 (v0.61)
+        return ("a gaussian-process model "
+                "(random-feature kernel approximation)")
+    if family == "gam":  # SPEC.md 75 (v0.61)
+        return ("a generalized additive model "
+                "(interpretable per-feature curves)")
     arch = spec.get("architecture") or []
     act = spec.get("activation", "tanh")
     if arch:

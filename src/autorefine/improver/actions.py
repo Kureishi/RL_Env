@@ -18,7 +18,6 @@ from ..config import (
     KNN_K_VALUES,
     LABEL_SMOOTHING_RANGE,
     LEARNING_RATE_RANGE,
-    OPTIMIZERS,
     TRAIN_STEPS_RANGE,
     WEIGHT_DECAY_RANGE,
 )
@@ -70,7 +69,11 @@ def _sample_learning_rate(rng: np.random.Generator) -> float:
 # keeps the legacy three-family draw, preserving the §18.7 bit-exact pin.
 FIELD_SAMPLERS = {
     "architecture": lambda rng, task=None: _sample_architecture(rng),
-    "optimizer": lambda rng, task=None: str(rng.choice(OPTIMIZERS)),
+    # SPEC.md 75 (v0.61): draw the legacy 3-value set (same order as the
+    # pre-v0.61 3-element OPTIMIZERS) so the A1-A4 bandit stream stays
+    # bit-identical now that `adamw` exists; `adamw` is reachable via the
+    # spec surface / catalog, like knn/convnet were in v0.25.
+    "optimizer": lambda rng, task=None: str(rng.choice(("sgd", "momentum", "adam"))),
     "learning_rate": lambda rng, task=None: _sample_learning_rate(rng),
     "batch_size": lambda rng, task=None: int(rng.choice(BATCH_SIZES)),
     "weight_decay": lambda rng, task=None: round(float(rng.uniform(*WEIGHT_DECAY_RANGE)), 8),
@@ -83,7 +86,7 @@ FIELD_SAMPLERS = {
     "label_smoothing": lambda rng, task=None: round(float(rng.uniform(*LABEL_SMOOTHING_RANGE)), 4),
     # SPEC.md 19.1: v0.5 fields sample catalog values (single source of truth
     # in FIELD_CATALOG; guaranteed-different holds on every field)
-    "lr_schedule": lambda rng, task=None: str(rng.choice(FIELD_CATALOG["lr_schedule"])),
+    "lr_schedule": lambda rng, task=None: str(rng.choice(("constant", "cosine", "warmup_cosine"))),  # SPEC.md 75 (v0.61): legacy 3 (bit-identical A1-A4 stream); step/exponential/cyclic reachable via the spec surface
     "early_stopping_patience": lambda rng, task=None: int(rng.choice(FIELD_CATALOG["early_stopping_patience"])),
     "init_scale": lambda rng, task=None: float(rng.choice(FIELD_CATALOG["init_scale"])),
     "gradient_clipping": lambda rng, task=None: float(rng.choice(FIELD_CATALOG["gradient_clipping"])),
@@ -131,6 +134,8 @@ def _coerce_for_family(spec_dict: dict, rng: np.random.Generator) -> dict:
     elif fam == "convnet":
         if not (len(arch) == 2 and all(int(h) in CONV_FILTERS for h in arch)):
             spec_dict["architecture"] = (4, 8)  # SPEC.md 25.3: a valid pair
+    elif fam in ("gp", "gam"):
+        pass  # SPEC.md 75 (v0.61): non-parametric families ignore architecture
     else:
         if not arch or any(h not in HIDDEN_LAYER_SIZES for h in arch):
             spec_dict["architecture"] = _sample_architecture(rng)

@@ -201,7 +201,7 @@ def test_fingerprint_t_values():
     fp = {r["name"]: r["t"] for r in spec_fingerprint(_base())}
     assert fp["architecture"] == pytest.approx(0.25)          # 16 / 64
     assert fp["model_family"] == 0.0                          # mlp is first
-    assert fp["optimizer"] == pytest.approx(0.5)              # momentum 1/2
+    assert fp["optimizer"] == pytest.approx(1 / 3)            # momentum idx 1/3 (v0.61: 4-value space)
     assert fp["learning_rate"] == pytest.approx((1e-3 - 1e-4) / (1e-1 - 1e-4))
     assert fp["batch_size"] == pytest.approx(16 / 112)        # (32-16)/(128-16)
     assert fp["init_scale"] == pytest.approx(1 / 3)           # (1.0-0.5)/(2.0-0.5)
@@ -634,7 +634,7 @@ def test_version_round_v046():
     """A50 (SPEC.md 60.6, 33.1): the version stepped to ``0.46.0`` in both
     sources (v0.46 ⇒ ``0.46.0``, M49, SPEC.md 60)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.60.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.61.0"
 
 
 def test_spec_cites_a50_and_round():

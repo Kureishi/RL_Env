@@ -121,7 +121,8 @@ SPEC_FIELDS: dict[str, SpecField] = {
         ("mlp", "tree", "boost", "convnet"), "5.1", "sequence"),
     "model_family": SpecField(
         "model_family", MODEL_FAMILIES, _v_enum(MODEL_FAMILIES),
-        ("mlp", "tree", "boost", "knn", "convnet"), "15", "categorical"),
+        MODEL_FAMILIES,  # SPEC.md 75 (v0.61): all seven families
+        "15", "categorical"),
     "optimizer": SpecField(
         "optimizer", OPTIMIZERS, _v_enum(OPTIMIZERS),
         _NEURAL, "5.1", "categorical"),

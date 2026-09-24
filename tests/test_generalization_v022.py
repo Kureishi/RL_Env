@@ -380,11 +380,12 @@ def test_registry_rows_are_valid():
 def test_catalog_is_the_registry_view():
     """A26 (SPEC.md 36.2): `FIELD_CATALOG` is the registry's name→space
     view and `CATALOG_FIELDS` its name order; the `ACTIONS` catalog is
-    field-major over that order with exactly 77 actions in the
-    historical (A8) order."""
+    field-major over that order with exactly 83 actions (77 historical +
+    the v0.61 value-level additions: gp/gam families, adamw optimizer,
+    step/exponential/cyclic schedules)."""
     assert FIELD_CATALOG == {f.name: f.space for f in SPEC_FIELDS.values()}
     assert CATALOG_FIELDS == tuple(SPEC_FIELDS)
-    assert len(ACTIONS) == 77
+    assert len(ACTIONS) == 83
     assert ACTIONS == tuple((field, value)
                             for field in CATALOG_FIELDS
                             for value in FIELD_CATALOG[field])
@@ -447,4 +448,4 @@ def test_version_round_v022():
     assertion advanced in place per SPEC.md 33.1)."""
     py = tomllib.loads(
         (REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.60.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.61.0"

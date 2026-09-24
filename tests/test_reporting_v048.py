@@ -468,7 +468,7 @@ def test_version_round_v048():
     """A52 (33.1): the version stepped with the round — ``0.48.0`` in
     both sources (pyproject and the package)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.60.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.61.0"
 
 
 # --- CLI (a real tiny run; A52) -------------------------------------------------

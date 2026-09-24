@@ -143,6 +143,8 @@ def apply_action(best_spec_dict: dict, action_index: int | np.integer) -> dict:
         pass  # SPEC.md 25.2: knn ignores architecture — leave it as-is
     elif fam == "convnet" and not (len(arch) == 2 and all(int(h) in CONV_FILTERS for h in arch)):
         out["architecture"] = (4, 8)  # SPEC.md 25.3: a valid conv filter pair
+    elif fam in ("gp", "gam"):
+        pass  # SPEC.md 75 (v0.61): non-parametric families ignore architecture
     elif (not arch or any(h not in HIDDEN_LAYER_SIZES for h in arch)):
         out["architecture"] = (16, 8)
     try:

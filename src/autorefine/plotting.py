@@ -1761,6 +1761,10 @@ def svg_architecture(spec, state_dim, n_out, width: int = 640,
         "tree": ("architecture", "train_steps"),
         "boost": ("architecture", "train_steps"),
         "knn": ("knn_k",),
+        # SPEC.md 75 (v0.61): gp ignores every knob (fixed RFF); gam's
+        # weight_decay IS the smoothing penalty, so it highlights.
+        "gp": (),
+        "gam": ("weight_decay",),
     }
     ring = hl is not None and (
         hl == "model_family" or hl in _BLOCK_BY_FAMILY.get(family, ()))
@@ -1791,6 +1795,17 @@ def svg_architecture(spec, state_dim, n_out, width: int = 640,
         blocks = [(f"{n_trees} {kind} (depth {d})", mode)]
     elif family == "knn":
         blocks = [("k nearest neighbors", f"k = {_spec_get(spec, 'knn_k', 5)}")]
+    elif family == "gp":  # SPEC.md 75 (v0.61): RFF one-vs-rest GP
+        blocks = [
+            ("RFF kernel", "128 random features"),
+            ("ridge fit", f"-> {n_out} outputs"),
+        ]
+    elif family == "gam":  # SPEC.md 75 (v0.61): additive smoothing splines
+        wd = _spec_get(spec, "weight_decay", None)
+        blocks = [
+            ("per-feature splines", "truncated-power basis"),
+            ("additive sum", f"smoothing {wd} -> {n_out}"),
+        ]
     else:
         blocks = [(family, "unknown family")]
 

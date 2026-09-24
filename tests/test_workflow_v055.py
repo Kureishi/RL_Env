@@ -336,9 +336,9 @@ def test_exports_and_version():
     assert autorefine.WORKFLOW_STEPS is wf.WORKFLOW_STEPS
     assert autorefine.svg_is_well_formed is svg_is_well_formed
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.60.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.61.0"
     init = (REPO / "src" / "autorefine" / "__init__.py").read_text(
         encoding="utf-8")
-    assert '"0.60.0"' in init
+    assert '"0.61.0"' in init
     spec = SPEC.read_text(encoding="utf-8")
     assert "### 69.6 Acceptance (A59)" in spec

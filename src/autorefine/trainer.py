@@ -25,13 +25,15 @@ import numpy as np
 
 from .config import ModelSpec, SpecError
 from .models.convnet import ConvNet
+from .models.gam import GAM
+from .models.gp import GP
 from .models.knn import KNN
 from .models.mlp import MLP
 from .models.optimizers import make_optimizer
 from .models.trees import BoostingEnsemble, TreeEnsemble
 
 Dataset = Tuple[np.ndarray, np.ndarray]  # (features (n, d), targets (n,) or (n, k))
-Model = Union[MLP, TreeEnsemble, BoostingEnsemble, KNN, ConvNet]
+Model = Union[MLP, TreeEnsemble, BoostingEnsemble, KNN, ConvNet, GP, GAM]
 
 # SPEC.md 19.1: warmup fraction for the "warmup_cosine" schedule, and the
 # internal validation-split fraction used for early stopping (both fixed, so
@@ -54,6 +56,23 @@ def _scheduled_lr(schedule: str, base_lr: float, t: int, total: int) -> float:
     frac = min(max(t / total, 0.0), 1.0)
     if schedule == "cosine":
         return base_lr * 0.5 * (1.0 + math.cos(math.pi * frac))
+    # v0.61 (SPEC.md 75): additive schedules — pure/deterministic (no RNG);
+    # each is a function of (base_lr, t/total) only, so adding them never
+    # perturbs the legacy three (the §18.7 bit-exact pin stays green).
+    if schedule == "step":
+        # three plateaus, factor 0.1 per third of training (base -> 0.1x -> 0.01x)
+        if frac < 1.0 / 3.0:
+            return base_lr
+        if frac < 2.0 / 3.0:
+            return base_lr * 0.1
+        return base_lr * 0.01
+    if schedule == "exponential":
+        # exponential decay base_lr -> base_lr * 0.1 over the full run
+        return base_lr * (0.1 ** frac)
+    if schedule == "cyclic":
+        # triangle wave: 0.1*base_lr at both ends, base_lr at the midpoint
+        cycle = 1.0 - abs(2.0 * frac - 1.0)
+        return base_lr * (0.1 + 0.9 * cycle)
     # warmup_cosine
     warmup = max(1, int(round(WARMUP_FRACTION * total)))
     if t <= warmup:
@@ -118,7 +137,12 @@ def _train_neural(
     label smoothing, time cap) is shared verbatim. The mlp path stays
     byte-identical (the T2 pin is untouched).
     """
-    opt = make_optimizer(spec.optimizer, spec.learning_rate)
+    # v0.61 (SPEC.md 75): AdamW takes its (decoupled) weight decay at
+    # construction; every other optimizer ignores the argument, so the
+    # pre-v0.61 two-arg behavior is unchanged.
+    opt = make_optimizer(
+        spec.optimizer, spec.learning_rate,
+        weight_decay=spec.weight_decay if spec.optimizer == "adamw" else 0.0)
     # per-layer optimizer state: [w_state, b_state]
     opt_states: list[list[dict]] = [[{}, {}] for _ in model.layers]
     schedule = spec.lr_schedule          # SPEC.md 19.1 ("constant" = legacy)
@@ -167,6 +191,11 @@ def _train_neural(
     noise = spec.input_noise
     smoothing = spec.label_smoothing
     wd = spec.weight_decay
+    # v0.61 (SPEC.md 75): AdamW applies *decoupled* decay inside the optimizer,
+    # so the shared gradient-L2 decay is skipped for it (no double decay). For
+    # every other optimizer grad_wd == wd and `gw + grad_wd * w` is the exact
+    # legacy `gw + wd * w` (bit-identical — the T2 pin stays green).
+    grad_wd = wd if spec.optimizer != "adamw" else 0.0
     base_lr = spec.learning_rate
     # SPEC.md 74: `_scheduled_lr` returns base_lr for EVERY t when
     # schedule == "constant" (or total <= 0) — its own early return — so a
@@ -191,7 +220,7 @@ def _train_neural(
         if scheduled:
             opt.lr = _scheduled_lr(schedule, base_lr, t, T)
         for i, ((gw, gb), (w, _b)) in enumerate(zip(grads, model.layers)):
-            gw = gw + wd * w  # weight decay on weights only
+            gw = gw + grad_wd * w  # weight decay on weights only (0.0 for adamw)
             grads[i] = (gw, gb)
         if clip > 0.0:
             grads = _clip_grads(grads, clip)  # SPEC.md 19.1 (no-op at 0.0)
@@ -319,6 +348,42 @@ def train(
         elapsed = time.perf_counter() - start
         # SPEC.md 28.1 (C1): knn memorizes the first m rows → train == holdout
         hist = [{"step": 1, "train": loss, "holdout": loss}]
+        return TrainResult(model, 1, loss, elapsed, False,
+                           loss_history=hist)
+
+    if spec.model_family == "gp":
+        # SPEC.md 75 (v0.61): non-parametric GP (RFF one-vs-rest). One blocking
+        # fit (like knn); the time cap is checked around it, not inside.
+        if time_limit_seconds is not None and time_limit_seconds <= 0.0:
+            model = GP(n_out=n_out, head=head)
+            return TrainResult(model, 0, float("inf"), 0.0, True)
+        model = GP(n_out=n_out, head=head).fit(X, y)
+        # an RFF GP query is O(n * m * d); report the final loss on the first
+        # 256 rows (exact when n <= 256) — the fitted model itself is unchanged
+        m = min(n, 256)
+        loss = _training_loss(model, X[:m], y[:m], head)
+        elapsed = time.perf_counter() - start
+        # SPEC.md 28.1 (C1): a blocking fit has no per-step loop → one record
+        n_tail = min(max(1, int(round(VAL_FRACTION * n))), max(1, n))
+        hist = [{"step": 1, "train": loss,
+                 "holdout": _training_loss(model, X[-n_tail:], y[-n_tail:], head)}]
+        return TrainResult(model, 1, loss, elapsed, False,
+                           loss_history=hist)
+
+    if spec.model_family == "gam":
+        # SPEC.md 75 (v0.61): non-parametric additive model. weight_decay is
+        # the smoothing penalty (0.0 = interpolating spline); one blocking fit.
+        if time_limit_seconds is not None and time_limit_seconds <= 0.0:
+            model = GAM(n_out=n_out, head=head)
+            return TrainResult(model, 0, float("inf"), 0.0, True)
+        model = GAM(n_out=n_out, head=head, weight_decay=spec.weight_decay).fit(X, y)
+        m = min(n, 256)
+        loss = _training_loss(model, X[:m], y[:m], head)
+        elapsed = time.perf_counter() - start
+        # SPEC.md 28.1 (C1): a blocking fit has no per-step loop → one record
+        n_tail = min(max(1, int(round(VAL_FRACTION * n))), max(1, n))
+        hist = [{"step": 1, "train": loss,
+                 "holdout": _training_loss(model, X[-n_tail:], y[-n_tail:], head)}]
         return TrainResult(model, 1, loss, elapsed, False,
                            loss_history=hist)
 
