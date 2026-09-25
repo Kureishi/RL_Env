@@ -82,6 +82,7 @@ numbers and carry none.)
 | M62 | v0.59   | 73     | A63 | tests/test_rl_noop_v059.py |
 | M63 | v0.60   | 74     | A64 | tests/test_perf_v060.py |
 | M64 | v0.61   | 75     | A65 | tests/test_modeling_v061.py |
+| M65 | v0.62   | 76     | A66 | tests/test_workflow_v062.py |
 
 ---
 
@@ -7079,3 +7080,37 @@ Directive: *"Increase the modelling capabilities so it would be more useful for 
 ### 75.6 Milestone (M64)
 
 **M64** — v0.61 "Modeling capability": the spec space gains four value-level extensions — the `adamw` optimizer (decoupled weight decay, `wd=0` bit-identical to `adam`), the `step`/`exponential`/`cyclic` LR schedules, and the `gp` (fixed-seed RFF one-vs-rest) and `gam` (interpretable smoothing-spline additive) families (75.2.1–75.2.4) — all reachable through the config, trainer, the 83-action RL/Gym catalog, the `eval`/`predict`/`fit` loaders, and the spec chips/diagram, while the bandit draw-space stays the legacy value sets so the §18.7 bit-exact sequence and A1–A4 stay green (75.2.5); the capability smoke shows gp/gam beating the constant baseline on sine-v1 by wide margins with forward-identical save/load round-trips (75.3.1), the two non-bit-identical candidates (the AdamW re-association, the GAM knot off-by-one) were caught and fixed before shipping (75.3.3), and the A-index advances to A65/M64 with `tests/test_modeling_v061.py` (75.5).
+
+## 76. Workflow strip — finished is all-green (v0.62)
+
+Directive: after explaining why the terminal **Results** step rendered amber (`current`) rather than green when a run finished, the user approved changing the terminal step to `done` so that **finished = all four steps green**. This refines a pinned design decision (A59, §69.4.1): the workflow state machine's `Results` branch now returns `done` when a result exists and no run is in flight, instead of `current`.
+
+### 76.1 Problem
+
+- **The finished state had no green terminal.** `workflow_state` (69.4.1) colored `Results` as `current` (baseline-amber) exactly when a result exists and no run is in flight — the *finished* state. The green "PASS/finished" banner was the completion signal, but the stepper itself — the user's persistent view of "where am I" — never showed the workflow as complete. A finished run read as "you are at Results" (amber) rather than "done" (green).
+
+### 76.2 Design (one branch + re-derive A59)
+
+- **76.2.1 the `Results` rule** — `workflow_state`'s terminal branch changes from `STEP_CURRENT if (has_result and not running) else STEP_TODO` to `STEP_DONE if (has_result and not running) else STEP_TODO`. The finished condition is **unchanged** (`has_result and not running`): a stale result alongside a fresh in-flight run still shows `Run` as `current` (the live state wins), so the in-flight and idle states are byte-identical. Only the finished state changes: all four steps are now `done`.
+- **76.2.2 the invariant holds** — the `at most one current` invariant (69.4.1) still holds: the finished state has **zero** `current` steps (zero ≤ one), while the idle state (`Data`) and the in-flight state (`Run`) each keep exactly one `current`. No consumer of `workflow_state` changes — `dashboard_app` renders whatever the function returns (`svg_workflow_strip` colors `done` = accepted-green, `current` = baseline-amber, `todo` = rejected-grey per the 56.3 token registry).
+- **76.2.3 A59 re-derived** — `tests/test_workflow_v055.py::_expect` (the independent restatement of the 69.4.2 rules) restates the `Results` line as `STEP_DONE`, and the all-combinations test docstring now says the finished state is all four `done`. The SVG/ARIA tests use the finished state for well-formedness/labels and are unaffected (they assert structure, not the `Results` status).
+
+### 76.3 Evidence
+
+- **76.3.1 state machine** — `workflow_state(True, False, True)` (finished) returns all four `done` (no `current`); `workflow_state(True, True, False)` (in-flight) keeps `Run` = `current`, `Results` = `todo`; `workflow_state(False, False, False)` (idle) keeps `Data` = `current`.
+- **76.3.2 the strip** — the finished strip still renders well-formed / deterministic / ARIA-labelled and colors the `Results` node with the accepted-green token (the A41 palette pins apply); the A59 re-derivation (all 8 combinations) is green (76.5).
+
+### 76.4 Deliberately not changed
+
+- **The `current` condition** — `Results` is `done` only when `has_result and not running`, not unconditionally on `has_result`. A new run in flight alongside a stale result keeps `Run` = `current` (the live state the user needs), so the in-flight rendering is unchanged.
+- **The green PASS banner** — the separate finished-signal (the `info` "Run finished" hand-off) is unchanged; this round only recolors the terminal stepper node.
+
+### 76.5 Acceptance (A66)
+
+- **76.2.1** — `workflow_state(True, False, True)` returns all four rows `STEP_DONE` (no `current`); `workflow_state(True, True, False)` keeps `Run` = `STEP_CURRENT` and `Results` = `STEP_TODO`; `workflow_state(False, False, False)` keeps `Data` = `STEP_CURRENT`; non-bool inputs are a `ValueError`.
+- **76.2.2** — `svg_workflow_strip` over the finished state is well-formed, byte-deterministic, ARIA-labelled, names all four step labels, and colors the `Results` node with the accepted-green token (the A41 palette pins hold); the A59 re-derivation (all 8 combinations via `_expect`) passes.
+- **33.1 / A25 index** — the version steps to `0.62.0` in both sources; the A-index advances (`defined == set(range(1, 67))`, 62 acceptance rows, M65 resolving to `tests/test_workflow_v062.py`); the new `tests/test_workflow_v062.py` cites **A66** and pins `"0.62.0"`.
+
+### 76.6 Milestone (M65)
+
+**M65** — v0.62 "Workflow strip — finished is all-green": the terminal `Results` step of the four-step workflow state machine is `done` (green) when a result exists and no run is in flight, so a finished run renders all four steps `done` (76.2.1); the `at most one current` invariant holds (the finished state has zero `current`, the idle/in-flight states keep their single `current`) (76.2.2); the change is one branch plus the A59 re-derivation in `tests/test_workflow_v055.py` (76.2.3), the app needs no edit (76.2.2), and the A-index advances to A66/M65 with `tests/test_workflow_v062.py` (76.5).

@@ -41,12 +41,13 @@ def workflow_state(has_data: bool, running: bool,
         else `todo`.
       * Run — `current` while a run is in flight; `done` once a result
         exists; else `todo`.
-      * Results — `current` once a result exists and no run is in
-        flight (the terminal step is where the workflow is), else
-        `todo`.
+      * Results — `done` once a result exists and no run is in flight
+        (the finished state is all four `done`), else `todo`.
 
     Deterministic: equal inputs give byte-equal rows; the default
-    (no data, no run, no result) is exactly one `current` (Data).
+    (no data, no run, no result) is exactly one `current` (Data), and
+    the finished state (data, not running, result) is all four `done`
+    (zero `current` — the `at most one` invariant still holds).
     """
     if not isinstance(has_data, bool) or not isinstance(running, bool) \
             or not isinstance(has_result, bool):
@@ -61,7 +62,7 @@ def workflow_state(has_data: bool, running: bool,
             status = (STEP_CURRENT if running
                       else STEP_DONE if has_result else STEP_TODO)
         else:  # Results
-            status = (STEP_CURRENT if (has_result and not running)
+            status = (STEP_DONE if (has_result and not running)
                       else STEP_TODO)
         rows.append({"step": name, "status": status})
     return rows

@@ -249,10 +249,10 @@ def test_version_and_spec_cite_a60():
     """A60 (33.1): the version steps to `0.58.0` in both sources;
     SPEC §70 cites A60; the A25 index row for M59 lands."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.61.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.62.0"
     init = (REPO / "src" / "autorefine" / "__init__.py").read_text(
         encoding="utf-8")
-    assert '"0.61.0"' in init
+    assert '"0.62.0"' in init
     spec = SPEC.read_text(encoding="utf-8")
     assert "### 70.6 Acceptance (A60)" in spec
     assert "## 70. Hot-path execution performance (v0.56)" in spec

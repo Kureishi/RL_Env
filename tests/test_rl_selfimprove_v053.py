@@ -332,4 +332,4 @@ def test_exports_and_version():
         assert name in autorefine.__all__
         assert getattr(autorefine, name) is not None
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.61.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.62.0"

@@ -81,7 +81,7 @@ def _expect(has_data, running, has_result) -> list[tuple[str, str]]:
             st = (STEP_CURRENT if running
                   else STEP_DONE if has_result else STEP_TODO)
         else:  # Results
-            st = STEP_CURRENT if (has_result and not running) else STEP_TODO
+            st = STEP_DONE if (has_result and not running) else STEP_TODO
         out.append((name, st))
     return out
 
@@ -89,8 +89,8 @@ def _expect(has_data, running, has_result) -> list[tuple[str, str]]:
 def test_workflow_state_all_combinations():
     """A59 (69.4.2): all 8 (data, running, result) combinations give the
     expected per-step rows — the `Run` step is `current` while in
-    flight, and the terminal `Results` step is `current` only when
-    finished and no run is in flight."""
+    flight, and the finished state (data, not running, result) is all
+    four `done` (the terminal `Results` step is `done`, not `current`)."""
     for has_data in (False, True):
         for running in (False, True):
             for has_result in (False, True):
@@ -336,9 +336,9 @@ def test_exports_and_version():
     assert autorefine.WORKFLOW_STEPS is wf.WORKFLOW_STEPS
     assert autorefine.svg_is_well_formed is svg_is_well_formed
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.61.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.62.0"
     init = (REPO / "src" / "autorefine" / "__init__.py").read_text(
         encoding="utf-8")
-    assert '"0.61.0"' in init
+    assert '"0.62.0"' in init
     spec = SPEC.read_text(encoding="utf-8")
     assert "### 69.6 Acceptance (A59)" in spec

@@ -191,13 +191,13 @@ def test_fit_parser_exposes_rl_epsilon_flags():
 # --- 73.6 pins / 33.1 (A63) ------------------------------------------------------
 
 def test_version_spec_cites_and_index_row():
-    """A63 (73.6 + 33.1): the version steps to `0.61.0` in both sources;
+    """A63 (73.6 + 33.1): the version steps to `0.62.0` in both sources;
     SPEC §73 cites A63 and the index row resolves to this file."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
     init = (REPO / "src" / "autorefine" / "__init__.py").read_text(
         encoding="utf-8")
-    assert py["project"]["version"] == autorefine.__version__ == "0.61.0"
-    assert '"0.61.0"' in init
+    assert py["project"]["version"] == autorefine.__version__ == "0.62.0"
+    assert '"0.62.0"' in init
     spec = SPEC.read_text(encoding="utf-8")
     assert "### 73.6 Acceptance (A63)" in spec
     row = next(l for l in spec.splitlines() if l.startswith("| M62 "))

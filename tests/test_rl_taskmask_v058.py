@@ -203,8 +203,8 @@ def test_version_spec_cites_and_index_row():
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
     init = (REPO / "src" / "autorefine" / "__init__.py").read_text(
         encoding="utf-8")
-    assert py["project"]["version"] == autorefine.__version__ == "0.61.0"
-    assert '"0.61.0"' in init
+    assert py["project"]["version"] == autorefine.__version__ == "0.62.0"
+    assert '"0.62.0"' in init
     spec = SPEC.read_text(encoding="utf-8")
     assert "### 72.7 Acceptance (A62)" in spec
     row = next(l for l in spec.splitlines() if l.startswith("| M61 "))

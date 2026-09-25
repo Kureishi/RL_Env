@@ -333,13 +333,13 @@ def test_training_battery_matches_locked_reference():
 # --- 33.1 version + SPEC index (A64) -------------------------------------------
 
 def test_version_and_spec_cite_a64():
-    """A64 (33.1): the version steps to `0.61.0` in both sources;
+    """A64 (33.1): the version steps to `0.62.0` in both sources;
     SPEC §74 cites A64; the A25 index row for M63 lands."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.61.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.62.0"
     init = (REPO / "src" / "autorefine" / "__init__.py").read_text(
         encoding="utf-8")
-    assert '"0.61.0"' in init
+    assert '"0.62.0"' in init
     spec = SPEC.read_text(encoding="utf-8")
     assert "### 74.5 Acceptance (A64)" in spec
     assert "## 74. Training hot path, round 2" in spec
