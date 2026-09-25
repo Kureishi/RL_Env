@@ -380,8 +380,10 @@ def _app_chart_marks(at) -> tuple[int, int, int]:
 
 
 def test_app_renders_decision_views(tmp_path):
-    # A16: all four views render live + in the result for bandit; the search
-    # policy gets no UCB chart (SPEC.md 26.4/26.5)
+    # A16: all four views render in the result for bandit; the search
+    # policy gets no UCB chart (SPEC.md 26.4/26.5). Re-derived v0.63
+    # (A67, 77.2.2): the *live* copies render only in the transient
+    # pre-settle frame, so the settled frame carries the result view once.
     pytest.importorskip("streamlit", reason="dashboard app is optional (SPEC.md 23)")
     from streamlit.testing.v1 import AppTest
 
@@ -403,11 +405,11 @@ def test_app_renders_decision_views(tmp_path):
 
     b = run_policy("bandit")
     bars, lines, best = _app_chart_marks(b)
-    assert bars >= 2    # D1 win-rate bars: live + result (SPEC.md 26.1/26.5)
+    assert bars >= 1    # D1 win-rate bar: the result view (SPEC.md 26.1/26.5)
     assert best >= 1    # the best-score curve (SPEC.md 26.4)
     assert lines > best  # and the bandit UCB trace (SPEC.md 26.4)
     md = " ".join(m.value for m in b.markdown)
-    assert md.count("mutation timeline") >= 2  # D3 timeline: live + result
+    assert md.count("mutation timeline") >= 1  # D3 timeline: the result view
     assert "Decision views" in " ".join(h.value for h in b.subheader)
     assert "→" in " ".join(c.value for c in b.caption)  # D2 chips (SPEC.md 26.2)
 

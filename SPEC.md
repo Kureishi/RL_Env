@@ -83,6 +83,7 @@ numbers and carry none.)
 | M63 | v0.60   | 74     | A64 | tests/test_perf_v060.py |
 | M64 | v0.61   | 75     | A65 | tests/test_modeling_v061.py |
 | M65 | v0.62   | 76     | A66 | tests/test_workflow_v062.py |
+| M66 | v0.63   | 77     | A67 | tests/test_workflow_v063.py |
 
 ---
 
@@ -7114,3 +7115,40 @@ Directive: after explaining why the terminal **Results** step rendered amber (`c
 ### 76.6 Milestone (M65)
 
 **M65** — v0.62 "Workflow strip — finished is all-green": the terminal `Results` step of the four-step workflow state machine is `done` (green) when a result exists and no run is in flight, so a finished run renders all four steps `done` (76.2.1); the `at most one current` invariant holds (the finished state has zero `current`, the idle/in-flight states keep their single `current`) (76.2.2); the change is one branch plus the A59 re-derivation in `tests/test_workflow_v055.py` (76.2.3), the app needs no edit (76.2.2), and the A-index advances to A66/M65 with `tests/test_workflow_v062.py` (76.5).
+
+## 77. Workflow-strip settle — the strip shows the finished state (v0.63)
+
+Directive: the user reported (with a screenshot) that after a finished run the workflow strip still showed **Run** and **Results** grey while the green **PASS** banner was visible in the Results tab — "No 'Run' and 'Results' show grey when finished." Root-cause investigation reproduced the exact frame and identified a script-ordering defect; the fix (a bounded strip settle re-run) was implemented.
+
+### 77.1 Problem (root cause)
+
+- **The strip renders before the run that finishes it.** `dashboard_app` computes the strip at the top of the script (69.4) from `st.session_state.get("result")` *at that moment*, but the run's drain — the only place that sets `st.session_state["result"]` (51.2.3) — executes later in the script, inside the Run tab. In the frame where a run *finishes* (the synchronous button-press frame; a stream-mode reattach frame likewise), the strip therefore carries the pre-run state — Data/Preview green, **Run/Results grey** — while the same frame's Results tab already renders the PASS/MISS verdict banner.
+- **The bug was masked by the previous round's verification.** v0.62's AppTest reproduction pressed the run button and then performed one further `at.run()` before inspecting the strip — i.e., it inspected the *settled* frame (all four green) and missed the button-press frame. A reproduction that inspects the button-press frame alone (synchronous drain, target 0.0 so the tiny run PASSes) shows the strip's Run and Results nodes at `#6b7280` (rejected-grey) in the same frame as the green PASS banner — exactly the reported state.
+
+### 77.2 Design (one bounded settle re-run)
+
+- **77.2.1 the pure decision** — `workflow.settle_needed(has_result, running, state)` (Streamlit-free, G2): `True` iff a result is in session state, no run is in flight, and the state the strip just rendered in this frame (a `workflow_state` row list) is not yet all-`done`. `ValueError` on non-bool inputs or an empty `state`. Deterministic: equal inputs give an equal bool.
+- **77.2.2 the app's one block** — at the end of `main()`, after the five tabs, the app calls `settle_needed` on the frame's own facts (the freshly re-read `result`, the strip-time `_wrunning`, and the strip-time `_wstate`); when it is `True` the app performs exactly one `st.rerun()`. The settled frame renders the strip from the now-set result → all four steps `done` (the 76.2.1 finished state) → `settle_needed` is `False` → **the re-run is bounded and can never loop**.
+- **77.2.3 why a re-run, not a re-layout** — the strip sits above the tabs by design (69.4) and the drain renders its live content inside the Run tab (51.2.3); moving the drain above the strip would change the layout, while the settle re-run reuses the app's existing re-run machinery (the stream-mode tick, 55.1, and the clear-result button already `st.rerun()`). The settled frame is precisely the "run finished" steady state the app already renders (the Run tab's "Run finished — see the Results tab" info + the Results verdict), so no new UI is added — only the strip's colors settle.
+- **77.2.4 safety** — `settle_needed` is `False` when a run is in flight (the in-flight state is untouched), when no result exists (the idle state is untouched), and when the strip already shows the finished state (every steady frame is untouched). Streamlit resets momentary button values after a re-run, so the settle re-run can never re-trigger the run. The default synchronous path gains exactly one extra script execution, and only in the frame where a run finishes; every other frame is byte-identical.
+
+### 77.3 Evidence
+
+- **Before/after AppTest** — the button-press frame (synchronous drain, 2 experiments, target 0.0): before the fix the strip's Run/Results nodes are `#6b7280` with the PASS banner in the same frame (the reported state); after the fix the same `at.run()` (Streamlit 1.51's AppTest resolves the `st.rerun()` within the call) renders all four nodes `#15803d` with the PASS banner, and one further `at.run()` leaves the strip byte-identical (the settle did not loop).
+- **Pure tests** — `settle_needed` over the (has_result × running × strip-state) combinations: only the stale-finished frame settles; the settled (all-`done`), in-flight, and idle frames never do; invalid inputs raise `ValueError`.
+
+### 77.4 Deliberately not changed
+
+- The state machine rules (69.4.1, A59) and the strip SVG (69.4.2, A59/A66) are untouched — `settle_needed` consumes their output, it does not restate it. The worker/drain contract (51.2.3), the stream-mode tick (55.1), the RL path (68.x), and every widget key are unchanged.
+- **Three AppTest tests re-derived** (the button-press frame is now the transient pre-settle one, 77.2.2; drain-frame-only elements are asserted in the app source instead — the live path still renders them, 51.2.3):
+  - `tests/test_workflow_v055.py::test_app_result_subtabs_and_next_steps` (A59) — the three drain sub-tab labels move from the frame to the app source; every other assertion is unchanged and now lands on the settled frame;
+  - `tests/test_dashboard.py::test_app_renders_decision_views` (A16) — the bandit `bars >= 2` / `timeline >= 2` ("live + result") become `>= 1` (the result view; the live copies are drain-frame-only); the search-policy assertions are unchanged;
+  - `tests/test_interact_v038.py::test_app_run_drilldown_eta_focus_keyboard` (A42) — the live ETA caption and the `focus_field` selectbox move from the frame to the app source; the drill-down expanders, keyboard iframe, and focus-filter behavior assertions are unchanged and now land on the settled frame.
+
+### 77.5 Acceptance (A67)
+
+- **A67** — `settle_needed` is the single settle decision and is pure/deterministic (77.2.1); the app settles exactly once in the stale-finished frame and never otherwise (77.2.2/77.2.4); the AppTest button-press flow ends on the all-green strip with the verdict visible, stable across a further run (77.3); `dashboard_app` imports and calls `settle_needed` (77.2.2); the version steps to `0.63.0` in both sources (33.1). All in `tests/test_workflow_v063.py`.
+
+### 77.6 Milestone (M66)
+
+**M66** — v0.63 "Workflow-strip settle": the root cause of the grey Run/Results-on-finish report is a script-ordering defect — the strip renders at the top of the script, before the Run tab's drain sets `st.session_state["result"]`, so the frame where a run finishes shows the pre-run strip beside the verdict banner (77.1); the fix is one pure decision (`settle_needed`, 77.2.1) and one bounded `st.rerun()` at the end of the app (77.2.2), which re-renders the already-pinned finished state (76.2.1/A66) — no layout, drain, state-machine, or widget change (77.4) — and the A-index advances to A67/M66 with `tests/test_workflow_v063.py` (77.5).

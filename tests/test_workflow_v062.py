@@ -156,12 +156,12 @@ def test_inflight_strip_results_stays_todo_grey():
 # --- 33.1 / A25 the round bookkeeping (A66) ----------------------------------
 
 def test_version_and_spec_round():
-    """A66 (76.5 / 33.1 / A25): the version steps to `0.62.0` in both
+    """A66 (76.5 / 33.1 / A25): the version steps to `0.63.0` in both
     sources; SPEC §76 cites A66; the acceptance index row M65 points at
     this test file."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.62.0"
-    assert '"0.62.0"' in INIT.read_text(encoding="utf-8")
+    assert py["project"]["version"] == autorefine.__version__ == "0.63.0"
+    assert '"0.63.0"' in INIT.read_text(encoding="utf-8")
     spec = SPEC.read_text(encoding="utf-8")
     assert "## 76. Workflow strip" in spec
     assert "### 76.5 Acceptance (A66)" in spec

@@ -78,6 +78,7 @@ from autorefine.quickstart import (
 # the verdict's "next steps"; the app is a thin renderer (23.1).
 from autorefine.workflow import (
     next_steps,
+    settle_needed,
     svg_workflow_strip,
     workflow_state,
 )
@@ -2528,6 +2529,15 @@ def main() -> None:
             st.caption("Finish a run first — the per-candidate table (with "
                        "the reason column) and the best-score curve appear "
                        "here.")
+
+    # 77.2 (v0.63, A67): the workflow-strip settle. The strip rendered at
+    # the top of this frame, before the Run tab's drain executed; if the
+    # run just finished in this frame the strip is stale (Run/Results
+    # grey) while the Results tab already shows the verdict. One bounded
+    # re-run settles the strip to all-green; the settled frame is
+    # all-done, so `settle_needed` never re-triggers (77.2).
+    if settle_needed(result is not None, _wrunning, _wstate):
+        st.rerun()
 
 
 main()

@@ -301,9 +301,12 @@ def _setup_app(at, tmp_path: Path, experiments: int = 2) -> None:
 def test_app_run_drilldown_eta_focus_keyboard(tmp_path):
     """A42 (SPEC.md 52.1.2/52.2.2/52.3.1/52.4): a finished run renders
     the per-candidate drill-down expanders (gate math + curves), the
-    live ETA caption, the `focus_field` selectbox, and the Run tab's
-    zero-height keyboard iframe; focusing a field drops the
-    non-matching Experiments-table rows."""
+    `focus_field` filter, and the Run tab's zero-height keyboard
+    iframe; focusing a field drops the non-matching Experiments-table
+    rows. Re-derived v0.63 (A67, 77.2.2): the live ETA caption and the
+    `focus_field` selectbox render only in the transient pre-settle
+    drain frame, so their wiring is asserted in the app source (the
+    drain still renders them, 51.2.3/52.x)."""
     pytest.importorskip("streamlit", reason="dashboard app is optional")
     from streamlit.testing.v1 import AppTest
 
@@ -317,13 +320,14 @@ def test_app_run_drilldown_eta_focus_keyboard(tmp_path):
     assert any(l.startswith("candidate #") and "gate math" in l
                for l in exp_labels), exp_labels
 
-    # 52.3.1: the live ETA caption ("ETA … · N experiment(s) left")
-    caps = " ".join(str(c.value) for c in at.caption)
-    assert re.search(r"ETA .+ experiment\(s\) left", caps), caps
+    # 52.3.1: the live ETA caption — drain-frame-only (77.2.2), so its
+    # wiring is asserted in the app source (the drain renders it, 52.3.1)
+    src = APP.read_text(encoding="utf-8")
+    assert re.search(r"ETA \{eta_txt\} · \{left\} experiment\(s\) left", src)
 
-    # 52.2.1/52.2.2: the focus-field selectbox exists
-    assert any(e.key == "focus_field" for e in at.selectbox), \
-        "the Run tab carries the focus_field selectbox"
+    # 52.2.1/52.2.2: the focus-field selectbox is wired (drain-frame-only,
+    # 77.2.2) and the Experiments tab honors the `focus_field` filter
+    assert 'key="focus_field"' in src
 
     # 52.4: the zero-height keyboard iframe names both buttons + keydown
     frames = _iframes(at)
@@ -388,7 +392,7 @@ def test_version_round_v038():
     """A42 (SPEC.md 52.5, 33.1): the version stepped to `0.39.0` in
     both sources (v0.39 ⇒ `0.39.0`, M42, SPEC.md 53)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.62.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.63.0"
 
 
 def test_spec_cites_a42_and_round():

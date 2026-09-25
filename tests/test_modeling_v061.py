@@ -264,13 +264,13 @@ def test_gp_gam_specs_valid_and_trainable_end_to_end():
 # --- 33.1 version + SPEC index (A65) -------------------------------------------
 
 def test_version_and_spec_cite_a65():
-    """A65 (33.1): the version steps to `0.62.0` in both sources; SPEC §75
+    """A65 (33.1): the version steps to `0.63.0` in both sources; SPEC §75
     cites A65; the A25 index row for M64 lands and points at this file."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.62.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.63.0"
     init = (REPO / "src" / "autorefine" / "__init__.py").read_text(
         encoding="utf-8")
-    assert '"0.62.0"' in init
+    assert '"0.63.0"' in init
     spec = SPEC.read_text(encoding="utf-8")
     assert "## 75. Modeling capability v0.61" in spec
     assert "Acceptance (A65)" in spec

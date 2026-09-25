@@ -203,3 +203,33 @@ def next_steps(verdict: str, finished_reason: str | None = None) -> list[str]:
     if finished_reason == "stopped":
         lines += list(_NEXT_STEPS_STOPPED)
     return lines
+
+
+# --- 77.2 the workflow-strip settle (v0.63, A67) ----------------------------
+
+
+def settle_needed(has_result: bool, running: bool,
+                  state: list[dict]) -> bool:
+    """SPEC.md 77.2 (v0.63, A67): the workflow-strip settle decision.
+
+    The app renders the strip at the top of the script, but a run's drain
+    executes later, inside the Run tab (77.1). In the frame where a run
+    *finishes* — the synchronous button-press frame, or a stream-mode
+    reattach frame — the strip therefore still carries the pre-run state
+    (``Run``/``Results`` grey) while the Results tab already shows the
+    verdict. The app re-runs itself exactly once in that situation so the
+    strip settles to the finished (all-`done`) state.
+
+    Pure over the frame's facts (G2): a result is in session state, no run
+    is in flight, and the state the strip just rendered (a
+    ``workflow_state`` row list) is not yet all-`done`. The settled frame
+    is all-`done`, so a settle never re-triggers — the re-run is bounded
+    and can never loop. Deterministic: equal inputs give an equal bool.
+    """
+    if not isinstance(has_result, bool) or not isinstance(running, bool):
+        raise ValueError("settle_needed: has_result/running must be bool")
+    if not isinstance(state, list) or not state:
+        raise ValueError("settle_needed: `state` must be a non-empty list")
+    if not has_result or running:
+        return False
+    return any(row.get("status") != STEP_DONE for row in state)

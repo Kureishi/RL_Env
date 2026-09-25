@@ -221,7 +221,7 @@ def test_exports_and_version():
     assert autorefine.visual_card is visual_card
     assert autorefine.VISUAL_CSS is VISUAL_CSS
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.62.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.63.0"
     spec = SPEC.read_text(encoding="utf-8")
     assert "### 71.7 Acceptance (A61)" in spec
     row = next(l for l in spec.splitlines()
