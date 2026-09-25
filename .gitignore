@@ -1,1 +1,21 @@
+# --- Python bytecode & caches (regenerated on import; never tracked) ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# --- Packaging / build artifacts ---
+*.egg-info/
+build/
+dist/
+
+# --- Test / tooling caches ---
 .pytest_cache/
+.coverage
+*.coverage
+.cache/
+
+# --- AutoRefine generated run artifacts (the default runs_dir) ---
+# Generated/dev runs stay local and are never committed. To keep a run,
+# run it elsewhere with `--runs-dir <dir>` (or move it out of runs/).
+runs/
