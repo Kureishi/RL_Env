@@ -30,6 +30,7 @@ from .memory import KIND_BASELINE, KIND_CURRICULUM, KIND_EXPERIMENT  # 35.1 (C4)
 from .plotting import (
     html_report,
     svg_architecture,
+    svg_data_flow,  # SPEC.md 79 (v0.65): the data-utilization diagram
     svg_confusion_matrix,
     svg_difficulty_ranking,  # 58.1 (v0.44) the difficulty ranking
     svg_decision_boundary,  # V3 view (SPEC.md 30.3)
@@ -384,6 +385,27 @@ deterministic run, so per-seed results are bit-identical to the serial
                                      self.env.task.state_dim,
                                      self.env.task.n_outputs)
                     if self.env.best_spec else None)
+        # SPEC.md 79 (v0.65, A69): the data-flow diagram — the data's
+        # journey through the pipeline (the "how the data is utilized" half
+        # of the architecture view). The row counts come from the task's
+        # split arrays (CSV / image / audio / text); episode tasks (no
+        # _x_tr) render the policy-episode wording (79.2.4). Additive key
+        # (G2-safe; every consumer reads by key).
+        data_flow_svg = None
+        if self.env.best_spec is not None:
+            task = self.env.task
+            dfeats = getattr(task, "feature_names", None)
+            drows = None
+            if dfeats is not None and hasattr(task, "_x_tr"):
+                drows = {"train": int(len(task._x_tr)),
+                         "holdout": int(len(task._x_ho)),
+                         "gen": int(len(task._x_ge))}
+            data_flow_svg = svg_data_flow(
+                self.env.best_spec.to_dict(), task.state_dim,
+                task.n_outputs, head=getattr(task, "head", "softmax"),
+                metric=getattr(task, "metric", "accuracy"),
+                features=dfeats, rows=drows,
+                split_mode=getattr(task, "split_mode", "random"))
         fvs = field_value_stats(self._updates)  # V2 (SPEC.md 30.2)
         fams = family_stats(entries)  # V5 (SPEC.md 30.5): over the scored entries
         boundary = decision_boundary(self.env.task, self.env.best_model)  # V3
@@ -458,6 +480,7 @@ deterministic run, so per-seed results are bit-identical to the serial
             "boundary_svg": svg_decision_boundary(boundary) if boundary else None,
             "error_gallery": gallery,
             "arch_svg": arch_svg,
+            "data_flow_svg": data_flow_svg,  # SPEC.md 79 (v0.65): the data's journey
             "report_html": html_report(summary, entries, diagnostics=diag,
                                        gallery=gallery, arch_svg=arch_svg),
             "artifacts": {

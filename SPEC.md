@@ -85,6 +85,7 @@ numbers and carry none.)
 | M65 | v0.62   | 76     | A66 | tests/test_workflow_v062.py |
 | M66 | v0.63   | 77     | A67 | tests/test_workflow_v063.py |
 | M67 | v0.64   | 78     | A68 | tests/test_modeling_v064.py |
+| M68 | v0.65   | 79     | A69 | tests/test_dataviz_v065.py |
 
 ---
 
@@ -7195,3 +7196,47 @@ Directive: *"Improve the capabilities to capture finer, intricate patterns among
 ### 78.6 Milestone (M67)
 
 **M67** — v0.64 "Modeling capability — fine-pattern capture": the spec space gains three field-level extensions — `fourier_features` (deterministic spectral input expansion for mlp/knn/gp, 78.2.1), `gam_interactions` (GAM two-way interaction terms ranked by univariate hinge strength, 78.2.2), and `gp_length_scale` (the RBF length scale as a one-argument change to the fixed-seed RFF draw, 78.2.3) — each a `0`/`1.0` legacy default so the §18.7 bit-exact sequence and A1–A4 stay green (78.2.4); the registry grows 15→18 fields and the catalog 83→95 actions (A26/A8 re-derived), the capability smoke shows the GAM interaction term lifting a 2-D XOR from the additive 0.657 structural limit to 1.000 and the GP length scale moving the output from its unit-scale bit-identity (78.3.1), and the A-index advances to A68/M67 with `tests/test_modeling_v064.py` (78.5).
+
+## 79. Data flow — the data-utilization diagram (v0.65)
+
+Directive: "Add diagrams (where feasible) within the UI that would aid in a comprehensive understanding of the selected model and how the data is utilized within it."
+
+The existing `svg_architecture` (28.4) explains the *model structure* — which knobs drive which block. This round adds the complementary half: the **data's journey** — the path one data point takes through the pipeline, with the data's shape (n × d) at each stage. Together the two diagrams answer both halves of the question: what we ended up building (28.4), and how the data is utilized within it (79).
+
+### 79.1 The pipeline (what the diagram shows)
+
+In order, each block showing the data's shape at that stage:
+
+```
+DATA -> FEATURES -> SPLIT -> STANDARDIZE -> [SPECTRAL] -> MODEL -> SCORE
+```
+
+- **DATA** — the source: the total row count (or "episode task" when the task generates per split) + K classes / regression (79.2.1).
+- **FEATURES** — the d numeric features: the feature names for data-driven tasks (CSV / image / audio / text), the state vector for episode tasks (79.2.2).
+- **SPLIT** — the train/holdout/gen counts + the split rule (random permutation or temporal walk-forward, 45.1; seed-derived blocks for episode tasks) (79.2.2).
+- **STANDARDIZE** — train-only mean/std (std 0 -> 1; no leakage) for data-driven tasks; clip/normalize for episode states (79.2.2).
+- **SPECTRAL** — *conditional* (78.2.1): only when the spec has `fourier_features` K > 0, showing d -> d·(2K+1) (79.2.3).
+- **MODEL** — the selected family's one-line body summary (the best spec) (79.2.3).
+- **SCORE** — the head (`softmax K` / `mse 1`) + the reported metric; the annotation row states `score = <metric> × 100` (higher is better) and, for data-driven tasks, the no-leakage note (79.2.5).
+
+### 79.2 Renderer (`svg_data_flow`)
+
+- **79.2.1 signature** — `svg_data_flow(spec, state_dim, n_out, head="softmax", metric="accuracy", features=None, rows=None, split_mode="random", width=1020) -> str` in `plotting.py`, directly after `svg_architecture`, reusing its block/arrow idiom, its `_svg_header` ARIA attributes (51.4.3), and its `html.escape` discipline.
+- **79.2.2 graceful degradation** — with `features`/`rows` = `None` (episode tasks: CartPole/GridNav), the DATA/SPLIT blocks show the policy-episode wording and FEATURES/STANDARDIZE the state-vector wording; the diagram is complete in every case (no missing blocks, no crash on a missing attribute).
+- **79.2.3 conditional SPECTRAL** — the SPECTRAL stage renders only when the spec's `fourier_features` K > 0 (78.2.1); at K = 0 (the legacy default) the pipeline is exactly the six unconditional stages.
+- **79.2.4 purity** — pure, deterministic (G2), valid XML (strict-parseable by `xml.dom.minidom`), ASCII-safe: every data-derived string (feature names, metric, task names) passes through `html.escape` so hostile values cannot break the document; `spec = None` renders the pipeline with a placeholder MODEL block.
+- **79.2.5 annotation** — the annotation row states the metric scaling (`score = <metric> × 100`, higher is better) plus the no-leakage note (data-driven) or the seed-derived-episodes note (episode tasks).
+
+### 79.3 Integration (the UI)
+
+- **79.3.1 `DashboardRunner.finish()`** — computes `data_flow_svg` from `env.task` + `env.best_spec` (row counts from the task's split arrays when present; the episode wording otherwise) and returns it as an **additive** key (G2-safe; every consumer reads by key); `None` until a spec has been trained.
+- **79.3.2 the app renders it in three places** — (a) the Results view, beside "Final architecture" (the "how the data is utilized" half of the model-structure card); (b) the live champion card on every acceptance (re-rendered with the structure card, 53.3); (c) the Experiments-tab champion section (precomputed by `finish()`).
+- **79.3.3 no new dependency, no new state, no changed default path** — purely additive: one renderer, one additive dict key, three guarded renders (the 69.3 guard already degrades any malformed SVG to a friendly caption, so the page never paints a broken partial).
+
+### 79.4 Acceptance (A69)
+
+- **A69** — `svg_data_flow` is well-formed (`svg_is_well_formed`) and strict-XML-parseable for the CSV-shaped input (features + rows), the episode-shaped input (neither), and both, with the expected stage blocks present (79.2.1/79.2.2); the SPECTRAL stage renders only when `fourier_features > 0` (79.2.3); hostile feature names/metrics stay well-formed after escaping (79.2.4); the output is byte-identical across repeated calls (G2); `DashboardRunner.finish()` on a small CSV run returns a `data_flow_svg` carrying the feature names, the row counts, and the no-leakage note (79.3.1); `dashboard_app` imports `svg_data_flow` and renders the "Data flow" visual in the result view (79.3.2); the version steps to `0.65.0` in both sources (33.1); the A-index advances (`defined == set(range(1, 70))`, 65 acceptance rows, M68 resolving to `tests/test_dataviz_v065.py`). All in `tests/test_dataviz_v065.py`.
+
+### 79.5 Milestone (M68)
+
+**M68** — v0.65 "Data flow — the data-utilization diagram": the UI gains the complementary half of the model-structure view — `svg_data_flow`, the data's journey DATA -> FEATURES -> SPLIT -> STANDARDIZE -> [SPECTRAL] -> MODEL -> SCORE with the data's shape at each stage (79.1–79.2) — computed by `DashboardRunner.finish()` as an additive `data_flow_svg` key (79.3.1) and rendered in the app's Results view, the live champion card, and the Experiments tab (79.3.2); pure, deterministic, valid XML, graceful for episode tasks (79.2.2), conditional spectral stage (79.2.3), no new dependency or state (79.3.3), and the A-index advances to A69/M68 with `tests/test_dataviz_v065.py` (79.4).

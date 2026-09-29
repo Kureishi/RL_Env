@@ -1895,6 +1895,171 @@ def svg_architecture(spec, state_dim, n_out, width: int = 640,
     return "\n".join(parts)
 
 
+def svg_data_flow(spec, state_dim, n_out, head="softmax", metric="accuracy",
+                  features=None, rows=None, split_mode="random",
+                  width=1020) -> str:
+    """SPEC.md 79 (v0.65, A69): the data-flow / data-utilization diagram —
+    the journey one data point takes through the pipeline, in order, with
+    the data's shape at each stage:
+
+    DATA -> FEATURES -> SPLIT -> STANDARDIZE -> [SPECTRAL] -> MODEL -> SCORE
+
+    - DATA        - the source: the total row count (or "episode task" when
+                    the task generates per split) + K classes / regression;
+    - FEATURES    - the d numeric features (the feature names for
+                    data-driven tasks; the state vector for episode tasks);
+    - SPLIT       - the train/holdout/gen counts + the split rule (random
+                    permutation or temporal walk-forward; seed-derived
+                    blocks for episode tasks);
+    - STANDARDIZE - train-only mean/std (std 0 -> 1, no leakage) for
+                    data-driven tasks; clip/normalize for episode states;
+    - SPECTRAL    - only when the spec has fourier_features K > 0 (78.2.1):
+                    d -> d·(2K+1) spectral expansion;
+    - MODEL       - the selected family body (the best spec);
+    - SCORE       - the head (softmax K / mse 1) + the reported metric
+                    (×100, higher is better).
+
+    `spec` is a ModelSpec or its dict (None renders a placeholder MODEL
+    block); `features` (a list of names) and `rows` ({train, holdout, gen}
+    counts) are the task's data shape — None for episode tasks (CartPole/
+    GridNav), which render the policy-episode wording instead (79.2.4).
+    Pure, deterministic (G2), valid XML, ASCII-safe (html.escape on every
+    data-derived string)."""
+    sdim = int(state_dim) if _finite(state_dim) else 0
+    n_out = int(n_out) if _finite(n_out) else 1
+    is_class = str(head) == "softmax"
+    ff = _spec_get(spec, "fourier_features", 0) if spec is not None else 0
+    has_spectral = (isinstance(ff, (int, float)) and not isinstance(ff, bool)
+                    and int(ff) > 0)
+
+    # DATA + SPLIT: the row counts when the task exposes its split arrays,
+    # the policy-episode wording otherwise (79.2.4)
+    def _n(v) -> int:
+        return (int(v) if isinstance(v, (int, float))
+                and not isinstance(v, bool) and math.isfinite(v) and v >= 0
+                else 0)
+
+    if rows:
+        tr, ho, ge = _n(rows.get("train")), _n(rows.get("holdout")), _n(rows.get("gen"))
+        data_d1 = f"{tr + ho + ge} rows"
+        split_d1 = f"tr {tr} | ho {ho} | ge {ge}"
+        split_d2 = ("temporal walk-forward" if str(split_mode) == "temporal"
+                    else "random permutation")
+    else:
+        data_d1 = "episode task"
+        split_d1 = "train / holdout / gen"
+        split_d2 = "seed-derived episodes"
+    data_d2 = f"{n_out} classes" if is_class else "regression"
+
+    # FEATURES + STANDARDIZE: the feature names when the task has them
+    # (CSV / image / audio / text), the state-vector wording otherwise
+    if features:
+        fl = list(features)
+        names = ", ".join(str(f) for f in fl[:3]) + (", ..." if len(fl) > 3 else "")
+        feat_d1 = f"{sdim} numeric"
+        feat_d2 = names
+        std_d1 = f"{sdim} dims"
+        std_d2 = "train-only mean/std"
+    else:
+        feat_d1 = f"{sdim} dims"
+        feat_d2 = "state vector"
+        std_d1 = "states"
+        std_d2 = "clip / normalize"
+
+    # MODEL: the family's one-line summary (the same per-family shape as
+    # svg_architecture's body blocks, collapsed to one block)
+    family = str(_spec_get(spec, "model_family", "mlp")) if spec is not None else ""
+    arch = _spec_get(spec, "architecture") if spec is not None else None
+    arch = [int(v) for v in arch] if arch else []
+    n_trees = (int(max(2, min(50, int(_spec_get(spec, "train_steps", 200)) // 100)))
+               if spec is not None else 2)
+    depth = arch[0] if arch else "?"
+    if family == "mlp":
+        model_d1, model_d2 = "mlp", ("hidden " + str(arch) if arch else "linear (no hidden)")
+    elif family == "convnet":
+        c1, c2 = (arch[0], arch[1]) if len(arch) >= 2 else ("?", "?")
+        model_d1, model_d2 = "convnet", f"{c1}/{c2} filters"
+    elif family == "tree":
+        model_d1, model_d2 = "decision trees", f"{n_trees} bagged, depth {depth}"
+    elif family == "boost":
+        model_d1, model_d2 = "gradient boosting", f"{n_trees} rounds, depth {depth}"
+    elif family == "knn":
+        model_d1, model_d2 = "k-nearest", f"k = {_spec_get(spec, 'knn_k', 5)}"
+    elif family == "gp":
+        model_d1, model_d2 = "Gaussian process", "RFF + ridge"
+    elif family == "gam":
+        model_d1, model_d2 = "GAM", "additive splines"
+    elif not family:
+        model_d1, model_d2 = "model", "(untrained)"
+    else:
+        model_d1, model_d2 = family, "unknown family"
+
+    score_d1 = f"softmax {n_out}" if is_class else "mse 1"
+    score_d2 = "score: " + str(metric)
+
+    blocks = [
+        ("DATA", data_d1, data_d2, "#ffffff"),
+        ("FEATURES", feat_d1, feat_d2, "#eef2f7"),
+        ("SPLIT", split_d1, split_d2, "#ffffff"),
+        ("STANDARDIZE", std_d1, std_d2, "#eef2f7"),
+    ]
+    if has_spectral:  # 79.2.3: the SPECTRAL stage is conditional (78.2.1)
+        K = int(ff)
+        blocks.append(("SPECTRAL", f"{sdim} -> {sdim * (2 * K + 1)} dims",
+                       f"K = {K} (cos/sin)", "#fef3c7"))
+    blocks.append(("MODEL", model_d1, model_d2, "#dbeafe"))
+    blocks.append(("SCORE", score_d1, score_d2, "#ffffff"))
+
+    # layout: the same block/arrow idiom as svg_architecture
+    bw, bh, gap = 118, 54, 26
+    nblocks = len(blocks)
+    total_w = nblocks * bw + (nblocks - 1) * gap
+    L = max(16.0, (width - total_w) / 2.0)
+    T = 64.0
+    height = int(T + bh + 64)  # room for the annotation row
+    parts = _svg_header(width, height, "data flow - the data's journey")
+
+    def block(x: float, title: str, d1: str, d2: str, fill: str) -> None:
+        parts.append(f'<rect x="{x:.1f}" y="{T:.1f}" width="{bw}" height="{bh}" '
+                     f'fill="{fill}" stroke="{_AXIS}" rx="4"/>')
+        parts.append(f'<text x="{x + bw / 2:.1f}" y="{T + 15:.1f}" text-anchor="middle" '
+                     f'font-size="11" fill="{_AXIS}">{html.escape(title)}</text>')
+        parts.append(f'<text x="{x + bw / 2:.1f}" y="{T + 31:.1f}" '
+                     f'text-anchor="middle" font-size="10" fill="{_AXIS}">'
+                     f'{html.escape(d1)}</text>')
+        parts.append(f'<text x="{x + bw / 2:.1f}" y="{T + 46:.1f}" '
+                     f'text-anchor="middle" font-size="9" fill="{_AXIS}">'
+                     f'{html.escape(d2)}</text>')
+
+    def arrow(x0: float, x1: float) -> None:
+        y = T + bh / 2
+        parts.append(f'<line x1="{x0:.1f}" y1="{y:.1f}" x2="{x1 - 5:.1f}" '
+                     f'y2="{y:.1f}" stroke="{_AXIS}" stroke-width="1.5"/>')
+        parts.append(f'<polygon points="{x1:.1f},{y:.1f} {x1 - 7:.1f},{y - 4:.1f} '
+                     f'{x1 - 7:.1f},{y + 4:.1f}" fill="{_AXIS}"/>')
+
+    x = L
+    for i, (title, d1, d2, fill) in enumerate(blocks):
+        if i:
+            x += gap
+            arrow(x - gap, x)
+        block(x, title, d1, d2, fill)
+        x += bw
+
+    # annotation row (79.2.5): the metric scaling + the no-leakage note
+    if rows:
+        note = (f"score = {metric} x 100 (higher is better) | "
+                "standardization uses train stats only (no leakage)")
+    else:
+        note = (f"score = {metric} x 100 (higher is better) | "
+                "policy episodes (seed-derived blocks)")
+    parts.append(f'<text x="{width / 2:.1f}" y="{T + bh + 28:.1f}" '
+                 f'text-anchor="middle" font-size="11" fill="{_AXIS}">'
+                 f'{html.escape(note)}</text>')
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
 # --- v0.39 per-candidate decision views (SPEC.md 53) --------------------------
 
 def _gate_note(candidate, best, z_se, accepted, reason) -> tuple[str, str]:

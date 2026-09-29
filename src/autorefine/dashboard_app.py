@@ -99,6 +99,7 @@ from autorefine.plotting import (
     resolve_tokens,  # 56.3 (v0.42): the design-token registry (tokens expander)
     svg_action_probabilities,  # noqa: F401 (D2 view, SPEC.md 29.2)
     svg_architecture,  # C4 (28.4) + 53.3 (v0.39) the champion spec card
+    svg_data_flow,  # SPEC.md 79 (v0.65) the data-utilization diagram
     svg_audio_waveform,
     svg_bandit_beliefs,  # 57.4 (v0.43) the bandit belief bars
     svg_gate_line,  # 53.1 (v0.39) the per-candidate gate number-line
@@ -474,6 +475,34 @@ def _svg_pair(left: tuple | None, right: tuple | None) -> None:
     for col, (title, html) in zip(cols, present):
         with col:
             _svg_block(title, html)
+
+
+def _data_flow_for_env(env) -> str | None:
+    """SPEC.md 79 (v0.65, A69): the live data-flow diagram for a running
+    env — the data's journey (DATA -> FEATURES -> SPLIT -> STANDARDIZE ->
+    [SPECTRAL] -> MODEL -> SCORE) rendered from `env.task` + `env.best_spec`
+    (the same inputs `DashboardRunner.finish()` uses for its
+    `data_flow_svg`; 79.3.1). None while no spec is trained yet, or on
+    any task/attribute surprise (the render is guarded, 79.2.4)."""
+    spec = getattr(env, "best_spec", None)
+    task = getattr(env, "task", None)
+    if spec is None or task is None:
+        return None
+    try:
+        feats = getattr(task, "feature_names", None)
+        drows = None
+        if feats is not None and hasattr(task, "_x_tr"):
+            drows = {"train": int(len(task._x_tr)),
+                     "holdout": int(len(task._x_ho)),
+                     "gen": int(len(task._x_ge))}
+        return svg_data_flow(
+            spec.to_dict(), task.state_dim, task.n_outputs,
+            head=getattr(task, "head", "softmax"),
+            metric=getattr(task, "metric", "accuracy"),
+            features=feats, rows=drows,
+            split_mode=getattr(task, "split_mode", "random"))
+    except Exception:
+        return None  # the card degrades; the run never crashes on a render
 
 
 
@@ -939,6 +968,13 @@ def _drain_live(record: dict, narrate: bool = False,
                                                   runner.env.task.n_outputs,
                                                   highlight=hl if isinstance(hl, str) else None)),
                                     unsafe_allow_html=True)
+                    # SPEC.md 79 (v0.65, A69): the live data-flow diagram —
+                    # "how the data is utilized" beside the model structure,
+                    # re-rendered on every acceptance (79.3.2)
+                    df = _data_flow_for_env(runner.env)
+                    if df is not None:
+                        vchamp.markdown(_svg_html("Data flow", df),
+                                        unsafe_allow_html=True)
             if vucb is not None and u.get("ucb"):  # D4: bandit UCB (SPEC.md 26.4)
                 trace = ucb_trace(stream, alpha=runner.policy.alpha)
                 vucb.line_chart(
@@ -1543,6 +1579,8 @@ def _render_result(res: dict) -> None:
                 _render_gallery(gallery)
             if res.get("arch_svg"):  # C4 (SPEC.md 28.4): what we ended up building
                 _svg_block("Final architecture", res["arch_svg"])
+            if res.get("data_flow_svg"):  # SPEC.md 79 (v0.65): how the data is utilized
+                _svg_block("Data flow", res["data_flow_svg"])
 
 
     with r_advanced:
@@ -1903,6 +1941,11 @@ def _render_experiments(payload: dict) -> None:
                        best_spec, payload.get("state_dim", 1),
                        payload.get("n_out", 1),
                        highlight=last_hl if isinstance(last_hl, str) else None))
+        # SPEC.md 79 (v0.65, A69): the data-flow diagram beside the champion
+        # structure (precomputed by finish(), 79.3.1)
+        _res = payload.get("res") or {}
+        if _res.get("data_flow_svg"):
+            _svg_block("Data flow", _res["data_flow_svg"])
     # B2 (SPEC.md 54.2): the wall-time cost strip over the stored stream
     if stream:
         st.subheader("Wall-time cost strip")
