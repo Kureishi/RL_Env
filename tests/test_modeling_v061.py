@@ -13,8 +13,10 @@ bandit draw-space stay byte-identical):
 House rules: pure / deterministic (G2), stdlib + numpy only, no
 cross-test imports (every fixture is synthesized here). The value-level
 approach keeps the A1–A4 bandit stream, the §18.7 bit-exact sequence, and
-the A26 catalog pin green — re-derived below (83 actions, 15 fields,
-`model_family` = all seven families).
+the A26 catalog pin green — re-derived below (95 actions, 18 fields,
+`model_family` = all seven families; the v0.64 field-level additions,
+SPEC.md 78, grow the registry and the catalog — the legacy values here
+are untouched).
 """
 from __future__ import annotations
 
@@ -232,12 +234,13 @@ def test_gam_save_load_roundtrip_forward_identical():
 # --- 75.2.5 bandit/catalog re-derivation (A65) --------------------------------
 
 def test_catalog_actions_and_registry_rederived():
-    """A65 (75.2.5): the new *values* grow the action catalog to 83 (77
-    historical + 6) while the registry stays 15 fields and `model_family`
-    spans all seven families (A26 re-derived; the bandit draw-space is
-    untouched so the A1–A4 stream stays green)."""
-    assert len(ACTIONS) == 83
-    assert len(SPEC_FIELDS) == 15
+    """A65 (75.2.5): the new *values* grow the action catalog to 95 (77
+    historical + 6 v0.61 values + 12 v0.64 fine-pattern values, SPEC.md 78)
+    while the registry is 18 fields (15 historical + 3) and `model_family`
+    spans all seven families (A26 re-derived; the bandit draw-space stays
+    the legacy value sets so the A1–A4 stream stays green)."""
+    assert len(ACTIONS) == 95
+    assert len(SPEC_FIELDS) == 18
     assert SPEC_FIELDS["model_family"].families == MODEL_FAMILIES
     assert MODEL_FAMILIES == ("mlp", "tree", "boost", "knn", "convnet",
                               "gp", "gam")
@@ -264,13 +267,14 @@ def test_gp_gam_specs_valid_and_trainable_end_to_end():
 # --- 33.1 version + SPEC index (A65) -------------------------------------------
 
 def test_version_and_spec_cite_a65():
-    """A65 (33.1): the version steps to `0.63.0` in both sources; SPEC §75
-    cites A65; the A25 index row for M64 lands and points at this file."""
+    """A65 (33.1): the version steps to `0.64.0` in both sources (SPEC.md
+    78, v0.64); SPEC §75 cites A65; the A25 index row for M64 lands and
+    points at this file."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.63.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.64.0"
     init = (REPO / "src" / "autorefine" / "__init__.py").read_text(
         encoding="utf-8")
-    assert '"0.63.0"' in init
+    assert '"0.64.0"' in init
     spec = SPEC.read_text(encoding="utf-8")
     assert "## 75. Modeling capability v0.61" in spec
     assert "Acceptance (A65)" in spec

@@ -148,19 +148,21 @@ def test_unknown_mode_and_field_raise():
 # ---------------------------------------------------------------------------
 
 def test_relevant_fields_and_actions():
-    """SPEC.md 18.2 + 19.4 + 25 + 75: tree/boost ignore optimizer/lr/batch/
-    weight-decay/activation/label-smoothing and the mlp-only fields; mlp uses
-    all 15 fields (v0.11: +knn_k); the action space is 83 (77 v0.11 +
-    v0.61 value-level: gp/gam families, adamw optimizer, 3 schedules)."""
+    """SPEC.md 18.2 + 19.4 + 25 + 75 + 78: tree/boost ignore optimizer/lr/
+    batch/weight-decay/activation/label-smoothing and the mlp-only fields;
+    mlp uses all 18 fields (v0.11: +knn_k; v0.64: +fourier_features, the
+    spectral expansion mlp consumes); the action space is 95 (77 v0.11 +
+    v0.61 value-level: gp/gam families, adamw optimizer, 3 schedules + the
+    v0.64 fine-pattern fields, 3 × 4 values)."""
     assert set(relevant_fields("mlp")) == set(FIELD_NAMES)
     assert set(relevant_fields("tree")) == set(TREE_FIELDS)
     assert set(relevant_fields("boost")) == set(TREE_FIELDS)  # SPEC.md 19.2
-    assert len(ACTIONS) == 83
+    assert len(ACTIONS) == 95
     tree_actions = relevant_actions("tree")
     assert len(tree_actions) == 39  # arch 23 + steps 5 + noise 4 + family 7 (SPEC.md 75)
     assert set(tree_actions) < set(range(len(ACTIONS)))
     assert all(ACTIONS[i][0] in TREE_FIELDS for i in tree_actions)
-    assert set(relevant_actions("mlp")) == set(range(83))
+    assert set(relevant_actions("mlp")) == set(range(95))
 
 
 def test_bandit_tree_best_stays_in_relevant_fields():

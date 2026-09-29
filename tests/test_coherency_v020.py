@@ -38,6 +38,9 @@ from autorefine.config import (
     HIDDEN_LAYER_SIZES,
     INPUT_NOISE_RANGE,
     INIT_SCALE_RANGE,
+    FOURIER_FEATURES,
+    GAM_INTERACTIONS,
+    GP_LENGTH_SCALES,
     KNN_K_VALUES,
     LABEL_SMOOTHING_RANGE,
     LEARNING_RATE_RANGE,
@@ -48,6 +51,7 @@ from autorefine.config import (
     WEIGHT_DECAY_RANGE,
 )
 from autorefine.improver.actions import (
+    EXCLUDED_FROM_SEARCH,
     FIELD_NAMES,
     FIELD_SAMPLERS,
     ORDERED_FIELDS,
@@ -68,6 +72,9 @@ EXACT_FIELDS = {
     "model_family": MODEL_FAMILIES,
     "lr_schedule": LR_SCHEDULES,
     "knn_k": KNN_K_VALUES,
+    "fourier_features": FOURIER_FEATURES,
+    "gam_interactions": GAM_INTERACTIONS,
+    "gp_length_scale": GP_LENGTH_SCALES,
 }
 
 RANGE_FIELDS = {
@@ -155,7 +162,7 @@ def test_field_sets_are_one_set():
     25.7 legacy SEARCH_FIELDS exclusion, the ordered fields, and the
     FAMILY_FIELDS rows all agree — one field set, three surfaces."""
     assert set(FIELD_NAMES) == set(CATALOG_FIELDS)
-    assert set(SEARCH_FIELDS) == set(FIELD_NAMES) - {"knn_k"}  # 25.7
+    assert set(SEARCH_FIELDS) == set(FIELD_NAMES) - set(EXCLUDED_FROM_SEARCH)  # 25.7 + 78.2.4
     assert len(SEARCH_FIELDS) == 14  # the documented v0.10 legacy space
     assert set(ORDERED_FIELDS) <= set(FIELD_NAMES)
     for family, fields in FAMILY_FIELDS.items():

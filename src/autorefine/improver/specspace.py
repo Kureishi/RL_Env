@@ -2,7 +2,7 @@
 
 One row per ModelSpec field — (name, space, validator, families, spec_ref,
 kind) — in catalog order. The bandit proposal space (FIELD_NAMES /
-FIELD_SAMPLERS), the search enumerator (SEARCH_FIELDS), the 77-action
+FIELD_SAMPLERS), the search enumerator (SEARCH_FIELDS), the 95-action
 RL/Gym catalog (catalog.py), the policy state embedding, and the app's spec
 chips all derive from this table, so a new field added to the registry is
 visible to every surface at once — the model-space analogue of the C2 knob
@@ -21,7 +21,10 @@ from ..config import (
     BATCH_SIZES,
     CONV_FILTERS,
     EARLY_STOPPING_RANGE,
+    FOURIER_FEATURES,
+    GAM_INTERACTIONS,
     GRADIENT_CLIP_RANGE,
+    GP_LENGTH_SCALES,
     HIDDEN_LAYER_SIZES,
     INPUT_NOISE_RANGE,
     INIT_SCALE_RANGE,
@@ -164,6 +167,19 @@ SPEC_FIELDS: dict[str, SpecField] = {
     "knn_k": SpecField(
         "knn_k", KNN_K_VALUES, _v_enum(KNN_K_VALUES),
         ("knn",), "25.2", "categorical"),
+    # SPEC.md 78 (v0.64): fine-pattern capture — appended at the END so every
+    # existing ordinal stays (the A50 fingerprint pattern; 15 -> 18 fields).
+    # Each is "ordered" (a numeric neighborhood move is meaningful); each is
+    # validated for every family, consumed only by the named one(s) (78.2).
+    "fourier_features": SpecField(
+        "fourier_features", FOURIER_FEATURES, _v_int_range(0, 64),
+        ("mlp", "knn", "gp"), "78", "ordered"),
+    "gam_interactions": SpecField(
+        "gam_interactions", GAM_INTERACTIONS, _v_int_range(0, 16),
+        ("gam",), "78", "ordered"),
+    "gp_length_scale": SpecField(
+        "gp_length_scale", GP_LENGTH_SCALES, _v_range(0.25, 2.0),
+        ("gp",), "78", "ordered"),
 }
 
 SPEC_FIELD_NAMES = tuple(SPEC_FIELDS)

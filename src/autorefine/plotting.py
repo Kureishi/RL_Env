@@ -1760,11 +1760,13 @@ def svg_architecture(spec, state_dim, n_out, width: int = 640,
         "convnet": ("architecture",),
         "tree": ("architecture", "train_steps"),
         "boost": ("architecture", "train_steps"),
-        "knn": ("knn_k",),
+        "knn": ("knn_k", "fourier_features"),  # 78: spectral input expansion
         # SPEC.md 75 (v0.61): gp ignores every knob (fixed RFF); gam's
         # weight_decay IS the smoothing penalty, so it highlights.
-        "gp": (),
-        "gam": ("weight_decay",),
+        # SPEC.md 78 (v0.64): the gp length scale and the gam interaction
+        # count drive body blocks, so they highlight.
+        "gp": ("gp_length_scale",),
+        "gam": ("weight_decay", "gam_interactions"),
     }
     ring = hl is not None and (
         hl == "model_family" or hl in _BLOCK_BY_FAMILY.get(family, ()))
@@ -1796,8 +1798,14 @@ def svg_architecture(spec, state_dim, n_out, width: int = 640,
     elif family == "knn":
         blocks = [("k nearest neighbors", f"k = {_spec_get(spec, 'knn_k', 5)}")]
     elif family == "gp":  # SPEC.md 75 (v0.61): RFF one-vs-rest GP
+        # SPEC.md 78 (v0.64): the RBF length scale (1.0 = the legacy unit
+        # scale, rendered exactly as before)
+        gpls = _spec_get(spec, "gp_length_scale", 1.0)
+        kernel_detail = "128 random features"
+        if _finite(gpls) and float(gpls) != 1.0:
+            kernel_detail = f"len {float(gpls):g}, 128 features"
         blocks = [
-            ("RFF kernel", "128 random features"),
+            ("RFF kernel", kernel_detail),
             ("ridge fit", f"-> {n_out} outputs"),
         ]
     elif family == "gam":  # SPEC.md 75 (v0.61): additive smoothing splines
@@ -1806,6 +1814,11 @@ def svg_architecture(spec, state_dim, n_out, width: int = 640,
             ("per-feature splines", "truncated-power basis"),
             ("additive sum", f"smoothing {wd} -> {n_out}"),
         ]
+        # SPEC.md 78 (v0.64): the two-way interaction block (0 = legacy
+        # additive-only, rendered exactly as before)
+        gpi = _spec_get(spec, "gam_interactions", 0)
+        if isinstance(gpi, (int, float)) and not isinstance(gpi, bool) and int(gpi) > 0:
+            blocks.append(("two-way interactions", f"top {int(gpi)} pairs"))
     else:
         blocks = [(family, "unknown family")]
 
@@ -1866,6 +1879,10 @@ def svg_architecture(spec, state_dim, n_out, width: int = 640,
     ls = _spec_get(spec, "label_smoothing", 0.0)
     if _finite(ls) and float(ls) > 0.0:
         notes.append(f"label smoothing: {float(ls):g}")
+    # SPEC.md 78 (v0.64): the spectral input expansion (0 = legacy, no note)
+    ff = _spec_get(spec, "fourier_features", 0)
+    if isinstance(ff, (int, float)) and not isinstance(ff, bool) and int(ff) > 0:
+        notes.append(f"fourier features: K = {int(ff)}")
     text = ";  ".join(notes)
     parts.append(f'<text x="{width / 2:.1f}" y="{T + bh + 28:.1f}" '
                  f'text-anchor="middle" font-size="11" fill="{_AXIS}">'

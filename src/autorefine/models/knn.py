@@ -20,6 +20,7 @@ from __future__ import annotations
 import numpy as np
 
 from ..config import SpecError
+from ._fourier import apply_scaled  # SPEC.md 78.2.1 (shared spectral map)
 
 # SPEC.md 25.2: deterministic vote smoothing (uniform shift → argmax-safe)
 VOTE_EPS = 1e-6
@@ -28,7 +29,8 @@ VOTE_EPS = 1e-6
 class KNN:
     """k-nearest-neighbors over the memorized train split (SPEC.md 25.2)."""
 
-    def __init__(self, k: int, n_out: int, head: str) -> None:
+    def __init__(self, k: int, n_out: int, head: str,
+                 fourier_K: int = 0) -> None:
         if k < 1:
             raise SpecError(f"knn_k {k!r} must be >= 1")
         if head not in ("softmax", "mse"):
@@ -36,6 +38,11 @@ class KNN:
         self.k = int(k)
         self.n_out = int(n_out)
         self.head = head
+        # SPEC.md 78.2.1: the k-NN metric space may be the spectral expansion.
+        # The model owns the map: fit stores K + the train-data scale and
+        # expands both the memorized points and every query (K=0 → off, legacy).
+        self.fourier_K = int(fourier_K)
+        self.fourier_scale: np.ndarray | None = None
         self.X: np.ndarray = np.zeros((0, 0), dtype=np.float64)
         self.y: np.ndarray = np.zeros((0,), dtype=np.int64)
 
@@ -53,6 +60,10 @@ class KNN:
             raise SpecError(
                 f"knn target must be (n,) or (n, k_out) with n == {X.shape[0]}, "
                 f"got y.shape={y.shape}")
+        # SPEC.md 78.2.1: expand the memorized space (K=0 → X, legacy path)
+        if self.fourier_K > 0:
+            self.fourier_scale = np.maximum(np.abs(X).max(axis=0), 1e-6)
+            X = apply_scaled(X, self.fourier_K, self.fourier_scale)
         self.X = X
         self.y = y
         return self
@@ -62,6 +73,10 @@ class KNN:
         x = np.asarray(x, dtype=np.float64)
         if x.ndim == 1:
             x = x[None, :]
+        # SPEC.md 78.2.1: the query lives in the same expanded space as the
+        # memorized points (one stored scale — fit and inference agree)
+        if self.fourier_K > 0 and self.fourier_scale is not None:
+            x = apply_scaled(x, self.fourier_K, self.fourier_scale)
         n = x.shape[0]
         # squared Euclidean distance to every memorized point (numerically
         # clamped so the (a-b)^2 expansion never dips below 0)
@@ -92,6 +107,10 @@ class KNN:
             k=np.array(self.k),
             n_out=np.array(self.n_out),
             head=np.array(self.head),
+            # SPEC.md 78.2.1: the spectral map (absent in legacy checkpoints)
+            fourier_K=np.array(self.fourier_K),
+            **( {"fourier_scale": np.asarray(self.fourier_scale, dtype=np.float64)}
+               if self.fourier_scale is not None else {}),
         )
 
     @classmethod
@@ -102,7 +121,13 @@ class KNN:
             k = int(z["k"])
             n_out = int(z["n_out"])
             head = str(z["head"])
-        m = cls(k=k, n_out=n_out, head=head)
+            # SPEC.md 78.2.1: pre-v0.64 checkpoints have no fourier keys → K=0
+            fourier_K = (int(z["fourier_K"]) if "fourier_K" in z.files else 0)
+            fourier_scale = (z["fourier_scale"].astype(np.float64)
+                             if fourier_K > 0 and "fourier_scale" in z.files
+                             else None)
+        m = cls(k=k, n_out=n_out, head=head, fourier_K=fourier_K)
+        m.fourier_scale = fourier_scale
         m.X = X
         m.y = y
         return m

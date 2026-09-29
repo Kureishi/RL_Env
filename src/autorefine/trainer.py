@@ -27,10 +27,13 @@ from .config import ModelSpec, SpecError
 from .models.convnet import ConvNet
 from .models.gam import GAM
 from .models.gp import GP
+from .models._fourier import fourier_expand  # SPEC.md 78.2.1 (single source)
 from .models.knn import KNN
 from .models.mlp import MLP
 from .models.optimizers import make_optimizer
 from .models.trees import BoostingEnsemble, TreeEnsemble
+
+__all__ = ["fourier_expand"]
 
 Dataset = Tuple[np.ndarray, np.ndarray]  # (features (n, d), targets (n,) or (n, k))
 Model = Union[MLP, TreeEnsemble, BoostingEnsemble, KNN, ConvNet, GP, GAM]
@@ -338,7 +341,11 @@ def train(
         if time_limit_seconds is not None and time_limit_seconds <= 0.0:
             model = KNN(k=int(spec.knn_k), n_out=n_out, head=head)
             return TrainResult(model, 0, float("inf"), 0.0, True)
-        model = KNN(k=int(spec.knn_k), n_out=n_out, head=head).fit(X, y)
+        # SPEC.md 78: spectral expansion — the model owns the feature map (it
+        # stores K + the train-data scale and applies it in fit AND forward,
+        # so inference reproduces the fit-time space; K=0 → X, legacy path).
+        model = KNN(k=int(spec.knn_k), n_out=n_out, head=head,
+                    fourier_K=spec.fourier_features).fit(X, y)
         # A k-NN query is O(n * N); on episode tasks the train split is large
         # (tens of thousands of rows), so the reported final loss uses the
         # deterministic first 256 rows (exact when n <= 256, e.g. csv/image/
@@ -357,7 +364,13 @@ def train(
         if time_limit_seconds is not None and time_limit_seconds <= 0.0:
             model = GP(n_out=n_out, head=head)
             return TrainResult(model, 0, float("inf"), 0.0, True)
-        model = GP(n_out=n_out, head=head).fit(X, y)
+        # SPEC.md 78: RBF length scale (1.0 = legacy) + spectral expansion
+        # (the model owns the feature map: it stores K + scale and applies it
+        # in fit AND forward; K=0 → X, legacy path). The RFF draw order is
+        # unchanged, only its scale arg.
+        model = GP(n_out=n_out, head=head,
+                   length_scale=spec.gp_length_scale,
+                   fourier_K=spec.fourier_features).fit(X, y)
         # an RFF GP query is O(n * m * d); report the final loss on the first
         # 256 rows (exact when n <= 256) — the fitted model itself is unchanged
         m = min(n, 256)
@@ -376,7 +389,9 @@ def train(
         if time_limit_seconds is not None and time_limit_seconds <= 0.0:
             model = GAM(n_out=n_out, head=head)
             return TrainResult(model, 0, float("inf"), 0.0, True)
-        model = GAM(n_out=n_out, head=head, weight_decay=spec.weight_decay).fit(X, y)
+        model = GAM(n_out=n_out, head=head, weight_decay=spec.weight_decay,
+                    n_interactions=spec.gam_interactions  # SPEC.md 78
+                    ).fit(X, y)
         m = min(n, 256)
         loss = _training_loss(model, X[:m], y[:m], head)
         elapsed = time.perf_counter() - start
@@ -407,10 +422,22 @@ def train(
         return _train_neural(model, X, y, n, spec, seed, start,
                              time_limit_seconds, time_check_every, head)
 
-    # mlp (the default family): the shared neural training loop (SPEC.md 19.1)
+    # mlp (the default family): the shared neural training loop (SPEC.md 19.1).
+    # SPEC.md 78: the MLP owns the spectral feature map — it stores K + the
+    # train-data scale and expands the input in forward, so the first layer is
+    # sized to the expanded width d*(2K+1) while inference gets raw features
+    # (K=0 → in_dim d, fourier_K 0 → the exact legacy path, bit-identical).
+    K = int(spec.fourier_features)
+    if K > 0:
+        fourier_scale = np.maximum(np.abs(X).max(axis=0), 1e-6)
+        in_dim = int(X.shape[1]) * (2 * K + 1)
+    else:
+        fourier_scale = None
+        in_dim = int(X.shape[1])
     model = MLP(
-        X.shape[1], spec.architecture, n_out=n_out, activation=spec.activation,
+        in_dim, spec.architecture, n_out=n_out, activation=spec.activation,
         seed=seed, head=head, init_scale=spec.init_scale,  # SPEC.md 19.1
+        fourier_K=K, fourier_scale=fourier_scale,  # SPEC.md 78
     )
     return _train_neural(model, X, y, n, spec, seed, start,
                          time_limit_seconds, time_check_every, head)

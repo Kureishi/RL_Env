@@ -42,7 +42,10 @@ ACTIONS: tuple[tuple[str, object], ...] = tuple(
 _FAMILY_ORDER = {
     "tree": ("architecture", "train_steps", "input_noise", "model_family"),
     "boost": ("architecture", "train_steps", "input_noise", "model_family"),
-    "knn": ("knn_k", "model_family"),
+    # SPEC.md 78 (v0.64): the spectral expansion is consumed by knn too
+    # (the trainer expands before fit) — membership derives from the
+    # registry row; the historical order is kept, new field after knn_k.
+    "knn": ("knn_k", "fourier_features", "model_family"),
 }
 FAMILY_FIELDS: dict[str, tuple[str, ...]] = {
     fam: (CATALOG_FIELDS if fam in ("mlp", "convnet")

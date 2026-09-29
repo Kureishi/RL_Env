@@ -365,7 +365,11 @@ def _app_chart_marks(at) -> tuple[int, int, int]:
         if not isinstance(ch, dict):
             return
         for el in ch.values():
-            if getattr(el, "type", None) == "arrow_vega_lite_chart":
+            # streamlit 1.64+ renames the element `vega_lite_chart` (older
+            # versions: `arrow_vega_lite_chart`) — match both so the A16
+            # chart-kind assertions are version-robust.
+            if getattr(el, "type", None) in (
+                    "arrow_vega_lite_chart", "vega_lite_chart"):
                 spec = el.proto.spec
                 if '"type": "bar"' in spec:
                     bars += 1

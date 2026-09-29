@@ -48,6 +48,7 @@ import autorefine
 from autorefine.config import MODEL_FAMILIES
 from autorefine.improver import SPEC_FIELDS, SPEC_FIELD_NAMES, SpecField
 from autorefine.improver.actions import (
+    EXCLUDED_FROM_SEARCH,
     FIELD_NAMES,
     FIELD_SAMPLERS,
     LEGACY_FIELD_ORDER,
@@ -336,11 +337,13 @@ def test_fit_gate_line_names_the_metric():
 # --- 36.2 (G2): ModelSpec field registry -------------------------------------
 
 def test_registry_is_15_fields_in_catalog_order():
-    """A26 (SPEC.md 36.2): the registry is exactly the 15 catalog fields
-    (the A24 field set) in catalog order; every value is a SpecField
+    """A26 (SPEC.md 36.2): the registry is exactly the 18 catalog fields
+    (the 15 historical A24 fields + the three v0.64 fine-pattern fields,
+    SPEC.md 78) in catalog order; every value is a SpecField
     row whose `name` matches its key; the names tuple agrees."""
-    assert len(SPEC_FIELDS) == 15
-    assert tuple(SPEC_FIELDS) == HISTORICAL_FIELDS
+    assert len(SPEC_FIELDS) == 18
+    assert tuple(SPEC_FIELDS) == HISTORICAL_FIELDS + (
+        "fourier_features", "gam_interactions", "gp_length_scale")
     assert SPEC_FIELD_NAMES == tuple(SPEC_FIELDS)
     for name, row in SPEC_FIELDS.items():
         assert isinstance(row, SpecField), name
@@ -380,12 +383,12 @@ def test_registry_rows_are_valid():
 def test_catalog_is_the_registry_view():
     """A26 (SPEC.md 36.2): `FIELD_CATALOG` is the registry's name→space
     view and `CATALOG_FIELDS` its name order; the `ACTIONS` catalog is
-    field-major over that order with exactly 83 actions (77 historical +
-    the v0.61 value-level additions: gp/gam families, adamw optimizer,
-    step/exponential/cyclic schedules)."""
+    field-major over that order with exactly 95 actions (77 historical +
+    the v0.61 value-level additions + the v0.64 fine-pattern fields,
+    SPEC.md 78: 3 fields × 4 values)."""
     assert FIELD_CATALOG == {f.name: f.space for f in SPEC_FIELDS.values()}
     assert CATALOG_FIELDS == tuple(SPEC_FIELDS)
-    assert len(ACTIONS) == 83
+    assert len(ACTIONS) == 95
     assert ACTIONS == tuple((field, value)
                             for field in CATALOG_FIELDS
                             for value in FIELD_CATALOG[field])
@@ -405,7 +408,9 @@ def test_family_fields_derivable_from_registry():
         assert set(FAMILY_FIELDS[fam]) == derived, fam
     assert FAMILY_FIELDS["tree"] == HISTORICAL_TREE_FIELDS
     assert FAMILY_FIELDS["boost"] == HISTORICAL_TREE_FIELDS  # SPEC.md 19.2
-    assert FAMILY_FIELDS["knn"] == ("knn_k", "model_family")  # SPEC.md 25.2
+    # SPEC.md 25.2 + 78: knn_k + the spectral expansion (knn consumes it)
+    assert FAMILY_FIELDS["knn"] == (
+        "knn_k", "fourier_features", "model_family")
     # neural families: the FULL row set (v0.11 semantics — `knn_k`
     # validated-but-ignored outside knn), not the knn-derived set
     assert FAMILY_FIELDS["mlp"] == CATALOG_FIELDS
@@ -426,17 +431,20 @@ def test_bandit_search_views_are_consistent():
     `FIELD_SAMPLERS` is exhaustive over the registry in both directions
     (a registry field with a missing sampler, or a sampler for an
     unregistered field, fails the suite); `SEARCH_FIELDS` keeps the
-    `knn_k` exclusion (SPEC.md 25.7) — 14 fields."""
+    `EXCLUDED_FROM_SEARCH` exclusion (SPEC.md 25.7 + 78.2.4) — 14
+    fields."""
     assert set(FIELD_NAMES) == set(SPEC_FIELDS) == set(CATALOG_FIELDS)
     assert FIELD_NAMES == LEGACY_FIELD_ORDER
     assert ORDERED_FIELDS == tuple(
         f.name for f in SPEC_FIELDS.values() if f.kind == "ordered")
-    assert ORDERED_FIELDS == HISTORICAL_ORDERED
+    assert ORDERED_FIELDS == HISTORICAL_ORDERED + (
+        "fourier_features", "gam_interactions", "gp_length_scale")
     assert set(FIELD_SAMPLERS) == set(SPEC_FIELDS)
     # `SEARCH_FIELDS` keeps the legacy order too (it is the A1–A4
-    # proposal stream) minus `knn_k` (SPEC.md 25.7).
+    # proposal stream) minus the family-specific exclusions
+    # (`knn_k`, SPEC.md 25.7; the three v0.64 fine-pattern fields, 78.2.4).
     assert SEARCH_FIELDS == tuple(f for f in LEGACY_FIELD_ORDER
-                                  if f != "knn_k")
+                                  if f not in EXCLUDED_FROM_SEARCH)
     assert len(SEARCH_FIELDS) == 14  # the documented v0.10 legacy space
 
 
@@ -448,4 +456,4 @@ def test_version_round_v022():
     assertion advanced in place per SPEC.md 33.1)."""
     py = tomllib.loads(
         (REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.63.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.64.0"

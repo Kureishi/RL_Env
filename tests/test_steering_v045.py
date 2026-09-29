@@ -270,13 +270,16 @@ def test_train_manual_tiny_parity_returns_seven_keys():
 # --- 59.1 parameter_inspection (A49) ------------------------------------------
 
 def test_inspection_row_count_and_layers():
-    """A49 (SPEC.md 59.1): 24 rows — the 15 architecture rows (registry
-    order) followed by the 9 loop rows (KNOBS order)."""
+    """A49 (SPEC.md 59.1): 27 rows — the 18 architecture rows (registry
+    order) followed by the 9 loop rows (KNOBS order). Re-derived v0.64
+    (A68, 78.2): the 3 fine-pattern fields (fourier_features,
+    gam_interactions, gp_length_scale) join the registry, so 15 -> 18.
+    """
     rows = parameter_inspection([])
-    assert len(rows) == 24
+    assert len(rows) == 27
     layers = [r["layer"] for r in rows]
-    assert layers[:15] == ["architecture"] * 15
-    assert layers[15:] == ["loop"] * 9
+    assert layers[:18] == ["architecture"] * 18
+    assert layers[18:] == ["loop"] * 9
 
 
 def test_inspection_arch_row_shape_and_effect():
@@ -334,7 +337,7 @@ def test_inspection_empty_entries_degrades():
     and every effect field is None (an old run without field_stats still
     renders every row)."""
     rows = parameter_inspection([])
-    assert len(rows) == 24
+    assert len(rows) == 27
     for r in rows:
         assert r["best_seen"] is None
         assert r["delta"] is None
@@ -548,7 +551,7 @@ def test_version_round_v045():
     """A49 (SPEC.md 59.6, 33.1): the version stepped to ``0.45.0`` in both
     sources (v0.45 ⇒ ``0.45.0``, M48, SPEC.md 59)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.63.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.64.0"
 
 
 def test_all_exports_steering_round():

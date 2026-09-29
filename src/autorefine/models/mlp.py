@@ -10,6 +10,7 @@ from typing import Sequence
 import numpy as np
 
 from ..config import ACTIVATIONS, SpecError
+from ._fourier import apply_scaled  # SPEC.md 78.2.1 (shared spectral map)
 
 
 HEADS = ("softmax", "mse")
@@ -76,6 +77,8 @@ class MLP:
         seed: int,
         head: str = "softmax",
         init_scale: float = 1.0,
+        fourier_K: int = 0,
+        fourier_scale: np.ndarray | None = None,
     ) -> None:
         if activation not in ACTIVATIONS:
             raise SpecError(f"unknown activation {activation!r}")
@@ -98,11 +101,19 @@ class MLP:
         self.n_out = n_out
         self.head = head
         self._is_mse = head == "mse"  # SPEC.md 74: dispatch hoisted to a flag
+        # SPEC.md 78.2.1: spectral feature map (K=0 → off, the legacy path). The
+        # model owns the map: it stores K + the train-data scale and expands the
+        # input in forward, so inference reproduces the fit-time space.
+        self.fourier_K = int(fourier_K)
+        self.fourier_scale = fourier_scale
         self._cache: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
 
     # --- forward -----------------------------------------------------------
     def forward(self, x: np.ndarray) -> np.ndarray:
         self._cache = []
+        if self.fourier_K > 0 and self.fourier_scale is not None:
+            x = apply_scaled(np.asarray(x, dtype=np.float64),
+                             self.fourier_K, self.fourier_scale)  # SPEC.md 78
         a = x
         act = self._act_fn  # SPEC.md 70: dispatch hoisted out of the loop
         for i, (w, b) in enumerate(self.layers[:-1]):
@@ -179,6 +190,11 @@ class MLP:
         arrays["n_out"] = np.array(self.n_out)
         arrays["activation"] = np.array(self.activation)
         arrays["head"] = np.array(self.head)
+        # SPEC.md 78.2.1: the spectral feature map (absent in legacy checkpoints)
+        arrays["fourier_K"] = np.array(self.fourier_K)
+        if self.fourier_scale is not None:
+            arrays["fourier_scale"] = np.asarray(self.fourier_scale,
+                                                 dtype=np.float64)
         np.savez(path, **arrays)
 
     @classmethod
@@ -193,6 +209,11 @@ class MLP:
             in_dim = int(z["in_dim"])
             n_out = int(z["n_out"])
             head = str(z["head"]) if "head" in z.files else "softmax"
+            # SPEC.md 78.2.1: pre-v0.64 checkpoints have no fourier keys → K=0
+            fourier_K = (int(z["fourier_K"]) if "fourier_K" in z.files else 0)
+            fourier_scale = (z["fourier_scale"].astype(np.float64)
+                             if fourier_K > 0 and "fourier_scale" in z.files
+                             else None)
         m = cls.__new__(cls)
         m.layers = layers
         m.activation = activation
@@ -201,5 +222,7 @@ class MLP:
         m.n_out = n_out
         m.head = head  # default keeps pre-extension checkpoints loadable
         m._is_mse = head == "mse"  # SPEC.md 74 (keeps the 74 flag in sync)
+        m.fourier_K = fourier_K  # SPEC.md 78.2.1 (legacy default: 0)
+        m.fourier_scale = fourier_scale
         m._cache = []
         return m

@@ -54,6 +54,17 @@ GRADIENT_CLIP_RANGE = (0.0, 10.0)
 # early stopping patience in steps (mlp only); 0 = disabled (train all steps)
 EARLY_STOPPING_RANGE = (0, 50)
 
+# --- SPEC.md 78 (v0.64): fine-pattern capture fields ------------------------
+# All three default to the legacy behavior (0 / 0 / 1.0), so pre-v0.64 spec
+# JSON stays loadable and every default run stays bit-identical (the §17 /
+# §19.1 / §25.2 back-compat pattern).
+# spectral input expansion order K (0 = off; mlp/knn/gp consume it)
+FOURIER_FEATURES = (0, 16, 32, 64)
+# GAM two-way interaction pair count (0 = additive-only; gam consumes it)
+GAM_INTERACTIONS = (0, 4, 8, 16)
+# GP RBF length scale (1.0 = the legacy unit length scale; gp consumes it)
+GP_LENGTH_SCALES = (0.25, 0.5, 1.0, 2.0)
+
 
 class SpecError(ValueError):
     """Raised when a ModelSpec value is outside its allowed space."""
@@ -101,6 +112,14 @@ class ModelSpec:
     # --- SPEC.md 25.2: knn family's k (default 5 keeps pre-v0.11 spec JSON
     # loadable); validated for every family, consumed only by knn.
     knn_k: int = 5
+    # --- SPEC.md 78 (v0.64): fine-pattern capture (validated for every
+    # family, consumed only by the named family — the knn_k pattern, 25.2)
+    # spectral input expansion order K (0 = legacy; mlp/knn/gp consume)
+    fourier_features: int = 0
+    # GAM two-way interaction pairs (0 = additive-only; gam consumes)
+    gam_interactions: int = 0
+    # GP RBF length scale (1.0 = legacy unit scale; gp consumes)
+    gp_length_scale: float = 1.0
 
     def __post_init__(self) -> None:
         # normalize list -> tuple even though the class is frozen
@@ -177,6 +196,14 @@ class ModelSpec:
         # SPEC.md 25.2: knn_k is validated for every family (consumed only by knn)
         _require(int(self.knn_k) in KNN_K_VALUES,
                  f"knn_k {self.knn_k} not in {KNN_K_VALUES}")
+        # SPEC.md 78: fine-pattern fields (validated for every family,
+        # consumed only by their family — the knn_k pattern, 25.2)
+        _require(int(self.fourier_features) in FOURIER_FEATURES,
+                 f"fourier_features {self.fourier_features} not in {FOURIER_FEATURES}")
+        _require(int(self.gam_interactions) in GAM_INTERACTIONS,
+                 f"gam_interactions {self.gam_interactions} not in {GAM_INTERACTIONS}")
+        _require(self.gp_length_scale in GP_LENGTH_SCALES,
+                 f"gp_length_scale {self.gp_length_scale} not in {GP_LENGTH_SCALES}")
 
     # --- serialization -----------------------------------------------------
     def to_dict(self) -> dict[str, Any]:
@@ -196,6 +223,10 @@ class ModelSpec:
             "init_scale": self.init_scale,
             "gradient_clipping": self.gradient_clipping,
             "knn_k": int(self.knn_k),  # SPEC.md 25.2
+            # SPEC.md 78 (v0.64): fine-pattern capture fields
+            "fourier_features": int(self.fourier_features),
+            "gam_interactions": int(self.gam_interactions),
+            "gp_length_scale": float(self.gp_length_scale),
         }
 
     @classmethod
@@ -220,6 +251,10 @@ class ModelSpec:
             gradient_clipping=float(d.get("gradient_clipping", 0.0)),
             # default keeps pre-v0.11 spec JSON loadable (SPEC.md 25.2, back-compat)
             knn_k=int(d.get("knn_k", 5)),
+            # defaults keep pre-v0.64 spec JSON loadable (SPEC.md 78, back-compat)
+            fourier_features=int(d.get("fourier_features", 0)),
+            gam_interactions=int(d.get("gam_interactions", 0)),
+            gp_length_scale=float(d.get("gp_length_scale", 1.0)),
         )
 
     def fingerprint(self) -> str:
@@ -278,6 +313,14 @@ def spec_n_params(spec, state_dim: int | None, n_out: int | None,
         if any(not isinstance(h, (int, float)) or isinstance(h, bool) or h < 1
                for h in arch):
             return None
+        # SPEC.md 78: the spectral expansion widens the input before the first
+        # layer — the count reflects the model that actually trains (K=0,
+        # the default and every pre-v0.64 spec dict, is exactly the legacy
+        # formula: d*(2*0+1) == d)
+        K = int(d.get("fourier_features", 0))
+        if K not in FOURIER_FEATURES:
+            return None
+        in_dim = in_dim * (2 * K + 1)
         sizes = [in_dim, *[int(h) for h in arch], n_outputs]
         return int(sum(sizes[i] * sizes[i + 1] + sizes[i + 1]
                        for i in range(len(sizes) - 1)))

@@ -13,6 +13,9 @@ from ..config import (
     ACTIVATIONS,
     BATCH_SIZES,
     CONV_FILTERS,
+    FOURIER_FEATURES,
+    GAM_INTERACTIONS,
+    GP_LENGTH_SCALES,
     HIDDEN_LAYER_SIZES,
     INPUT_NOISE_RANGE,
     KNN_K_VALUES,
@@ -42,6 +45,12 @@ LEGACY_FIELD_ORDER = (
     "model_family", "label_smoothing", "lr_schedule",
     "early_stopping_patience", "init_scale", "gradient_clipping",
     "knn_k",
+    # SPEC.md 78 (v0.64): appended at the END — stream positions AFTER knn_k.
+    # The A1-A4 legacy bandit stream stays bit-identical: the §18.7 pin's
+    # 5 cold-start picks (weight_decay, train_steps, optimizer, model_family,
+    # learning_rate — lexicographically largest untried first) are unchanged
+    # because the three new names sort below "label_smoothing" (78.2.4).
+    "fourier_features", "gam_interactions", "gp_length_scale",
 )
 FIELD_NAMES = tuple(f for f in LEGACY_FIELD_ORDER if f in SPEC_FIELDS)
 
@@ -92,17 +101,27 @@ FIELD_SAMPLERS = {
     "gradient_clipping": lambda rng, task=None: float(rng.choice(FIELD_CATALOG["gradient_clipping"])),
     # SPEC.md 25.2: knn family's k samples the catalog values
     "knn_k": lambda rng, task=None: int(rng.choice(KNN_K_VALUES)),
+    # SPEC.md 78 (v0.64): the fine-pattern fields sample the catalog values
+    # (single source of truth in FIELD_CATALOG, the v0.5 sampler contract)
+    "fourier_features": lambda rng, task=None: int(rng.choice(FOURIER_FEATURES)),
+    "gam_interactions": lambda rng, task=None: int(rng.choice(GAM_INTERACTIONS)),
+    "gp_length_scale": lambda rng, task=None: float(rng.choice(GP_LENGTH_SCALES)),
 }
 
 # SPEC.md 25.7 (full suite green; A1-A4 unchanged): the v1 search policy's
 # random-field space stays the v0.10 14 fields, so its seeded proposal
 # stream (and the A1-A4 acceptance runs) is bit-stable as the spec space
 # grows (the same legacy-stability pattern as SPEC.md 19.4's stable action
-# indices). The new `knn_k` field is explored where it belongs: the family
-# bandit (FAMILY_FIELDS["knn"]), the catalog (77 actions), and the spec
-# surface. `knn_k` remains in FIELD_NAMES/FIELD_SAMPLERS, so
-# mutate_spec_dict(spec, "knn_k", ...) works for every policy.
-SEARCH_FIELDS = tuple(f for f in FIELD_NAMES if f != "knn_k")
+# indices). The excluded fields are explored where they belong: the family
+# bandit (FAMILY_FIELDS), the 95-action catalog, and the spec surface. They
+# remain in FIELD_NAMES/FIELD_SAMPLERS, so
+# mutate_spec_dict(spec, <field>, ...) works for every policy.
+# SPEC.md 78 (v0.64): the three fine-pattern fields join the exclusion —
+# like knn_k in v0.25 they are bandit/catalog/spec-surface fields, so the
+# 14-field SearchPolicy proposal stream stays v0.10 bit-stable (78.2.4).
+EXCLUDED_FROM_SEARCH = ("knn_k", "fourier_features", "gam_interactions",
+                        "gp_length_scale")
+SEARCH_FIELDS = tuple(f for f in FIELD_NAMES if f not in EXCLUDED_FROM_SEARCH)
 
 # SPEC.md 36.2 (v0.22, G2): the sampler table must be exhaustive over the
 # registry — A26 checks `set(FIELD_SAMPLERS) == set(SPEC_FIELDS)` in both
