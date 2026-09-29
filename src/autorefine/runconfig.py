@@ -29,12 +29,15 @@ _FIELDS = (
     # SPEC.md 59.4 (v0.45): the steering rules (empty = pre-v0.45 runs;
     # optional in `from_dict` for back-compat — old run_config.json loads)
     "pins", "biases", "constraints",
+    # SPEC.md 80 (v0.66): the uploaded model path (None = a fresh run;
+    # optional in `from_dict` for back-compat — pre-v0.66 configs load)
+    "initial_model",
     "autorefine_version",
 )
 
 # SPEC.md 59.4 (v0.45): the v0.45 fields are optional in `from_dict`
 # (absent → the empty list) so pre-v0.45 run_config.json still loads
-_OPTIONAL_FIELDS = ("pins", "biases", "constraints")
+_OPTIONAL_FIELDS = ("pins", "biases", "constraints", "initial_model")
 
 _INT = lambda v: isinstance(v, int) and not isinstance(v, bool)  # noqa: E731
 _NUM = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)  # noqa: E731
@@ -66,6 +69,8 @@ _VALIDATORS: dict[str, Any] = {
     "pins": lambda v: isinstance(v, list),
     "biases": lambda v: isinstance(v, list),
     "constraints": lambda v: isinstance(v, list),
+    # SPEC.md 80 (v0.66): a path string or None (a fresh run)
+    "initial_model": _OPT(lambda v: isinstance(v, str) and v),
     "autorefine_version": lambda v: isinstance(v, str) and v,
 }
 
@@ -107,6 +112,8 @@ class RunConfig:
     pins: list = field(default_factory=list)
     biases: list = field(default_factory=list)
     constraints: list = field(default_factory=list)
+    # SPEC.md 80 (v0.66): the uploaded trained-model path (None = fresh run)
+    initial_model: str | None = None
     # identity
     autorefine_version: str = "0.0.0"
 
@@ -138,7 +145,10 @@ class RunConfig:
         for name in _FIELDS:
             if name not in d:
                 if name in _OPTIONAL_FIELDS:
-                    kw[name] = []  # SPEC.md 59.4 (v0.45): pre-v0.45 back-compat
+                    # SPEC.md 59.4 (v0.45): pre-v0.45 back-compat — the
+                    # steering lists default to []; SPEC.md 80 (v0.66):
+                    # the model path to None (a fresh run)
+                    kw[name] = (None if name == "initial_model" else [])
                     continue
                 raise ValueError(f"run_config is missing field {name!r} "
                                  f"(SPEC.md 37.1.2)")
@@ -184,6 +194,8 @@ class RunConfig:
             pins=list(sd.get("pins") or []),  # SPEC.md 59.4 (v0.45)
             biases=list(sd.get("biases") or []),  # SPEC.md 59.4 (v0.45)
             constraints=list(sd.get("constraints") or []),  # 59.4 (v0.45)
+            # SPEC.md 80 (v0.66): the uploaded model path (None = fresh)
+            initial_model=getattr(env, "initial_model_path", None),
             autorefine_version=autorefine.__version__,
         )
 
@@ -286,6 +298,9 @@ def fit_recipe(config: RunConfig) -> list[str]:
     for f, vs in d["constraints"]:
         cmd += ["--constrain",
                 f"{f}={','.join(_steering_value(x) for x in vs)}"]
+    # SPEC.md 80 (v0.66): the fine-tuning seed model — emitted when set
+    if d["initial_model"] is not None:
+        cmd += ["--from-model", str(d["initial_model"])]
     return cmd
 
 
@@ -378,4 +393,8 @@ def runconfig_to_flags(config: RunConfig) -> dict[str, Any]:
         flags["constrain"] = [
             f"{f}={','.join(_steering_value(x) for x in vs)}"
             for f, vs in d["constraints"]]
+    # SPEC.md 80 (v0.66): the fine-tuning seed model — emitted when set
+    # (kebab key: the `--config` applier maps option strings by name)
+    if d["initial_model"] is not None:
+        flags["from-model"] = d["initial_model"]
     return flags

@@ -81,7 +81,7 @@ def _install_screen_train(monkeypatch, screen_scores: list[float],
     calls = {"s": 0, "f": 0}
 
     def fake_train(dataset, spec, seed, time_limit_seconds=0.0,
-                   n_out=1, head="mse"):
+                   n_out=1, head="mse", warm_start=None):
         n = int(dataset[0].shape[0])
         if n <= 4:  # the prefix subsample (floor(16 * 0.25) = 4 rows)
             sv = screen_scores[min(calls["s"], len(screen_scores) - 1)]
@@ -99,7 +99,7 @@ def _install_screen_train(monkeypatch, screen_scores: list[float],
 def _install_const_train(monkeypatch, score: float) -> None:
     """A constant-score `train` (the screening-off pin guard)."""
     def fake_train(dataset, spec, seed, time_limit_seconds=0.0,
-                   n_out=1, head="mse"):
+                   n_out=1, head="mse", warm_start=None):
         return SimpleNamespace(
             model=_FakeModel(score), train_seconds=0.001,
             loss_history=[], time_capped=False)

@@ -100,7 +100,7 @@ def _install_fake_train(monkeypatch, scores: list[float]) -> None:
     calls = {"i": 0}
 
     def fake_train(dataset, spec, seed, time_limit_seconds=0.0,
-                   n_out=1, head="mse"):
+                   n_out=1, head="mse", warm_start=None):
         i = calls["i"]
         calls["i"] += 1
         sv = scores[min(i, len(scores) - 1)]

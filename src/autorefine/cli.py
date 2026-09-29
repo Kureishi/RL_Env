@@ -310,6 +310,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         target=None,  # `run` is ungated (SPEC.md 37.2.3)
         rl_episodes=args.rl_episodes if args.policy == "rl" else None,
         steering=steering,  # SPEC.md 59.2 (v0.45)
+        initial_model=args.from_model,  # v0.66 (SPEC.md 80; None = off)
         **quality,
     )
     _drive(args, env)
@@ -440,6 +441,17 @@ def _cmd_fit(args: argparse.Namespace) -> int:
         if getattr(args, "dry_run", False):
             return _fit_dry_run_portfolio(args)
         return _fit_portfolio(args)
+    if getattr(args, "from_model", None) is not None:
+        # SPEC.md 80.2.5 (v0.66): the uploaded model is a single-task seed —
+        # a portfolio spreads one budget across tasks, a re-run carries its
+        # own recipe (which may already name the model)
+        if args.from_run is not None:
+            print("--from-model and --from-run are mutually exclusive "
+                  "(SPEC.md 80.2.5)", file=sys.stderr)
+            return 1
+        print("--from-model and --tasks are mutually exclusive "
+              "(SPEC.md 80.2.5)", file=sys.stderr)
+        return 1
     if args.data is not None and args.from_run is not None:
         print("--data and --from-run are mutually exclusive (SPEC.md 37.1.4)",
               file=sys.stderr)
@@ -788,6 +800,7 @@ def _fit_data(args: argparse.Namespace) -> tuple:
         policy=args.policy, target=args.target,
         rl_episodes=args.rl_episodes if args.policy == "rl" else None,
         steering=steering,  # SPEC.md 59.2 (v0.45)
+        initial_model=args.from_model,  # v0.66 (SPEC.md 80; None = off)
         **quality,
     )
     return env, args.target, metric
@@ -860,6 +873,7 @@ def _fit_from_run(args: argparse.Namespace) -> tuple:
         kfold=config.kfold,  # v0.30 (SPEC.md 44.1): the recipe's kfold
         policy=config.policy, target=bar, rl_episodes=config.rl_episodes,
         steering=steering,  # SPEC.md 59.4 (v0.45): the recipe's steering rules
+        initial_model=config.initial_model,  # v0.66 (SPEC.md 80; None = off)
         # SPEC.md 38.2 (v0.24, T2): lineage — this run re-executes that one
         parent_run=run_dir.name,
     )
@@ -2741,6 +2755,11 @@ def build_parser() -> argparse.ArgumentParser:
                        help="v0.30 (SPEC.md 44.1): score each model on K "
                             "distinct held-out subsets and average (k-fold "
                             "holdout scoring; 0 = off, the legacy single split)")
+    p_run.add_argument("--from-model", default=None, metavar="NPZ",
+                       help="v0.66 (SPEC.md 80): start from an uploaded "
+                            "trained model (*.npz) — scored as the baseline, "
+                            "its weights warm-start compatible candidates; "
+                            "default: none (a fresh baseline)")
     p_run.add_argument("--demo", action="store_true",
                        help="v0.27 (SPEC.md 41.3): the narrated demo — one tiny, "
                             "deterministic parity-v1 loop (3 experiments, 60 s "
@@ -2985,6 +3004,11 @@ def build_parser() -> argparse.ArgumentParser:
                        help="v0.30 (SPEC.md 44.1): score each model on K "
                             "distinct held-out subsets and average (k-fold "
                             "holdout scoring; 0 = off, the legacy single split)")
+    p_fit.add_argument("--from-model", default=None, metavar="NPZ",
+                       help="v0.66 (SPEC.md 80): start from an uploaded "
+                            "trained model (*.npz) — scored as the baseline, "
+                            "its weights warm-start compatible candidates; "
+                            "default: none (a fresh baseline)")
     p_fit.add_argument("--quiet", action="store_true",
                        help="v0.33 (SPEC.md 47.3): suppress the per-experiment "
                             "loop output and the per-class diagnostics (keep "

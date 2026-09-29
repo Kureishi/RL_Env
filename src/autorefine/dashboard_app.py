@@ -35,6 +35,7 @@ from autorefine import (
     describe_policy,        # 68.2.2 (v0.54): the policy preview card
 )
 from autorefine.improver.rl_policy import policy_from_bytes  # 68.2.1 (v0.54)
+from autorefine.finetune import load_checkpoint  # 80 (v0.66): uploaded model
 from autorefine.rl_dashboard import BUILTIN_TASKS  # 68.1.4 (v0.54)
 from autorefine.config import DEFAULT_SPEC  # 59.3 (v0.45): manual defaults
 from autorefine.improver.specspace import SPEC_FIELDS  # 59 (v0.45) the registry
@@ -1080,7 +1081,8 @@ def _run(csv_path: str, label: str, target: float, policy: str, seed: int,
          steering: "SteeringState | None" = None,
          episodes: int = 5, epsilon: float = 0.0, epsilon_decay: float = 1.0,
          keep_best: bool = True,
-         initial_policy_bytes: "bytes | None" = None) -> None:
+         initial_policy_bytes: "bytes | None" = None,
+         initial_model: "str | None" = None) -> None:
     """Start the live loop (SPEC.md 51.2.3): build the runner, launch the
     daemon worker, then drain its messages synchronously into the live UI.
 
@@ -1111,6 +1113,8 @@ def _run(csv_path: str, label: str, target: float, policy: str, seed: int,
             seed=seed, experiments=experiments, max_train_seconds=max_train,
             runs_dir=runs_dir, search_quality=quality,
             steering=steering,  # SPEC.md 59.2 (v0.45): the steering rules (None = off)
+            # SPEC.md 80 (v0.66): the uploaded trained model (None = fresh)
+            initial_model=initial_model,
         )
     record = {
         "thread": None,
@@ -2226,6 +2230,13 @@ def main() -> None:
     target = side.number_input("Target score (0–100)", min_value=0.0, max_value=100.0,
                                value=95.0, step=0.5, key="target",
                                help=KNOB_GLOSSARY["target"])
+    side.file_uploader(
+        "Start from a trained model (.npz) — optional", type=["npz"],
+        key="model_upload",
+        help="Optional: a previously trained AutoRefine model. It is scored "
+             "as the baseline (never retrained) and its weights seed the "
+             "compatible candidates — fine-tuning the loop on your data. "
+             "Works with the bandit and search policies.")
 
     # 48.1.2 (UI fix): the Advanced knob set was a collapsed ``st.expander``,
     # which some Streamlit/theme builds render with its children escaping the
@@ -2483,6 +2494,30 @@ def main() -> None:
                     except ValueError as exc:
                         st.error(f"invalid steering rule: {exc} ")
                         st.stop()
+                # SPEC.md 80 (v0.66): the uploaded trained model (the
+                # fine-tune seed) — materialize it to the session temp dir
+                # and pre-validate (a file error is a friendly stop; a
+                # task mismatch surfaces through the worker's error
+                # message, the existing error path). The RL loop cannot
+                # take one (its runner owns no such kwarg).
+                _mod_up = st.session_state.get("model_upload")
+                _mod_path: str | None = None
+                if _mod_up is not None:
+                    if policy == "rl":
+                        st.warning("Starting from a trained model needs the "
+                                   "bandit or search policy — switch the "
+                                   "policy or clear the upload.")
+                        st.stop()
+                    _dest = Path(tempfile.gettempdir()) / "autorefine_dashboard"
+                    _dest.mkdir(parents=True, exist_ok=True)
+                    _mod_path = str(_dest / (Path(_mod_up.name).name
+                                             or "model.npz"))
+                    Path(_mod_path).write_bytes(_mod_up.getvalue())
+                    try:
+                        load_checkpoint(_mod_path)
+                    except ValueError as exc:
+                        st.warning(f"could not use that model file: {exc} ")
+                        st.stop()
                 # 68.3.1 (v0.54, A58): the RL knobs come from session_state —
                 # set by the sidebar widgets when advanced is on, or by the
                 # materialized defaults when it is off. The uploaded policy
@@ -2500,7 +2535,8 @@ def main() -> None:
                      keep_best=bool(st.session_state.get("rl_keep_best", True)),
                      initial_policy_bytes=(
                          _rl_up.getvalue() if (_rl_up is not None
-                                               and policy == "rl") else None))
+                                               and policy == "rl") else None),
+                     initial_model=_mod_path)
         elif result is not None:
             # 69.4 (v0.55, A59): the run is finished — point at the Results
             # tab instead of a blank re-run area

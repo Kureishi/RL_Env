@@ -34,6 +34,12 @@ from ..memory import (
 )
 from ..pareto import ParetoFrontier
 from ..runconfig import RunConfig  # SPEC.md 37.1 (v0.23, G3)
+from ..finetune import (  # SPEC.md 80 (v0.66): fine-tuning
+    Checkpoint,
+    can_warm_start,
+    load_checkpoint,
+    validate_for_task,
+)
 from ..steering import SteeringState, apply_steering  # SPEC.md 59.2 (v0.45)
 from ..tasks import TASKS
 from ..trainer import train
@@ -260,6 +266,12 @@ class AutoRefineEnv:
         # field, constraints reject out-of-set candidates (invalid_spec).
         # Not a knob (59.2): absent from KNOBS; recorded in RunConfig.
         steering: SteeringState | None = None,
+        # --- v0.66 fine-tuning (SPEC.md 80; None = off, pre-v0.66 exact) ----
+        # path to a saved model (*.npz) to start from: scored as the free
+        # baseline (never retrained) and offered as a warm start for
+        # compatible candidates (80.3). Not a knob: absent from KNOBS;
+        # recorded in RunConfig (80.4) and the summary (80.2.4).
+        initial_model: str | Path | None = None,
     ) -> None:
         if task not in TASKS:  # registry: SPEC.md 15 "more tasks"
             raise ValueError(f"unknown task {task!r} (available: {sorted(TASKS)})")
@@ -302,6 +314,26 @@ class AutoRefineEnv:
             self.task = task_cls(seed=self.seed, **self.task_config)
         else:
             self.task = task_cls(seed=self.seed)
+        # SPEC.md 80 (v0.66): start from an uploaded trained model — loaded
+        # and validated at construction (fail loud, before any reset);
+        # None = the exact pre-v0.66 path (A70)
+        self.initial_checkpoint: Checkpoint | None = None
+        self.initial_model_path: str | None = None
+        self.initial_baseline_score: float | None = None
+        if initial_model is not None:
+            if steering is not None and steering.pins:
+                raise ValueError(
+                    "initial_model and steering pins are mutually "
+                    "exclusive: the uploaded model replaces the pinned "
+                    "baseline (SPEC.md 80.2.5)")
+            cp = load_checkpoint(initial_model)
+            ok, reason = validate_for_task(cp, self.task)
+            if not ok:
+                raise ValueError(
+                    f"uploaded model does not fit task {task!r}: {reason} "
+                    f"(SPEC.md 80.2.4)")
+            self.initial_checkpoint = cp
+            self.initial_model_path = str(initial_model)
         self.bm = BudgetManager(self.budget)
         self.runs_dir = Path(runs_dir)
         # SPEC.md 20.3: the effective train-split size in the task's native
@@ -422,28 +454,44 @@ class AutoRefineEnv:
         # SPEC.md 20.3: size from the explicit override or the task default)
         self.dataset = self.task.make_dataset(self.dataset_size)
 
-        # SPEC.md 59.2.3 (v0.45): the baseline — DEFAULT_SPEC with the
-        # steering pins force-set (no pins = DEFAULT_SPEC exactly, G2)
-        base_spec = self._base_spec()
-        # baseline: free initialization, not counted against the budget
-        result = train(
-            self.dataset, base_spec, self.seed,
-            time_limit_seconds=self.bm.train_time_limit(),
-            n_out=self.task.n_outputs, head=self.task.head,
-        )
-        score, std, gen, gen_gap = self._evaluate(result.model)
-        eff = self._eff(score, result.train_seconds, gen_gap)
+        # SPEC.md 80 (v0.66): with an uploaded model it IS the baseline —
+        # scored on the holdout, never retrained (train_seconds 0.0);
+        # otherwise the legacy path trains the (possibly pinned) baseline
+        cp = self.initial_checkpoint
+        if cp is not None:
+            base_spec = cp.spec
+            base_model = cp.model
+            base_train_seconds = 0.0
+            base_loss_history: list = []
+            score, std, gen, gen_gap = self._evaluate(base_model)
+            eff = self._eff(score, base_train_seconds, gen_gap)
+            self.initial_baseline_score = score
+        else:
+            # SPEC.md 59.2.3 (v0.45): the baseline — DEFAULT_SPEC with the
+            # steering pins force-set (no pins = DEFAULT_SPEC exactly, G2)
+            base_spec = self._base_spec()
+            # baseline: free initialization, not counted against the budget
+            result = train(
+                self.dataset, base_spec, self.seed,
+                time_limit_seconds=self.bm.train_time_limit(),
+                n_out=self.task.n_outputs, head=self.task.head,
+            )
+            score, std, gen, gen_gap = self._evaluate(result.model)
+            eff = self._eff(score, result.train_seconds, gen_gap)
+            base_model = result.model
+            base_train_seconds = result.train_seconds
+            base_loss_history = result.loss_history
         self.baseline_score = score
         self.best_score = score
         self.baseline_eff = eff
         self.best_eff = eff
         self.best_std = std
         self.best_spec = base_spec
-        self.best_model = result.model
+        self.best_model = base_model
         self.seen.add(base_spec.fingerprint())
-        self.pareto.add(score, result.train_seconds, base_spec.fingerprint())
+        self.pareto.add(score, base_train_seconds, base_spec.fingerprint())
         if self.ensemble_top_k > 0:  # SPEC.md 19.3: the baseline is a member
-            self._top.append((score, result.model))
+            self._top.append((score, base_model))
         self.memory.log({
             "kind": KIND_BASELINE,  # SPEC.md 35.1 (C4): the kind registry
             "spec": base_spec.to_dict(),
@@ -453,10 +501,12 @@ class AutoRefineEnv:
             "std": std,  # SPEC.md 30.4 (V4): the §18.3 holdout sigma (0.0 legacy)
             "gen_score": gen,
             "gen_gap": gen_gap,
-            "train_seconds": result.train_seconds,
+            "train_seconds": base_train_seconds,
             "effective_score": eff,  # SPEC.md 18 (== score in legacy mode)
             "accepted": True,
-            "loss_history": result.loss_history,  # SPEC.md 28.1 (C1)
+            "loss_history": base_loss_history,  # SPEC.md 28.1 (C1)
+            # SPEC.md 80 (v0.66): provenance — additive conditional key
+            **({"from_model": True} if cp is not None else {}),
         })
         self._dup_streak = 0  # SPEC.md 20.2: fresh episode, fresh streak
         self._stall_streak = 0  # SPEC.md 31.1: fresh episode, fresh patience
@@ -466,17 +516,25 @@ class AutoRefineEnv:
         self._screen_champion = None
         self._screen_baseline_score = None
         if self.screen_active:
-            # SPEC.md 59.2.3 (v0.45): a pinned baseline is a pinned champion
-            sres = train(
-                self._subsample(self.dataset), base_spec, self.seed,
-                time_limit_seconds=self.bm.train_time_limit(),
-                n_out=self.task.n_outputs, head=self.task.head,
-            )
-            self._screen_champion = float(self._evaluate(sres.model)[0])
-            # SPEC.md 33.3: the summary's baseline_screen_score (32.2) is the
-            # reset champion; a curriculum step-up re-pins the champion, and
-            # each re-pinned value rides its curriculum event row instead
-            self._screen_baseline_score = self._screen_champion
+            if cp is not None:
+                # SPEC.md 80 (v0.66): the uploaded model is the screening
+                # champion — already scored at reset, no subsample train
+                self._screen_champion = float(score)
+                self._screen_baseline_score = self._screen_champion
+            else:
+                # SPEC.md 59.2.3 (v0.45): a pinned baseline is a pinned
+                # champion
+                sres = train(
+                    self._subsample(self.dataset), base_spec, self.seed,
+                    time_limit_seconds=self.bm.train_time_limit(),
+                    n_out=self.task.n_outputs, head=self.task.head,
+                )
+                self._screen_champion = float(self._evaluate(sres.model)[0])
+                # SPEC.md 33.3: the summary's baseline_screen_score (32.2)
+                # is the reset champion; a curriculum step-up re-pins the
+                # champion, and each re-pinned value rides its curriculum
+                # event row instead
+                self._screen_baseline_score = self._screen_champion
         self._started = True
         return self._state()
 
@@ -580,6 +638,9 @@ class AutoRefineEnv:
         # convnet spec on a flat task raises SpecError here -> SPEC.md 25.4
         try:
             full_dataset = self._dataset_for(spec)
+            # SPEC.md 80 (v0.66): the uploaded model's weights seed this
+            # candidate when compatible (None = the exact legacy path)
+            warm = self._warm_start_for(spec)
             # SPEC.md 32.2: opt-in two-stage screening — the candidate is
             # first trained on a prefix subsample and scored; only a strict
             # beat of the fixed champion (32.2) spends the full training
@@ -588,6 +649,7 @@ class AutoRefineEnv:
                     self._subsample(full_dataset), spec, self.seed,
                     time_limit_seconds=self.bm.train_time_limit(),
                     n_out=self.task.n_outputs, head=self.task.head,
+                    warm_start=warm,
                 )
                 s_score, s_std, s_gen, s_gap = self._evaluate(sres.model)
                 if not s_score > self._screen_champion:
@@ -598,6 +660,7 @@ class AutoRefineEnv:
                 full_dataset, spec, self.seed,
                 time_limit_seconds=self.bm.train_time_limit(),
                 n_out=self.task.n_outputs, head=self.task.head,
+                warm_start=warm,
             )
         except SpecError as exc:
             return self._reject_invalid(
@@ -691,10 +754,13 @@ class AutoRefineEnv:
         self.task = self.curriculum.task()
         self.task_name = self.task.name
         self.dataset = self.task.make_dataset(self.dataset_size)
+        # SPEC.md 80 (v0.66): the re-baseline reuses the fine-tune seed
+        # when compatible (None = the exact pre-v0.66 path)
         result = train(
             self.dataset, self.best_spec, self.seed,
             time_limit_seconds=self.bm.train_time_limit(),
             n_out=self.task.n_outputs, head=self.task.head,
+            warm_start=self._warm_start_for(self.best_spec),
         )
         score, std, gen, gen_gap = self._evaluate(result.model)
         eff = self._eff(score, result.train_seconds, gen_gap)
@@ -771,6 +837,25 @@ class AutoRefineEnv:
         x, y = dataset
         m = max(1, int(math.floor(len(x) * self.screen_frac)))
         return x[:m], y[:m]
+
+    # --- fine-tuning warm start (SPEC.md 80, v0.66) --------------------------
+    def _warm_start_for(self, spec: ModelSpec):
+        """The uploaded model's weights as a seed for `spec` (SPEC.md 80.3),
+        or None (no upload, or incompatible — the candidate trains fresh,
+        exactly as pre-v0.66). Called only after reset (dataset non-None).
+        mlp in_dim: the model owns its spectral map (78.2.1), so the width
+        is the raw feature count expanded by the candidate's K."""
+        cp = self.initial_checkpoint
+        if cp is None:
+            return None
+        in_dim = None
+        if spec.model_family == "mlp":
+            K = int(spec.fourier_features)
+            in_dim = int(self.dataset[0].shape[1]) * (2 * K + 1)
+        if can_warm_start(cp, spec, self.task.n_outputs, self.task.head,
+                          in_dim=in_dim):
+            return cp.model
+        return None
 
     def _reject_screened(self, spec: ModelSpec, fp: str, fields: list[str],
                          sres, s_score: float, s_std: float, s_gen: float,
@@ -973,6 +1058,15 @@ class AutoRefineEnv:
         # search_quality dict stay untouched)
         if self.kfold > 0:
             summary["kfold"] = {"k": self.kfold}
+        # SPEC.md 80 (v0.66): fine-tuning provenance — additive
+        # *conditional* key, absent when no model was uploaded (the
+        # pre-v0.66 key set stays intact)
+        if self.initial_checkpoint is not None:
+            summary["initial_model"] = {
+                "path": self.initial_model_path,
+                "family": self.initial_checkpoint.family,
+                "baseline_score": self.initial_baseline_score,
+            }
         self.memory.save_summary(summary)
         # SPEC.md 38.1 (v0.24, T1): the run registry — one appended entry
         # per finished run (recovery-safe, 38.1.4); the same wall seconds

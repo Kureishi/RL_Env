@@ -70,7 +70,8 @@ class DashboardRunner:
                  search_quality: str = "v04", modality: str | None = None,
                  stall_patience: int | None = None,
                  objectives: tuple | None = None,
-                 steering: SteeringState | None = None) -> None:
+                 steering: SteeringState | None = None,
+                 initial_model: str | None = None) -> None:
         if policy not in ("bandit", "search"):
             raise ValueError(f"unsupported policy {policy!r}: {_RL_HINT}")
         if search_quality not in ("v04", "legacy"):
@@ -105,6 +106,9 @@ class DashboardRunner:
                 f"steering must be a SteeringState or None, got "
                 f"{type(steering).__name__} ")
         self.steering = steering
+        # SPEC.md 80 (v0.66): the uploaded trained model to start from
+        # (None = a fresh baseline, the exact pre-v0.66 path)
+        self.initial_model = initial_model
         self.env: AutoRefineEnv | None = None
         self.policy: SearchPolicy | BanditPolicy | None = None
         self._state: dict | None = None
@@ -195,6 +199,8 @@ class DashboardRunner:
             policy=self.policy_name, target=self.target, rl_episodes=None,
             # SPEC.md 59.2 (v0.45): the steering rules (None = off, pre-v0.45)
             steering=self.steering,
+            # SPEC.md 80 (v0.66): the uploaded model (None = fresh baseline)
+            initial_model=self.initial_model,
         )
         # SPEC.md 59.2 (v0.45): steering pins drop their field from the
         # proposal pool (the env's force-set in step() is the backstop)
@@ -300,6 +306,7 @@ class DashboardRunner:
             stall_patience=self.stall_patience,  # v0.17 (SPEC.md 31.1)
             objectives=self.objectives,  # v0.23 (SPEC.md 37.2)
             steering=self.steering,  # SPEC.md 59.2 (v0.45)
+            initial_model=self.initial_model,  # SPEC.md 80 (v0.66)
         )
 
     def _clone(self, seed: int) -> "DashboardRunner":

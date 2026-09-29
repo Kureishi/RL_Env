@@ -19,11 +19,12 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass, field
-from typing import Tuple, Union
+from typing import Any, Tuple, Union
 
 import numpy as np
 
 from .config import ModelSpec, SpecError
+from .finetune import copy_weights  # SPEC.md 80 (v0.66): fine-tune seed
 from .models.convnet import ConvNet
 from .models.gam import GAM
 from .models.gp import GP
@@ -288,7 +289,15 @@ def train(
     time_check_every: int = 256,
     n_out: int = 2,
     head: str = "softmax",
+    warm_start: Any | None = None,
 ) -> TrainResult:
+    """Train one spec on one dataset.
+
+    ``warm_start`` (SPEC.md 80, v0.66; ``None`` = the exact legacy path):
+    a previously trained parametric model whose weights seed the new one
+    (fine-tuning) when the shapes match — a mismatched seed is refused
+    (``copy_weights`` returns False and the fresh init stands). The
+    non-parametric families ignore the parameter entirely."""
     X, y = dataset
     n = X.shape[0]
     start = time.perf_counter()
@@ -419,6 +428,8 @@ def train(
             X.shape[1:], int(spec.architecture[0]), int(spec.architecture[1]),
             n_out, spec.activation, seed, head, spec.init_scale,
         )  # SPEC.md 25.3 (audio temporal model + image spatial model)
+        if warm_start is not None:  # SPEC.md 80 (v0.66): fine-tune seed
+            copy_weights(model, warm_start)
         return _train_neural(model, X, y, n, spec, seed, start,
                              time_limit_seconds, time_check_every, head)
 
@@ -439,6 +450,8 @@ def train(
         seed=seed, head=head, init_scale=spec.init_scale,  # SPEC.md 19.1
         fourier_K=K, fourier_scale=fourier_scale,  # SPEC.md 78
     )
+    if warm_start is not None:  # SPEC.md 80 (v0.66): the fine-tune seed
+        copy_weights(model, warm_start)
     return _train_neural(model, X, y, n, spec, seed, start,
                          time_limit_seconds, time_check_every, head)
 

@@ -245,7 +245,7 @@ def _install_flat_train(monkeypatch, score: float) -> None:
     """`autorefine.improver.meta_env.train` → one constant score for every
     call (screen, full, or re-baseline)."""
     def fake_train(dataset, spec, seed, time_limit_seconds=0.0,
-                   n_out=1, head="mse"):
+                   n_out=1, head="mse", warm_start=None):
         return SimpleNamespace(model=_FakeModel(score), train_seconds=0.001,
                                loss_history=[], time_capped=False)
     monkeypatch.setattr("autorefine.improver.meta_env.train", fake_train)
