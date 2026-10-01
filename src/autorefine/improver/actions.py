@@ -12,6 +12,8 @@ import numpy as np
 from ..config import (
     ACTIVATIONS,
     BATCH_SIZES,
+    CONV1D_FILTERS,
+    CONV1D_KERNELS,
     CONV_FILTERS,
     FOURIER_FEATURES,
     GAM_INTERACTIONS,
@@ -21,6 +23,7 @@ from ..config import (
     KNN_K_VALUES,
     LABEL_SMOOTHING_RANGE,
     LEARNING_RATE_RANGE,
+    RNN_HIDDEN,
     TRAIN_STEPS_RANGE,
     WEIGHT_DECAY_RANGE,
 )
@@ -51,6 +54,11 @@ LEGACY_FIELD_ORDER = (
     # learning_rate — lexicographically largest untried first) are unchanged
     # because the three new names sort below "label_smoothing" (78.2.4).
     "fourier_features", "gam_interactions", "gp_length_scale",
+    # SPEC.md 83 (v0.69): the native temporal family knobs — appended at the
+    # END (the A50 pattern). Like knn_k / the v0.64 fine-pattern fields they
+    # are bandit/catalog/spec-surface fields, EXCLUDED_FROM_SEARCH below, so
+    # the 14-field SearchPolicy proposal stream stays v0.10 bit-stable.
+    "conv1d_filters", "conv1d_kernel", "rnn_hidden",
 )
 FIELD_NAMES = tuple(f for f in LEGACY_FIELD_ORDER if f in SPEC_FIELDS)
 
@@ -106,6 +114,11 @@ FIELD_SAMPLERS = {
     "fourier_features": lambda rng, task=None: int(rng.choice(FOURIER_FEATURES)),
     "gam_interactions": lambda rng, task=None: int(rng.choice(GAM_INTERACTIONS)),
     "gp_length_scale": lambda rng, task=None: float(rng.choice(GP_LENGTH_SCALES)),
+    # SPEC.md 83 (v0.69): the temporal-family knobs sample the catalog values
+    # (single source of truth in FIELD_CATALOG, the v0.5 sampler contract)
+    "conv1d_filters": lambda rng, task=None: int(rng.choice(CONV1D_FILTERS)),
+    "conv1d_kernel": lambda rng, task=None: int(rng.choice(CONV1D_KERNELS)),
+    "rnn_hidden": lambda rng, task=None: int(rng.choice(RNN_HIDDEN)),
 }
 
 # SPEC.md 25.7 (full suite green; A1-A4 unchanged): the v1 search policy's
@@ -120,7 +133,12 @@ FIELD_SAMPLERS = {
 # like knn_k in v0.25 they are bandit/catalog/spec-surface fields, so the
 # 14-field SearchPolicy proposal stream stays v0.10 bit-stable (78.2.4).
 EXCLUDED_FROM_SEARCH = ("knn_k", "fourier_features", "gam_interactions",
-                        "gp_length_scale")
+                        "gp_length_scale",
+                        # SPEC.md 83 (v0.69): the temporal knobs join the
+                        # exclusion — bandit/catalog/spec-surface fields, so
+                        # the 14-field SearchPolicy proposal stream stays
+                        # v0.10 bit-stable (83.2.5 / 83.3.6).
+                        "conv1d_filters", "conv1d_kernel", "rnn_hidden")
 SEARCH_FIELDS = tuple(f for f in FIELD_NAMES if f not in EXCLUDED_FROM_SEARCH)
 
 # SPEC.md 36.2 (v0.22, G2): the sampler table must be exhaustive over the
@@ -153,8 +171,10 @@ def _coerce_for_family(spec_dict: dict, rng: np.random.Generator) -> dict:
     elif fam == "convnet":
         if not (len(arch) == 2 and all(int(h) in CONV_FILTERS for h in arch)):
             spec_dict["architecture"] = (4, 8)  # SPEC.md 25.3: a valid pair
-    elif fam in ("gp", "gam"):
-        pass  # SPEC.md 75 (v0.61): non-parametric families ignore architecture
+    elif fam in ("gp", "gam", "conv1d", "rnn"):
+        # SPEC.md 75 (v0.61) / 83 (v0.69): non-parametric + temporal families
+        # ignore architecture — leave it as-is (do not resample, so no RNG).
+        pass
     else:
         if not arch or any(h not in HIDDEN_LAYER_SIZES for h in arch):
             spec_dict["architecture"] = _sample_architecture(rng)

@@ -207,8 +207,9 @@ def test_every_task_is_a_task_subclass():
     the nominal interface the §23 plugin loader targets (frozen
     interface, no duck-typing guess). v0.31 (SPEC.md 45.2): the text
     modality advances the count 7 -> 8 in place. v0.47 (SPEC.md 61.2):
-    the medical/finance domain packs advance it 8 -> 10."""
-    assert len(TASKS) == 10
+    the medical/finance domain packs advance it 8 -> 10. v0.69
+    (SPEC.md 83.1): the native sequence task advances it 10 -> 11."""
+    assert len(TASKS) == 11
     for name, cls in TASKS.items():
         assert issubclass(cls, Task), name
 
@@ -341,9 +342,10 @@ def test_registry_is_15_fields_in_catalog_order():
     (the 15 historical A24 fields + the three v0.64 fine-pattern fields,
     SPEC.md 78) in catalog order; every value is a SpecField
     row whose `name` matches its key; the names tuple agrees."""
-    assert len(SPEC_FIELDS) == 18
+    assert len(SPEC_FIELDS) == 21
     assert tuple(SPEC_FIELDS) == HISTORICAL_FIELDS + (
-        "fourier_features", "gam_interactions", "gp_length_scale")
+        "fourier_features", "gam_interactions", "gp_length_scale",
+        "conv1d_filters", "conv1d_kernel", "rnn_hidden")
     assert SPEC_FIELD_NAMES == tuple(SPEC_FIELDS)
     for name, row in SPEC_FIELDS.items():
         assert isinstance(row, SpecField), name
@@ -383,12 +385,13 @@ def test_registry_rows_are_valid():
 def test_catalog_is_the_registry_view():
     """A26 (SPEC.md 36.2): `FIELD_CATALOG` is the registry's name→space
     view and `CATALOG_FIELDS` its name order; the `ACTIONS` catalog is
-    field-major over that order with exactly 95 actions (77 historical +
+    field-major over that order with exactly 106 actions (77 historical +
     the v0.61 value-level additions + the v0.64 fine-pattern fields,
-    SPEC.md 78: 3 fields × 4 values)."""
+    SPEC.md 78: 3 fields × 4 values + the v0.69 temporal families, SPEC.md
+    83: model_family 9 values + 3 fields × 3 values)."""
     assert FIELD_CATALOG == {f.name: f.space for f in SPEC_FIELDS.values()}
     assert CATALOG_FIELDS == tuple(SPEC_FIELDS)
-    assert len(ACTIONS) == 95
+    assert len(ACTIONS) == 106
     assert ACTIONS == tuple((field, value)
                             for field in CATALOG_FIELDS
                             for value in FIELD_CATALOG[field])
@@ -400,8 +403,12 @@ def test_family_fields_derivable_from_registry():
     declare that family, in historical tuple order (A24, SPEC.md 19.2);
     the neural families expose the full row set (v0.11 semantics:
     `knn_k` validated-but-ignored outside knn, so the derived knn set
-    does not apply to them). `model_family` is the only field
-    affecting all five families."""
+    does not apply to them). SPEC.md 83 (v0.69, 83.2.5): the temporal
+    families expose the full 21-row set (their own knobs included), while
+    the pre-v0.69 mlp / convnet pools keep the 18-row v0.64 set — the
+    new knobs are family-only, and the §18.7 bit-exact bandit stream
+    must not see them. `model_family` is the only field affecting all
+    nine families."""
     # family-specific families: membership derives exactly from the rows
     for fam in ("tree", "boost", "knn"):
         derived = {f.name for f in SPEC_FIELDS.values() if fam in f.families}
@@ -411,10 +418,17 @@ def test_family_fields_derivable_from_registry():
     # SPEC.md 25.2 + 78: knn_k + the spectral expansion (knn consumes it)
     assert FAMILY_FIELDS["knn"] == (
         "knn_k", "fourier_features", "model_family")
-    # neural families: the FULL row set (v0.11 semantics — `knn_k`
-    # validated-but-ignored outside knn), not the knn-derived set
-    assert FAMILY_FIELDS["mlp"] == CATALOG_FIELDS
-    assert FAMILY_FIELDS["convnet"] == CATALOG_FIELDS
+    # neural families: the pre-v0.69 FULL row set (v0.11 semantics —
+    # `knn_k` validated-but-ignored outside knn), not the knn-derived set;
+    # SPEC.md 83.2.5: minus the v0.69 temporal knobs (conv1d/rnn-only)
+    legacy_neural = tuple(f for f in CATALOG_FIELDS
+                          if f not in ("conv1d_filters", "conv1d_kernel",
+                                      "rnn_hidden"))
+    assert FAMILY_FIELDS["mlp"] == legacy_neural
+    assert FAMILY_FIELDS["convnet"] == legacy_neural
+    # conv1d / rnn: the full 21-row set, including their own knobs
+    assert FAMILY_FIELDS["conv1d"] == CATALOG_FIELDS
+    assert FAMILY_FIELDS["rnn"] == CATALOG_FIELDS
     all_five = [f.name for f in SPEC_FIELDS.values()
                 if set(f.families) == set(MODEL_FAMILIES)]
     assert all_five == ["model_family"]
@@ -438,7 +452,10 @@ def test_bandit_search_views_are_consistent():
     assert ORDERED_FIELDS == tuple(
         f.name for f in SPEC_FIELDS.values() if f.kind == "ordered")
     assert ORDERED_FIELDS == HISTORICAL_ORDERED + (
-        "fourier_features", "gam_interactions", "gp_length_scale")
+        # SPEC.md 78 (v0.64): fine-pattern fields
+        "fourier_features", "gam_interactions", "gp_length_scale",
+        # SPEC.md 83 (v0.69): native temporal family knobs
+        "conv1d_filters", "conv1d_kernel", "rnn_hidden")
     assert set(FIELD_SAMPLERS) == set(SPEC_FIELDS)
     # `SEARCH_FIELDS` keeps the legacy order too (it is the A1–A4
     # proposal stream) minus the family-specific exclusions
@@ -456,4 +473,4 @@ def test_version_round_v022():
     assertion advanced in place per SPEC.md 33.1)."""
     py = tomllib.loads(
         (REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.68.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.71.0"

@@ -39,6 +39,8 @@ from .improver.curriculum import (  # 46.2 (v0.32): the three ladders
 from .models.trees import TreeEnsemble, BoostingEnsemble
 from .models.knn import KNN
 from .models.convnet import ConvNet
+from .models.conv1d import Conv1D  # SPEC.md 83 (v0.69): native temporal family
+from .models.rnn import RNN  # SPEC.md 83 (v0.69): native temporal family
 from .pareto import ParetoFrontier
 from .plotting import (
     TOKENS,
@@ -180,6 +182,7 @@ from .tasks import (
     Parity4V1,
     ParityTask,
     RobustTask,
+    SequenceMotifV1,  # SPEC.md 83.1 (v0.69): the native sequence task
     SineRegressionV1,
     TextTask,
 )
@@ -188,11 +191,24 @@ from .rl_dashboard import (  # 68 (v0.54, A58): the RL loop in the dashboard
     RLRunner,
     describe_policy,
 )
+from .simulator import (  # SPEC.md 84.2 (v0.70): sequential decision-making
+    CartpoleSim,
+    Simulator,
+)
+from .awr import (  # SPEC.md 84.3 (v0.70) + 85.1 (v0.71): AWR + the loop
+    advantages,
+    awr_loop,
+    awr_weights,
+    rollout,
+    train_awr_policy,
+    trajectory_returns,
+)
+from .mpc import learn_dynamics, mpc_act  # SPEC.md 84.4 (v0.70): learned-model MPC
 
 # SPEC.md 33.1 (C1): single version source — must equal pyproject.toml's
 # [project].version (enforced by the A23 test); one step per feature round
-# (v0.68 ⇒ 0.68.0, M71, SPEC.md 82)
-__version__ = "0.68.0"
+# (v0.71 ⇒ 0.71.0, M74, SPEC.md 85)
+__version__ = "0.71.0"
 
 __all__ = [
     "AutoRefineEnv",
@@ -282,6 +298,14 @@ __all__ = [
     "BoostingEnsemble",
     "KNN",
     "ConvNet",
+    "Conv1D",  # SPEC.md 83 (v0.69): the native temporal families
+    "RNN",
+    # SPEC.md 84 (v0.70, A74): sequential decision-making (offline RL)
+    "Simulator", "CartpoleSim",
+    "trajectory_returns", "advantages", "awr_weights", "rollout",
+    "train_awr_policy", "learn_dynamics", "mpc_act", "awr_loop",
+    # SPEC.md 84.1 (v0.70): sample weights live on the trainer contract
+    # (train(..., sample_weight=...)) — no new top-level name.
     "ParetoFrontier",
     "TASKS",
     "CartPoleV1",
@@ -289,6 +313,7 @@ __all__ = [
     "GridNavV1",
     "Parity4V1",
     "ParityTask",
+    "SequenceMotifV1",  # SPEC.md 83.1 (v0.69): the native sequence task
     "SineRegressionV1",
     "TextTask",
     # v0.47: more specialized scenarios (SPEC.md 61, A51)

@@ -25,19 +25,24 @@ import numpy as np
 
 from .config import ModelSpec, SpecError
 from .finetune import copy_weights  # SPEC.md 80 (v0.66): fine-tune seed
+from .models.conv1d import Conv1D  # SPEC.md 83 (v0.69): native temporal family
 from .models.convnet import ConvNet
 from .models.gam import GAM
 from .models.gp import GP
 from .models._fourier import fourier_expand  # SPEC.md 78.2.1 (single source)
 from .models.knn import KNN
-from .models.mlp import MLP
+from .models.mlp import MLP, _sample_weights  # SPEC.md 84.1 (v0.70)
 from .models.optimizers import make_optimizer
+from .models.rnn import RNN  # SPEC.md 83 (v0.69): native temporal family
 from .models.trees import BoostingEnsemble, TreeEnsemble
 
 __all__ = ["fourier_expand"]
 
 Dataset = Tuple[np.ndarray, np.ndarray]  # (features (n, d), targets (n,) or (n, k))
-Model = Union[MLP, TreeEnsemble, BoostingEnsemble, KNN, ConvNet, GP, GAM]
+# SPEC.md 83 (v0.69): Conv1D / RNN are the native temporal families over a
+# (T, C) sequence layout; they join the Model union and the shared neural loop.
+Model = Union[MLP, TreeEnsemble, BoostingEnsemble, KNN, ConvNet, GP, GAM,
+              Conv1D, RNN]
 
 # SPEC.md 19.1: warmup fraction for the "warmup_cosine" schedule, and the
 # internal validation-split fraction used for early stopping (both fixed, so
@@ -118,20 +123,36 @@ def _time_exceeded(start: float, limit: float | None) -> bool:
     return limit is not None and (time.perf_counter() - start) > limit
 
 
-def _training_loss(model: Model, X: np.ndarray, y: np.ndarray, head: str) -> float:
+def _training_loss(
+    model: Model, X: np.ndarray, y: np.ndarray, head: str,
+    weights: np.ndarray | None = None,
+) -> float:
+    """Forward-only loss. `weights=None` is the exact legacy path (the T2 pin
+    stays bit-identical); SPEC.md 84.1: with weights it is the weighted mean
+    (the AWR / MSE-dynamics reads)."""
     n = X.shape[0]
     out = model.forward(X)
+    if weights is None:
+        if head == "mse":
+            return float(((out - np.asarray(y, dtype=np.float64).reshape(n, out.shape[1])) ** 2).mean())
+        z = out - out.max(axis=1, keepdims=True)
+        logz = z - np.log(np.exp(z).sum(axis=1, keepdims=True))
+        return float(-logz[np.arange(n), y].mean())
+    w, W = _sample_weights(weights, n)  # SPEC.md 84.1
     if head == "mse":
-        return float(((out - np.asarray(y, dtype=np.float64).reshape(n, out.shape[1])) ** 2).mean())
+        per = ((out - np.asarray(y, dtype=np.float64).reshape(n, out.shape[1])) ** 2).sum(axis=1)
+        return float((w * per).sum() / W)
     z = out - out.max(axis=1, keepdims=True)
     logz = z - np.log(np.exp(z).sum(axis=1, keepdims=True))
-    return float(-logz[np.arange(n), y].mean())
+    yv = np.asarray(y).reshape(-1)
+    return float((w * (-(logz[np.arange(n), yv]))).sum() / W)
 
 
 def _train_neural(
     model: Model, X: np.ndarray, y: np.ndarray, n: int, spec: ModelSpec,
     seed: int, start: float, time_limit_seconds: float | None,
     time_check_every: int, head: str,
+    sample_weight: np.ndarray | None = None,
 ) -> TrainResult:
     """Shared neural training loop for the mlp and convnet families.
 
@@ -159,18 +180,22 @@ def _train_neural(
         n_val = min(max(1, int(round(VAL_FRACTION * n))), max(0, n - 1))
         n_tr = n - n_val
         Xv, yv = X[n_tr:], y[n_tr:]
+        # SPEC.md 84.1: the val tail carries the same rows' weights
+        wv = sample_weight[n_tr:] if sample_weight is not None else None
     else:
         n_tr = n
         Xv = yv = None
+        wv = None
 
     # SPEC.md 28.1 (C1): the holdout probe tail — reuse early stopping's val
     # tail when it exists (same rows), else the last VAL_FRACTION of the split.
     # Forward-only probes: no RNG, no weight changes (the T2 pin stays green).
     if patience > 0 and Xv is not None:
-        probe_x, probe_y = Xv, yv
+        probe_x, probe_y, probe_w = Xv, yv, wv
     else:
         n_tail = min(max(1, int(round(VAL_FRACTION * n))), max(1, n))
         probe_x, probe_y = X[-n_tail:], y[-n_tail:]
+        probe_w = sample_weight[-n_tail:] if sample_weight is not None else None
 
     # SPEC.md 28.1 (C1): deterministic even-step sampling over train_steps
     T = int(spec.train_steps)
@@ -217,8 +242,12 @@ def _train_neural(
         if noise > 0.0:
             xb = xb + rng.normal(0.0, noise, xb.shape)
         yb = y[idx]
+        # SPEC.md 84.1: the batch carries the same rows' sample weights
+        # (the RNG draw above is untouched — determinism, G2)
+        swb = sample_weight[idx] if sample_weight is not None else None
 
-        loss, grads = model.loss_and_grads(xb, yb, label_smoothing=smoothing)
+        loss, grads = model.loss_and_grads(xb, yb, label_smoothing=smoothing,
+                                           weights=swb)
         final_loss = loss
         # SPEC.md 19.1: per-step LR schedule ("constant" = base_lr every step)
         if scheduled:
@@ -240,14 +269,14 @@ def _train_neural(
         # not two (forward-only: no RNG, no weight mutation).
         vloss = None
         if patience > 0 and Xv is not None:
-            vloss = _training_loss(model, Xv, yv, head)
+            vloss = _training_loss(model, Xv, yv, head, wv)
 
         # SPEC.md 28.1 (C1): record this step if it is a sampled step — the
         # batch loss plus a forward-only holdout probe (no mutation, so the
         # early-stopping / weight-restore below is untouched).
         if t in sample_steps:
             if vloss is None:
-                vloss = _training_loss(model, probe_x, probe_y, head)
+                vloss = _training_loss(model, probe_x, probe_y, head, probe_w)
             hist.append({"step": t, "train": loss, "holdout": vloss})
 
         # SPEC.md 19.1: early-stopping decision on the held-out tail (only
@@ -290,6 +319,7 @@ def train(
     n_out: int = 2,
     head: str = "softmax",
     warm_start: Any | None = None,
+    sample_weight: np.ndarray | None = None,
 ) -> TrainResult:
     """Train one spec on one dataset.
 
@@ -297,9 +327,30 @@ def train(
     a previously trained parametric model whose weights seed the new one
     (fine-tuning) when the shapes match — a mismatched seed is refused
     (``copy_weights`` returns False and the fresh init stands). The
-    non-parametric families ignore the parameter entirely."""
+    non-parametric families ignore the parameter entirely.
+
+    ``sample_weight`` (SPEC.md 84.1, v0.70; ``None`` = the exact legacy
+    path): per-example ``(n,)`` non-negative weights — the loss/gradient
+    become the weighted mean (AWR's ``exp(advantage / beta)`` reweighting,
+    84.3). Only the parametric families (mlp / convnet / conv1d / rnn)
+    define it; a non-parametric family with weights is a clean SpecError."""
     X, y = dataset
     n = X.shape[0]
+    _PARAMETRIC = ("mlp", "convnet", "conv1d", "rnn")
+    if sample_weight is not None and spec.model_family not in _PARAMETRIC:
+        raise SpecError(
+            f"sample_weight is defined for the parametric families "
+            f"{_PARAMETRIC} (SPEC.md 84.1); the {spec.model_family!r} family "
+            "is non-parametric — omit sample_weight")
+    # SPEC.md 83.1 (v0.69): a sequence-layout task yields 3-D X (n, T, C).
+    # The native temporal families (conv1d / rnn) read that layout directly;
+    # every other family reads the flattened (n, T*C) feature rows (the
+    # mlp / tree / boost / knn models expect 2-D features). Flat tasks yield
+    # 2-D X, so this is a no-op for every pre-v0.69 task (the §18.7 bit-exact
+    # pin stays green) — and a conv1d/rnn spec on genuinely flat (2-D) data is
+    # the clean SpecError below, never a silent reshape.
+    if X.ndim == 3 and spec.model_family not in ("conv1d", "rnn"):
+        X = X.reshape(n, -1)
     start = time.perf_counter()
 
     if spec.model_family == "tree":
@@ -431,7 +482,39 @@ def train(
         if warm_start is not None:  # SPEC.md 80 (v0.66): fine-tune seed
             copy_weights(model, warm_start)
         return _train_neural(model, X, y, n, spec, seed, start,
-                             time_limit_seconds, time_check_every, head)
+                             time_limit_seconds, time_check_every, head,
+                             sample_weight=sample_weight)  # SPEC.md 84.1
+
+    if spec.model_family in ("conv1d", "rnn"):
+        # SPEC.md 83 (v0.69): the native temporal families take a (T, C)
+        # sequence layout — a clean SpecError on non-sequence data (never a
+        # silent fallback), mirroring the convnet's 4-D grid guard (25.3).
+        # T (time axis) and C (channel count) come from the task's layout,
+        # not the spec; the spec's knobs are conv1d_filters / conv1d_kernel /
+        # rnn_hidden (83.2.3 / 83.3.3).
+        if X.ndim != 3:
+            raise SpecError(
+                f"{spec.model_family} family needs sequence data (n, T, C); "
+                f"got X.shape={X.shape} — offer conv1d/rnn only for tasks "
+                "with the 'sequence' capability (SPEC.md 83.1)")
+        T, C = int(X.shape[1]), int(X.shape[2])
+
+        def _build_temporal():
+            if spec.model_family == "conv1d":
+                return Conv1D(T, C, int(spec.conv1d_filters),
+                              int(spec.conv1d_kernel), n_out, spec.activation,
+                              seed, head, spec.init_scale)
+            return RNN(T, C, int(spec.rnn_hidden), n_out, spec.activation,
+                       seed, head, spec.init_scale)
+
+        if time_limit_seconds is not None and time_limit_seconds <= 0.0:
+            return TrainResult(_build_temporal(), 0, float("inf"), 0.0, True)
+        model = _build_temporal()
+        if warm_start is not None:  # SPEC.md 80 (v0.66): the fine-tune seed
+            copy_weights(model, warm_start)
+        return _train_neural(model, X, y, n, spec, seed, start,
+                             time_limit_seconds, time_check_every, head,
+                             sample_weight=sample_weight)  # SPEC.md 84.1
 
     # mlp (the default family): the shared neural training loop (SPEC.md 19.1).
     # SPEC.md 78: the MLP owns the spectral feature map — it stores K + the
@@ -453,7 +536,8 @@ def train(
     if warm_start is not None:  # SPEC.md 80 (v0.66): the fine-tune seed
         copy_weights(model, warm_start)
     return _train_neural(model, X, y, n, spec, seed, start,
-                         time_limit_seconds, time_check_every, head)
+                         time_limit_seconds, time_check_every, head,
+                         sample_weight=sample_weight)  # SPEC.md 84.1
 
 
 def train_from_task(

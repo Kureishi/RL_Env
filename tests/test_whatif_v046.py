@@ -188,9 +188,9 @@ def test_whatif_none_best_spec_uses_the_default():
 
 def test_fingerprint_rows_and_order():
     """A50 (SPEC.md 60.2): one row per registry field, in registry order
-    (deterministic, G2)."""
+    (deterministic, G2). v0.69 (A73, 83): 18 -> 21 (the temporal knobs)."""
     rows = spec_fingerprint(_base())
-    assert len(rows) == 18
+    assert len(rows) == 21
     assert [r["name"] for r in rows] == list(SPEC_FIELDS)
 
 
@@ -634,7 +634,7 @@ def test_version_round_v046():
     """A50 (SPEC.md 60.6, 33.1): the version stepped to ``0.46.0`` in both
     sources (v0.46 ⇒ ``0.46.0``, M49, SPEC.md 60)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.68.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.71.0"
 
 
 def test_spec_cites_a50_and_round():

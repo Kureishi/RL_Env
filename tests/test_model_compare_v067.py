@@ -16,7 +16,7 @@ dynamic encodings:
     (51.4);
   * 81.4  — the app's Model comparison panel (the app-language scan in
     `tests/test_app_language.py` keeps the panel strings clean);
-  * 81.5  — the version steps to `0.68.0` in both sources (33.1) and
+  * 81.5  — the version steps to `0.71.0` in both sources (33.1) and
     the A-index advances (asserted in `tests/test_coherency_v021.py`,
     A25).
 
@@ -314,11 +314,11 @@ def test_hostile_labels_stay_well_formed():
 def test_spec_and_version():
     """A71 (SPEC.md 81.5): SPEC.md defines the A71 acceptance block,
     the M70 index row + milestone, and the version stepped to
-    `0.68.0` in both sources (33.1)."""
+    `0.71.0` in both sources (33.1)."""
     spec = SPEC.read_text(encoding="utf-8")
     assert "### 81.5 Acceptance (A71)" in spec
     assert "### 81.6 Milestone (M70)" in spec
     assert ("| M70 | v0.67   | 81     | A71 | "
             "tests/test_model_compare_v067.py |") in spec
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.68.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.71.0"

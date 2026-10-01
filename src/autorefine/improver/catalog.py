@@ -47,11 +47,28 @@ _FAMILY_ORDER = {
     # registry row; the historical order is kept, new field after knn_k.
     "knn": ("knn_k", "fourier_features", "model_family"),
 }
+# SPEC.md 83 (v0.69, 83.2.5 / 83.3.6): the native temporal knobs are
+# family-only fields (their registry rows declare exactly the owning family).
+# They join ONLY the conv1d / rnn pools. The pre-v0.69 neural pools (mlp /
+# convnet) keep the 18-field v0.64 set — the v0.11 full-set exception that
+# admitted `knn_k` (validated-but-ignored, legacy) does NOT extend to the
+# new knobs: `rnn_hidden` sorts above `optimizer` lexicographically, so
+# admitting them would re-order the bandit cold-start tie-break
+# (weight_decay -> train_steps -> optimizer) and break the §18.7 bit-exact
+# legacy stream. Mutating a knob the family ignores would also just waste
+# an experiment (the §19.2 tree/boost / §25.2 knn rationale).
+_TEMPORAL_KNOBS = ("conv1d_filters", "conv1d_kernel", "rnn_hidden")
+_NEURAL_LEGACY_POOL = tuple(f for f in CATALOG_FIELDS
+                            if f not in _TEMPORAL_KNOBS)  # the v0.64 18-set
+
 FAMILY_FIELDS: dict[str, tuple[str, ...]] = {
-    fam: (CATALOG_FIELDS if fam in ("mlp", "convnet")
+    # conv1d / rnn are neural (shared `_train_neural` loop) and expose the
+    # full 21-field row set, including their own knobs (25.11 full-set rule).
+    fam: (CATALOG_FIELDS if fam in ("conv1d", "rnn")
+          else _NEURAL_LEGACY_POOL if fam in ("mlp", "convnet")
           else tuple(f for f in _FAMILY_ORDER[fam]
                      if fam in SPEC_FIELDS[f].families))
-    for fam in ("mlp", "tree", "boost", "knn", "convnet")
+    for fam in ("mlp", "tree", "boost", "knn", "convnet", "conv1d", "rnn")
 }
 
 
@@ -74,6 +91,13 @@ def relevant_families(task_name: str | None) -> tuple[str, ...]:
     cls = TASKS.get(task_name)
     if cls is not None and getattr(cls, "grid_capable", False):
         return ("mlp", "tree", "boost", "knn", "convnet")
+    # SPEC.md 83 (v0.69): sequence-capable tasks (a `capabilities={"sequence"}`
+    # task) offer the native temporal families (conv1d / rnn) alongside the
+    # legacy three. A new capability: pre-v0.69 tasks return exactly the
+    # legacy three (the §18.7 bit-exact legacy pin stays green).
+    if (cls is not None
+            and "sequence" in getattr(cls, "capabilities", frozenset())):
+        return ("mlp", "tree", "boost", "conv1d", "rnn")
     return ("mlp", "tree", "boost")
 
 
@@ -146,8 +170,10 @@ def apply_action(best_spec_dict: dict, action_index: int | np.integer) -> dict:
         pass  # SPEC.md 25.2: knn ignores architecture — leave it as-is
     elif fam == "convnet" and not (len(arch) == 2 and all(int(h) in CONV_FILTERS for h in arch)):
         out["architecture"] = (4, 8)  # SPEC.md 25.3: a valid conv filter pair
-    elif fam in ("gp", "gam"):
-        pass  # SPEC.md 75 (v0.61): non-parametric families ignore architecture
+    elif fam in ("gp", "gam", "conv1d", "rnn"):
+        # SPEC.md 75 (v0.61) / 83 (v0.69): non-parametric + temporal families
+        # ignore architecture — leave it as-is (a valid value is enough).
+        pass
     elif (not arch or any(h not in HIDDEN_LAYER_SIZES for h in arch)):
         out["architecture"] = (16, 8)
     try:

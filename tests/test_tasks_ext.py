@@ -88,11 +88,11 @@ class _TargetModel:
 
 
 def test_task_registry_covers_all_tasks(tmp_path):
-    # SPEC.md 22.1/24/45.2: csv/image/audio/text are data-driven (need a
+    # SPEC.md 22.1/24/45.2/83.1: csv/image/audio/text are data-driven (need a
     # file/dir), the rest are seed-constructable
     assert set(TASKS) == {"cartpole-v1", "sine-v1", "gridnav-v1", "parity-v1",
                           "csv", "image", "audio", "text",
-                          "medical-v1", "finance-v1"}
+                          "medical-v1", "finance-v1", "sequence-motif-v1"}
     for name, cls in TASKS.items():
         if name == "csv":
             task = CsvTask(seed=7, path=str(_fixture_csv(tmp_path / "csv_fixture.csv")))

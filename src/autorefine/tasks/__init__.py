@@ -7,6 +7,7 @@ from .images import ImageTask
 from .media import collect_items, detect_modality, modality_from_index
 from .parity import Parity4V1, ParityTask, parity_ceiling
 from .sine import SineRegressionV1
+from .sequence import SequenceMotifV1, motif_present  # SPEC.md 83 (v0.69)
 from .text import TextTask, ngram_features
 from .medical import MedicalTabularTask
 from .finance import FinanceForecastTask
@@ -18,6 +19,9 @@ TASKS = {
     "sine-v1": SineRegressionV1,
     "gridnav-v1": GridNavV1,
     "parity-v1": Parity4V1,  # v0.3: noisy XOR classification (README "Extending")
+    # v0.69: native sequence task (SPEC.md 83.1) — offers the conv1d / rnn
+    # temporal families (the capabilities={"sequence"} draw, catalog 25.5).
+    "sequence-motif-v1": SequenceMotifV1,
     "csv": CsvTask,  # v0.8: user CSV data (SPEC.md 22.1; needs task_config.path)
     # v0.10: input modalities (SPEC.md 24.3/24.4; need task_config.path dir)
     "image": ImageTask,
@@ -34,7 +38,9 @@ TASKS = {
 
 __all__ = [
     "Task", "CartPoleV1", "clip_states", "CsvTask", "GridNavV1",
-    "SineRegressionV1", "Parity4V1", "ParityTask", "parity_ceiling", "TASKS",
+    "SineRegressionV1", "Parity4V1", "ParityTask", "parity_ceiling",
+    "SequenceMotifV1", "motif_present",  # SPEC.md 83 (v0.69)
+    "TASKS",
     "ImageTask", "AudioTask", "log_mel_features", "log_mel_frames",
     "collect_items", "detect_modality", "modality_from_index",
     "TextTask", "ngram_features",

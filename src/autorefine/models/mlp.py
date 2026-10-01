@@ -45,6 +45,25 @@ def _row_idx(n: int) -> np.ndarray:
     return idx
 
 
+def _sample_weights(weights: np.ndarray | None, n: int) -> tuple[np.ndarray, float]:
+    """SPEC.md 84.1: validate per-example sample weights.
+
+    Returns `(w, W)` with `w` the float64 `(n,)` weights and `W = w.sum() > 0`.
+    The weighted loss is `(w * per_example_loss).sum() / W` — a weighted mean,
+    so a global rescale of `w` leaves it invariant (the trainer divides by W
+    in the gradient too: `dz = dz_unnorm * (w / W)`). `weights=None` never
+    reaches here (the legacy path is untouched and bit-identical)."""
+    w = np.asarray(weights, dtype=np.float64).reshape(-1)
+    if w.shape != (n,):
+        raise SpecError(f"sample_weight length {w.shape[0]} != n={n}")
+    if np.any(w < 0.0):
+        raise SpecError("sample_weight entries must be non-negative")
+    W = float(w.sum())
+    if W <= 0.0:
+        raise SpecError("sample_weight sum must be positive")
+    return w, W
+
+
 def _tanh_grad(x: np.ndarray, out: np.ndarray) -> np.ndarray:
     return 1.0 - out * out
 
@@ -127,7 +146,11 @@ class MLP:
 
     # --- loss + analytic gradients -----------------------------------------
     def loss_and_grads(
-        self, x: np.ndarray, y: np.ndarray, label_smoothing: float = 0.0
+        self,
+        x: np.ndarray,
+        y: np.ndarray,
+        label_smoothing: float = 0.0,
+        weights: np.ndarray | None = None,
     ) -> tuple[float, list[tuple[np.ndarray, np.ndarray]]]:
         """Returns (loss, [(Wg, bg), ...]).
 
@@ -136,14 +159,23 @@ class MLP:
                         target = (1-eps) * onehot + eps / n_out.
         head "mse":     y is continuous targets (n,) or (n, n_out) — mean MSE
                         (SPEC.md 15: regression tasks such as SineRegressionV1).
+        weights (SPEC.md 84.1): optional per-example `(n,)` non-negative
+                        weights — the loss/gradient become the weighted mean
+                        (AWR's exp(advantage/beta) reweighting). `None` is
+                        the exact legacy path (bit-identical, the T2/A24 pins).
         """
         n = x.shape[0]
         logits = self.forward(x)
         if self._is_mse:  # SPEC.md 74: flag instead of per-call string compare
             target = np.asarray(y, dtype=np.float64).reshape(n, self.n_out)
             diff = logits - target
-            loss = float((diff * diff).mean())
-            dz = 2.0 * diff / n  # d(mean MSE)/d(output)
+            if weights is None:
+                loss = float((diff * diff).mean())
+                dz = 2.0 * diff / n  # d(mean MSE)/d(output)
+            else:  # SPEC.md 84.1: weighted MSE (AWR)
+                w, W = _sample_weights(weights, n)
+                loss = float((w * (diff * diff).sum(axis=1)).sum() / W)
+                dz = 2.0 * diff * (w / W)[:, None]
         else:
             # numerically stable softmax cross-entropy
             z = logits - logits.max(axis=1, keepdims=True)
@@ -155,11 +187,16 @@ class MLP:
             # bit-identical to `onehot` (x*1.0, x+0.0 are exact), so skip
             # the two extra array passes in the common case.
             target = onehot if eps == 0.0 else (1.0 - eps) * onehot + eps / self.n_out
-            loss = float(-(target * logz).sum(axis=1).mean())
-            # dL/dlogits for mean softmax CE with smoothed targets
-            p = np.exp(logz)
-            dz = p - target
-            dz /= n
+            if weights is None:
+                loss = float(-(target * logz).sum(axis=1).mean())
+                # dL/dlogits for mean softmax CE with smoothed targets
+                p = np.exp(logz)
+                dz = p - target
+                dz /= n
+            else:  # SPEC.md 84.1: weighted softmax CE (AWR)
+                w, W = _sample_weights(weights, n)
+                loss = float((w * (-(target * logz)).sum(axis=1)).sum() / W)
+                dz = (np.exp(logz) - target) * (w / W)[:, None]
 
         grads: list[tuple[np.ndarray, np.ndarray]] = []
         d = dz

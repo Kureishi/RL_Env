@@ -24,7 +24,7 @@ import numpy as np
 from ..config import CONV_FILTERS, SpecError
 
 from .mlp import (
-    HEADS, _ACT_FNS, _activation, _activation_grad, _row_idx,
+    HEADS, _ACT_FNS, _activation, _activation_grad, _row_idx, _sample_weights,
 )
 
 # SPEC.md 25.3: FC hidden size is fixed (deliberately off the spec surface)
@@ -188,15 +188,24 @@ class ConvNet:
         return logits
 
     # --- loss + analytic gradients -------------------------------------------
-    def loss_and_grads(self, x, y, label_smoothing: float = 0.0):
-        """Returns (loss, [(Wg, bg), ...]) in `.layers` order (SPEC.md 25.3)."""
+    def loss_and_grads(self, x, y, label_smoothing: float = 0.0,
+                       weights: np.ndarray | None = None):
+        """Returns (loss, [(Wg, bg), ...]) in `.layers` order (SPEC.md 25.3).
+
+        `weights` (SPEC.md 84.1): optional per-example weights (weighted-mean
+        loss/gradient); `None` is the exact legacy path (bit-identical)."""
         n = x.shape[0]
         logits = self.forward(x)
         if self.head == "mse":
             target = np.asarray(y, dtype=np.float64).reshape(n, self.n_out)
             diff = logits - target
-            loss = float((diff * diff).mean())
-            dz = 2.0 * diff / n
+            if weights is None:
+                loss = float((diff * diff).mean())
+                dz = 2.0 * diff / n
+            else:  # SPEC.md 84.1
+                w, W = _sample_weights(weights, n)
+                loss = float((w * (diff * diff).sum(axis=1)).sum() / W)
+                dz = 2.0 * diff * (w / W)[:, None]
         else:
             z = logits - logits.max(axis=1, keepdims=True)
             logz = z - np.log(np.exp(z).sum(axis=1, keepdims=True))
@@ -205,9 +214,14 @@ class ConvNet:
             eps = float(label_smoothing)
             # SPEC.md 70: eps == 0.0 is bit-identical to `onehot` (see mlp).
             target = onehot if eps == 0.0 else (1.0 - eps) * onehot + eps / self.n_out
-            loss = float(-(target * logz).sum(axis=1).mean())
-            p = np.exp(logz)
-            dz = (p - target) / n
+            if weights is None:
+                loss = float(-(target * logz).sum(axis=1).mean())
+                p = np.exp(logz)
+                dz = (p - target) / n
+            else:  # SPEC.md 84.1
+                w, W = _sample_weights(weights, n)
+                loss = float((w * (-(target * logz)).sum(axis=1)).sum() / W)
+                dz = (np.exp(logz) - target) * (w / W)[:, None]
 
         c = self._cache
         act_grad = self._act_grad_fn  # SPEC.md 70

@@ -31,6 +31,8 @@ from autorefine import AutoRefineEnv, BanditPolicy, Budget
 from autorefine.config import (
     ACTIVATIONS,
     BATCH_SIZES,
+    CONV1D_FILTERS,
+    CONV1D_KERNELS,
     CONV_FILTERS,
     DEFAULT_SPEC,
     EARLY_STOPPING_RANGE,
@@ -42,6 +44,7 @@ from autorefine.config import (
     GAM_INTERACTIONS,
     GP_LENGTH_SCALES,
     KNN_K_VALUES,
+    RNN_HIDDEN,
     LABEL_SMOOTHING_RANGE,
     LEARNING_RATE_RANGE,
     LR_SCHEDULES,
@@ -75,6 +78,10 @@ EXACT_FIELDS = {
     "fourier_features": FOURIER_FEATURES,
     "gam_interactions": GAM_INTERACTIONS,
     "gp_length_scale": GP_LENGTH_SCALES,
+    # SPEC.md 83 (v0.69): the native temporal knobs (exact catalog values)
+    "conv1d_filters": CONV1D_FILTERS,
+    "conv1d_kernel": CONV1D_KERNELS,
+    "rnn_hidden": RNN_HIDDEN,
 }
 
 RANGE_FIELDS = {

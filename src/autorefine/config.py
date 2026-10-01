@@ -24,7 +24,8 @@ BATCH_SIZES = (16, 32, 64, 128)
 # smooth effects). Both are blocking-fit like knn (25.2): validated for
 # every spec, consumed only by their family, offered by the bandit only via
 # the spec surface / catalog (not the flat/grid relevant_families draw).
-MODEL_FAMILIES = ("mlp", "tree", "boost", "knn", "convnet", "gp", "gam")
+MODEL_FAMILIES = ("mlp", "tree", "boost", "knn", "convnet", "gp", "gam",
+                 "conv1d", "rnn")
 
 # --- SPEC.md 25: modality-aware families (v0.11) ---------------------------
 # knn: allowed k values (SPEC.md 25.2); default 5 keeps pre-v0.11 spec JSON
@@ -64,6 +65,19 @@ FOURIER_FEATURES = (0, 16, 32, 64)
 GAM_INTERACTIONS = (0, 4, 8, 16)
 # GP RBF length scale (1.0 = the legacy unit length scale; gp consumes it)
 GP_LENGTH_SCALES = (0.25, 0.5, 1.0, 2.0)
+
+# --- SPEC.md 83 (v0.69): native temporal models -------------------------------
+# Two sequence families (conv1d / rnn) consume (T, C) sequence layouts. Their
+# knobs are dedicated fields (the knn_k pattern, 25.2): validated for every
+# family, consumed only by the named one. The time axis T and channel count C
+# come from the task's sequence layout (make_dataset's 3-D X), not the spec.
+# Defaults sit inside the space so pre-v0.69 spec JSON stays loadable (the
+# 17 / 19.1 / 25.2 / 78 back-compat pattern) and every legacy run stays bit-exact.
+# conv1d: output-filter count F and the time-kernel width K (83.2.3)
+CONV1D_FILTERS = (4, 8, 16)
+CONV1D_KERNELS = (3, 5, 7)
+# rnn: the Elman hidden width H (83.3.3)
+RNN_HIDDEN = (8, 16, 32)
 
 
 class SpecError(ValueError):
@@ -120,6 +134,11 @@ class ModelSpec:
     gam_interactions: int = 0
     # GP RBF length scale (1.0 = legacy unit scale; gp consumes)
     gp_length_scale: float = 1.0
+    # --- SPEC.md 83 (v0.69): native temporal families (validated for every
+    # family, consumed only by conv1d / rnn — the knn_k pattern, 25.2)
+    conv1d_filters: int = 8      # output-filter count F (83.2.3)
+    conv1d_kernel: int = 3       # time-kernel width K (83.2.3)
+    rnn_hidden: int = 16         # Elman hidden width H (83.3.3)
 
     def __post_init__(self) -> None:
         # normalize list -> tuple even though the class is frozen
@@ -150,6 +169,12 @@ class ModelSpec:
             # v0.61 (SPEC.md 75): non-parametric families — architecture is
             # ignored (like knn, 25.2); their kernel/spline parameters are
             # fixed internal constants, so no architecture is validated here.
+            pass
+        elif self.model_family in ("conv1d", "rnn"):
+            # SPEC.md 83 (v0.69): the temporal families take a (T, C) sequence
+            # layout — architecture is ignored (like knn, 25.2); their knobs
+            # are the dedicated conv1d_filters / conv1d_kernel / rnn_hidden
+            # fields (83.2.3 / 83.3.3), validated below for every family.
             pass
         else:
             # mlp: depth 0..3; depth 0 is a linear model (SPEC.md 15)
@@ -204,6 +229,14 @@ class ModelSpec:
                  f"gam_interactions {self.gam_interactions} not in {GAM_INTERACTIONS}")
         _require(self.gp_length_scale in GP_LENGTH_SCALES,
                  f"gp_length_scale {self.gp_length_scale} not in {GP_LENGTH_SCALES}")
+        # SPEC.md 83 (v0.69): the temporal-family fields (validated for every
+        # family, consumed only by conv1d / rnn — the knn_k pattern, 25.2)
+        _require(int(self.conv1d_filters) in CONV1D_FILTERS,
+                 f"conv1d_filters {self.conv1d_filters} not in {CONV1D_FILTERS}")
+        _require(int(self.conv1d_kernel) in CONV1D_KERNELS,
+                 f"conv1d_kernel {self.conv1d_kernel} not in {CONV1D_KERNELS}")
+        _require(int(self.rnn_hidden) in RNN_HIDDEN,
+                 f"rnn_hidden {self.rnn_hidden} not in {RNN_HIDDEN}")
 
     # --- serialization -----------------------------------------------------
     def to_dict(self) -> dict[str, Any]:
@@ -227,6 +260,10 @@ class ModelSpec:
             "fourier_features": int(self.fourier_features),
             "gam_interactions": int(self.gam_interactions),
             "gp_length_scale": float(self.gp_length_scale),
+            # SPEC.md 83 (v0.69): native temporal families
+            "conv1d_filters": int(self.conv1d_filters),
+            "conv1d_kernel": int(self.conv1d_kernel),
+            "rnn_hidden": int(self.rnn_hidden),
         }
 
     @classmethod
@@ -255,6 +292,10 @@ class ModelSpec:
             fourier_features=int(d.get("fourier_features", 0)),
             gam_interactions=int(d.get("gam_interactions", 0)),
             gp_length_scale=float(d.get("gp_length_scale", 1.0)),
+            # defaults keep pre-v0.69 spec JSON loadable (SPEC.md 83, back-compat)
+            conv1d_filters=int(d.get("conv1d_filters", 8)),
+            conv1d_kernel=int(d.get("conv1d_kernel", 3)),
+            rnn_hidden=int(d.get("rnn_hidden", 16)),
         )
 
     def fingerprint(self) -> str:
@@ -291,6 +332,10 @@ def spec_n_params(spec, state_dim: int | None, n_out: int | None,
     * **tree / boost / knn**: `None` — their "size" is data-dependent
       (bagged tree shapes, k at inference) and not a parameter count; the
       58.2 size axis is incomparable for those candidates (documented).
+    * **conv1d / rnn** (SPEC.md 83): `None` — the count is sequence-layout
+      dependent (the time axis T and channel count C come from the task,
+      not the spec, so they are not in scope of this leaf function); the
+      size axis degrades gracefully, exactly like tree / boost / knn.
 
     `None` (not an error) when the inputs are missing, non-finite, or the
     grid is too small for a valid convnet pipeline (the `ConvNet` would
@@ -347,7 +392,7 @@ def spec_n_params(spec, state_dim: int | None, n_out: int | None,
                    + c2 * c1 * 9 + c2
                    + flat * FC_HIDDEN + FC_HIDDEN
                    + FC_HIDDEN * n_outputs + n_outputs)
-    return None  # tree / boost / knn: data-dependent size (58.2)
+    return None  # tree / boost / knn / conv1d / rnn: data-dependent size
 
 
 def default_spec() -> ModelSpec:

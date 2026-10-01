@@ -244,17 +244,17 @@ def test_gp_save_load_roundtrip_and_legacy_load():
 # --- 78.2.4 pins: field-set invariants + registry growth (A68) ---------------
 
 def test_registry_grows_to_18_fields_95_actions():
-    """A68 (78.2.4 / A26 re-derived): the registry grows 15→18 fields and the
-    catalog 83→95 actions; the three new fields span their consuming families
+    """A68 (78.2.4 / A26 re-derived): the registry grows 15→21 fields and the
+    catalog 83→106 actions; the new fields span their consuming families
     (A26, the catalog view)."""
-    assert len(ACTIONS) == 95
-    assert len(SPEC_FIELDS) == 18
-    assert len(FIELD_NAMES) == 18
+    assert len(ACTIONS) == 106
+    assert len(SPEC_FIELDS) == 21
+    assert len(FIELD_NAMES) == 21
     new_fields = {"fourier_features", "gam_interactions", "gp_length_scale"}
     assert new_fields <= set(FIELD_NAMES)
     assert SPEC_FIELDS["model_family"].families == MODEL_FAMILIES
     assert MODEL_FAMILIES == ("mlp", "tree", "boost", "knn", "convnet",
-                              "gp", "gam")
+                              "gp", "gam", "conv1d", "rnn")
 
 
 def test_one_set_invariant_and_search_fields_stay_14():
@@ -268,7 +268,9 @@ def test_one_set_invariant_and_search_fields_stay_14():
     for field in FIELD_NAMES:
         assert field in FIELD_SAMPLERS, field
     assert set(EXCLUDED_FROM_SEARCH) == {"knn_k", "fourier_features",
-                                         "gam_interactions", "gp_length_scale"}
+                                         "gam_interactions", "gp_length_scale",
+                                         "conv1d_filters", "conv1d_kernel",
+                                         "rnn_hidden"}
 
 
 def test_new_fields_registered_in_legal_spaces():
@@ -308,13 +310,13 @@ def test_legacy_spec_json_still_loads():
 # --- 33.1 version + SPEC index (A68) ------------------------------------------
 
 def test_version_and_spec_cite_a68():
-    """A68 (33.1): the version steps to `0.68.0` in both sources; SPEC §78
+    """A68 (33.1): the version steps to `0.71.0` in both sources; SPEC §78
     cites A68; the A25 index row for M67 points at this file."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.68.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.71.0"
     init = (REPO / "src" / "autorefine" / "__init__.py").read_text(
         encoding="utf-8")
-    assert '"0.68.0"' in init
+    assert '"0.71.0"' in init
     spec = SPEC.read_text(encoding="utf-8")
     assert "## 78. Modeling capability v0.64" in spec
     assert "Acceptance (A68)" in spec

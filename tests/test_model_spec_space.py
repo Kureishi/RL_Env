@@ -141,8 +141,8 @@ def test_early_stopping_stops_early_and_restores_best_val(monkeypatch):
     recorded = []
     orig = __import__("autorefine.trainer", fromlist=["_training_loss"])._training_loss
 
-    def rec(model, Xv_, yv_, head):
-        v = orig(model, Xv_, yv_, head)
+    def rec(model, Xv_, yv_, head, weights=None):
+        v = orig(model, Xv_, yv_, head, weights)
         recorded.append(v)
         return v
 

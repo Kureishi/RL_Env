@@ -332,12 +332,12 @@ def test_recipe_and_flags_emit_from_model_only_when_set():
 # --- 33.1 version + SPEC index (A70) ---------------------------------------------
 
 def test_version_and_spec_cite_a70():
-    """A70 (33.1): the version steps to `0.68.0` in both sources; SPEC §80
+    """A70 (33.1): the version steps to `0.71.0` in both sources; SPEC §80
     cites A70; the A25 index row for M69 points at this file."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.68.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.71.0"
     init = (REPO / "src" / "autorefine" / "__init__.py").read_text(encoding="utf-8")
-    assert '"0.68.0"' in init
+    assert '"0.71.0"' in init
     spec = SPEC.read_text(encoding="utf-8")
     assert "## 80. Fine-tuning" in spec
     assert "Acceptance (A70)" in spec

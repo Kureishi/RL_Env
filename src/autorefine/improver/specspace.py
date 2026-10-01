@@ -19,6 +19,8 @@ from typing import Any, Callable
 from ..config import (
     ACTIVATIONS,
     BATCH_SIZES,
+    CONV1D_FILTERS,
+    CONV1D_KERNELS,
     CONV_FILTERS,
     EARLY_STOPPING_RANGE,
     FOURIER_FEATURES,
@@ -34,6 +36,7 @@ from ..config import (
     LR_SCHEDULES,
     MODEL_FAMILIES,
     OPTIMIZERS,
+    RNN_HIDDEN,
     TRAIN_STEPS_RANGE,
     WEIGHT_DECAY_RANGE,
 )
@@ -115,7 +118,12 @@ _CONVNET_ARCHS = tuple((c1, c2) for c1 in CONV_FILTERS for c2 in CONV_FILTERS)
 _ARCH_SPACE = ((16, 8), (32, 16), (64, 32), (16, 32, 16), (1,), (2,), (3,)) \
     + _CONVNET_ARCHS
 
-_NEURAL = ("mlp", "convnet")  # the neural families' shared fields
+# the neural families' shared fields (the shared `_train_neural` loop);
+# SPEC.md 83 (v0.69): the temporal families train in that same loop, so
+# these shared knobs affect them too. (Bandit pool membership is the
+# catalog's concern — catalog.py keeps the new family-only knobs out of
+# the pre-v0.69 mlp/convnet pools, SPEC.md 83.2.5.)
+_NEURAL = ("mlp", "convnet", "conv1d", "rnn")
 
 # Order = the v0.21 FIELD_CATALOG order (byte-identical; A26)
 SPEC_FIELDS: dict[str, SpecField] = {
@@ -180,6 +188,21 @@ SPEC_FIELDS: dict[str, SpecField] = {
     "gp_length_scale": SpecField(
         "gp_length_scale", GP_LENGTH_SCALES, _v_range(0.25, 2.0),
         ("gp",), "78", "ordered"),
+    # SPEC.md 83 (v0.69): native temporal families — appended at the END so
+    # every existing ordinal stays (the A50 fingerprint pattern; 18 -> 21
+    # fields). Each is "ordered" (a numeric neighborhood move is meaningful);
+    # validated for every family, consumed only by the named one (83.2.3 /
+    # 83.3.3). The time axis T and channel count C come from the task's
+    # sequence layout, not these fields (83.1).
+    "conv1d_filters": SpecField(
+        "conv1d_filters", CONV1D_FILTERS, _v_int_range(4, 16),
+        ("conv1d",), "83", "ordered"),
+    "conv1d_kernel": SpecField(
+        "conv1d_kernel", CONV1D_KERNELS, _v_int_range(3, 7),
+        ("conv1d",), "83", "ordered"),
+    "rnn_hidden": SpecField(
+        "rnn_hidden", RNN_HIDDEN, _v_int_range(8, 32),
+        ("rnn",), "83", "ordered"),
 }
 
 SPEC_FIELD_NAMES = tuple(SPEC_FIELDS)

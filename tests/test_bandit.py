@@ -84,19 +84,28 @@ def test_cold_start_tries_every_relevant_field():
             assert set(fields) & set(untried)
         best = spec
         state = {"best_spec": best, "last": {"accepted": False, "fields": fields}}
-    assert min(pol.trials.values()) >= 1  # every field was tried
+    # SPEC.md 83.2.5 (v0.69): scope to the fields reachable under this
+    # state's family offer (task=None -> mlp/tree/boost pools; the
+    # conv1d/rnn-only temporal knobs are never relevant here)
+    reachable = (set(relevant_fields("mlp")) | set(relevant_fields("tree"))
+                 | set(relevant_fields("boost")))
+    assert min(pol.trials[f] for f in reachable) >= 1  # every reachable field tried
 
 
 def test_cold_start_fixed_family_tries_every_field():
     """SPEC.md 18.2, stable-family case: if the best spec's family is held
-    at mlp, cold start still tries every field once before exploitation
-    (the v0.3 invariant, now scoped to relevant_fields('mlp') = all 10)."""
+    at mlp, cold start still tries every mlp-pool field once before
+    exploitation (the v0.3 invariant, scoped to relevant_fields('mlp')).
+    SPEC.md 83.2.5 (v0.69): the pool is the 18 pre-v0.69 fields — the
+    conv1d/rnn-only temporal knobs are not in it (the §18.7 bit-exact
+    stream's lexicographic cold-start order must not see them)."""
     pol = BanditPolicy(seed=0)
     best = DEFAULT_SPEC.to_dict()
     state = {"best_spec": best, "last": None}
-    for _ in range(len(FIELD_NAMES)):
-        rel = relevant_fields(best.get("model_family", "mlp"))
-        assert set(rel) == set(FIELD_NAMES)  # family pinned to mlp
+    rel = tuple(relevant_fields("mlp"))
+    assert len(rel) == len(FIELD_NAMES) - 3  # v0.64 18-set (SPEC.md 83.2.5)
+    for _ in range(len(rel)):
+        assert set(relevant_fields(best.get("model_family", "mlp"))) == set(rel)
         if min(pol.trials[f] for f in rel) == 0:
             assert max(pol.trials[f] for f in rel) <= 1
         spec = pol.propose(state)
@@ -108,10 +117,10 @@ def test_cold_start_fixed_family_tries_every_field():
             spec = {**spec, "model_family": "mlp", "architecture": [16, 8]}
         best = spec
         state = {"best_spec": best, "last": {"accepted": False, "fields": fields}}
-    # one final proposal credits the last field: all 10 now have a trial
+    # one final proposal credits the last field: all pool fields now have a trial
     pol.propose(state)
-    assert min(pol.trials.values()) >= 1  # every field was tried
-    assert max(pol.trials.values()) <= 2  # nothing exploited more than once
+    assert min(pol.trials[f] for f in rel) >= 1  # every pool field was tried
+    assert max(pol.trials[f] for f in rel) <= 2  # nothing exploited more than once
 
 
 def test_feedback_credits_fields():

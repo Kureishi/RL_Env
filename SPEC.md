@@ -89,6 +89,9 @@ numbers and carry none.)
 | M69 | v0.66   | 80     | A70 | tests/test_finetune_v066.py |
 | M70 | v0.67   | 81     | A71 | tests/test_model_compare_v067.py |
 | M71 | v0.68   | 82     | A72 | tests/test_nonlinearity_v068.py |
+| M72 | v0.69   | 83     | A73 | tests/test_temporal_v069.py |
+| M73 | v0.70   | 84     | A74 | tests/test_sequential_v070.py |
+| M74 | v0.71   | 85     | A75 | tests/test_simloop_v071.py |
 
 ---
 
@@ -7376,3 +7379,125 @@ In the Results tab's Research views, after the Model comparison subheader: a **N
 ### 82.7 Milestone (M71)
 
 **M71** — v0.68 "Nonlinearity intelligence for nonlinear tasks": the run's nonlinearity becomes a measured, tiered, reportable quantity — the depth-0 linear best versus the overall best (the gap), the per-family deltas, and the measured spectral-expansion effect (82.2) — interlocking the model-comparison grouping (81.2), the 78.2.1 `fourier_features` field, and the reporting family (82.5/82.4), rendered as one SVG with the linear-baseline reference (82.3), with pure derivation/rendering, deterministic output (G2), and no new dependency (66.5); the A-index advances to A72/M71 with `tests/test_nonlinearity_v068.py` (82.6).
+
+## 83. Native temporal models — sequence layout, conv1d / rnn families, the motif task (v0.69)
+
+Directive: "Implement all 3 in order (Native temporal models -> Sequential decision-making -> Offline-only)." This round is **Milestone 1 of 3** (v0.69): the environment gains *native temporal* model capacity — a sequence data layout, two recurrent/convolutional temporal families (`conv1d`, `rnn`), a built-in sequence task that demonstrates them, and full integration into the spec / search / catalog / finetune / reporting surfaces. The two later milestones (sequential decision-making, offline-only) build on the sequence protocol established here and are out of scope for this version (83.6).
+
+### 83.1 Design — the sequence layout protocol
+
+The model families today all read 2-D feature rows (or, for convnet, a 4-D image/audio grid). A *sequence* is a third layout: `(n, T, C)` — `n` samples, `T` timesteps, `C` channels per step. The protocol adds one capability and one model attribute; nothing else changes:
+
+* **Task side.** A task declares `capabilities = frozenset({"sequence"})`. Its `make_dataset` / `initial_conditions` then yield **3-D** `X` of shape `(n, T, C)`; `state_dim` reflects the flattened width `T * C` (the layout a flat model would see). `catalog.relevant_families` (25.5) reads the capability: a sequence task offers `("mlp", "tree", "boost", "conv1d", "rnn")`; every pre-v0.69 task returns exactly its previous tuple, so the §18.7 bit-exact legacy pin stays green.
+* **Model side.** A temporal model declares the class attribute `wants_sequence = True`. The shared layout rule (trainer and `score`): a `wants_sequence` model reads the `(n, T, C)` rows directly; every other family reads the flattened `(n, T*C)` rows. The trainer enforces the converse: a `conv1d`/`rnn` spec on genuinely flat (2-D) data is a clean `SpecError` at train time — never a silent reshape (the 25.3 convnet-grid guard, restated for sequences).
+* **Spec side.** Two new families (`conv1d`, `rnn`) join `MODEL_FAMILIES`. Their dedicated knobs are `conv1d_filters` / `conv1d_kernel` (the output-filter count `F` and the time-kernel width `K`) and `rnn_hidden` (the Elman hidden width `H`). `architecture` is ignored for both (the knn/gp/gam 25.2 pattern — a non-parametric-shaped family with its own knobs), `spec_n_params` is `None` (the size depends on the task's `T`, `C`), and the three fields are excluded from the bandit's 14-field stream (the §18.7 bit-stable stream is unchanged); they are fully searchable through the spec surface, the 106-action RL catalog, `eval`, and the search paths.
+
+### 83.2 The `conv1d` family — a NumPy temporal-conv model (`models/conv1d.py`)
+
+* **83.2.1 architecture** — one causal valid 1-D convolution over `(T, C)` with a `(F, C, K)` kernel, a tanh/relu, a stride-2 time pool (the convnet's 2x2 guard, restated along time — a length-1 trailing step passes through), a fixed FC-16, and a linear head.
+* **83.2.2 layouts** — native `(n, T, C)` rows; `forward` also accepts the flat `(n, T*C)` layout and reshapes (the 25.3 robustness rule); a flat width that is not `T*C` is a clean `SpecError` (fail loud, never a silent reshape).
+* **83.2.3 knobs** — `conv1d_filters` (the output-filter count `F`) and `conv1d_kernel` (the time-kernel width `K`); the FC hidden size is fixed (off the spec surface, the 25.3 rule); `architecture` is unused (the 25.2 pattern); `spec_n_params` is `None` (the size-dependent heads of 25.2/78.2).
+* **83.2.4 shared contract** — `.layers` (a list of `(w, b)` in conv → fc → head order) + `.loss_and_grads(x, y, label_smoothing)`, so it trains in the exact `_train_neural` loop the mlp / convnet use (the 83.1 shared-loop rule): Adam / momentum / SGD, warmup / cosine schedules, early stopping, gradient clipping, label smoothing all apply with zero family-specific code. Gradients are analytic (the im2col-gather conv has a closed-form `dw`/`db`/`dx`). `save`/`load` are plain arrays (`allow_pickle=False`), storing `T`, `C`, `F`, `K`.
+* **83.2.5 search membership** — the registry row declares `families = ("conv1d",)` (validated for every family, consumed only by conv1d — the 25.2 / 78.2 knob pattern); both knobs join `EXCLUDED_FROM_SEARCH`, so the 14-field SearchPolicy stream is unchanged (78.2.4 restated); and the bandit pool membership is **conv1d only** — the pre-v0.69 mlp / convnet pools keep the 18-field v0.64 set (see 83.3.6 for the load-bearing lexicographic guard).
+
+### 83.3 The `rnn` family — a NumPy Elman RNN (`models/rnn.py`)
+
+* **83.3.1 architecture** — a hidden-state recurrence `h_t = act(W_in x_t + W_h h_{t-1} + b)` rolled over the `T` steps with a linear read-off head; Glorot × `init_scale` initialization.
+* **83.3.2 learning** — exact BPTT (unrolled through all `T` steps; the hidden state is the only cross-step quantity); no truncation, no RNG in forward (G2).
+* **83.3.3 knob** — `rnn_hidden` (the Elman hidden width `H`); the time axis `T` and channel count `C` come from the task's sequence layout (the offered time axis, off the spec surface); `architecture` is unused (like conv1d, 83.2.3).
+* **83.3.4 layouts** — the 83.2.2 rules: native `(n, T, C)` plus flat `(n, T*C)`, with the clean `SpecError` guard on a wrong flat width.
+* **83.3.5 shared contract** — `.layers` (`W_in`, `W_h`, `b_h`, head in a fixed order), `.loss_and_grads`, the `_train_neural` loop, and `save`/`load` plain arrays storing `T`, `C`, `H` — the 83.2.4 contract restated.
+* **83.3.6 search membership (the pin guard)** — the registry row declares `families = ("rnn",)`; `rnn_hidden` joins `EXCLUDED_FROM_SEARCH` (14-field stream unchanged, 78.2.4). **Bandit pool:** `rnn_hidden` enters ONLY the `rnn` pool (and `conv1d_filters` / `conv1d_kernel` only the `conv1d` pool); the pre-v0.69 mlp / convnet pools keep their exact 18-field v0.64 set. This is load-bearing: `rnn_hidden` sorts *above* `optimizer` lexicographically, so admitting the new knobs into the mlp pool would re-order the bandit's lexicographic cold-start tie-break (weight_decay → train_steps → optimizer, …) and break the §18.7 bit-exact legacy stream — the same guard 78.2.4 applied to the v0.64 fine-pattern fields. Mutating a knob the family ignores would also just waste an experiment (the §19.2 tree/boost / §25.2 knn rationale).
+
+The two families are the temporal analogues of `convnet` (spatial conv → temporal conv) and `mlp` (the read-off head), and together they give the improver genuinely *different* inductive biases for time: local pattern detection (conv1d) versus stateful aggregation (rnn).
+
+### 83.4 The `sequence-motif-v1` task + lag features (`tasks/sequence.py`)
+
+`SequenceMotifV1` classifies whether a fixed short motif (default `1 0 1`) appears anywhere in a `T = 10`, `C = 1` binary sequence — the textbook problem both temporal families solve naturally (a causal conv is a literal local pattern detector; the RNN recognizes the motif as a finite-state machine) while a flat MLP on the flattened bits must re-recognize it at every position. `head = "softmax"`, `n_outputs = 2`, `metric = "accuracy"`, `capabilities = {"sequence"}` (G1). On the built-in level with a real budget the temporal families reach high holdout accuracy (conv1d ~100, rnn ~94) while the un-tuned flat MLP trails (~70) — the clearest built-in demonstration that the temporal families earn their place. `make_lag_features` (`models/_lag.py`) is the pure-numpy lag-window helper `(n, T, C) -> (n, window*C)` for tasks that prefer flattened lag inputs over the native layout.
+
+### 83.5 Acceptance (A73)
+
+A73 is met when, with the defaults unchanged for every pre-v0.69 surface (the §18.7 bit-exact sequence, the A1–A4 bandit streams, the 14-field search stream, the 106-action catalog, the 21-field registry all pinning exactly):
+
+1. **conv1d / rnn** each: forward → (n, n_out) logits on `(n, T, C)` (and flat `(n, T*C)`); `loss_and_grads` finite, analytic gradients matching a finite-difference check to tolerance; `.layers` in the documented order; `save` → `load` roundtrip byte-equivalent forward; deterministic under the same seed (G2).
+2. **`make_lag_features`** produces the documented `(n, window*C)` layout, deterministic, no RNG.
+3. **`sequence-motif-v1`**: `make_dataset` yields 3-D `(n, T, C)` with the motif label; `score` reads the `wants_sequence` flag correctly (temporal families on the native layout, flat families on the flattened rows); a real `AutoRefineEnv` run on the task trains and improves; the temporal families beat the flat MLP with a real budget.
+4. **Registry / catalog growth**: `SPEC_FIELDS` = 21, `FIELD_NAMES` = 21, `ACTIONS` = 106, `SEARCH_FIELDS` = 14 (unchanged), `FAMILY_FIELDS[conv1d] == FAMILY_FIELDS[rnn] ==` the full 21-field row set **while** `FAMILY_FIELDS[mlp] == FAMILY_FIELDS[convnet] ==` the pre-v0.69 18-field set (83.2.5 / 83.3.6 — the §18.7 bit-exact stream must not see the new knobs), `relevant_families("sequence-motif-v1") = ("mlp", "tree", "boost", "conv1d", "rnn")`; `set(FIELD_SAMPLERS) == set(SPEC_FIELDS)`.
+5. **Finetune**: a saved `conv1d` / `rnn` checkpoint loads, its spec reconstructs (the 83.2/83.3 knobs), `validate_for_task` accepts a sequence task and rejects a non-sequence one; a compatible candidate warm-starts from it (`can_warm_start` / `copy_weights`).
+6. **Reporting**: `svg_architecture` renders the conv1d and rnn block diagrams (the family body + head) with the field-highlight rings on `conv1d_filters` / `conv1d_kernel` / `rnn_hidden`.
+7. **Language / version / index**: the app-language scan stays green; the version steps to `0.69.0` in both sources (33.1); the A-index advances (`defined == set(range(1, 74))`, 73 acceptance rows, M72 resolving to `tests/test_temporal_v069.py`).
+
+All in `tests/test_temporal_v069.py`.
+
+### 83.6 Milestone (M72)
+
+**M72** — v0.69 "Native temporal models": the environment reads a native `(n, T, C)` sequence layout and trains two temporal families — a causal Conv1D (83.2) and an Elman RNN with exact BPTT (83.3) — on the shared neural loop (83.1), demonstrated by the built-in `sequence-motif-v1` task (83.4) where both temporal families beat the flat MLP, integrated across the spec registry, the 106-action RL catalog, finetune / warm-start, and the architecture diagram (83.5); pure additions, deterministic output (G2), no new dependency (the stdlib + numpy rule); the A-index advances to A73/M72 with `tests/test_temporal_v069.py` (83.5). Sequential decision-making and offline-only follow in the next two milestones (83.6).
+
+## 84. Sequential decision-making — sample weights, the cartpole sim, AWR, learned-model MPC (v0.70)
+
+The environment gains **sequential control tasks**: policies over (state, action) pairs learned **offline** — from logged rollouts, with no environment access at fit time — using the existing trainer. This is the second of the three "honest limits" follow-ups (83.6): native temporal models (done, 83) → **sequential decision-making (this round)** → sim-in-the-loop (85).
+
+### 84.1 `sample_weight` — per-example weights in the trainer contract
+
+Additive; `sample_weight=None` is the exact legacy path (bit-identical — the §18.7 / T2 pins stay green):
+
+1. **`models/mlp.py::_sample_weights`** — validates `(n,)`, non-negative, sum > 0; returns `(w, W=w.sum())`. The weighted loss is the *weighted mean* `(w * per_example).sum() / W`, so a global rescale of `w` leaves it invariant (the gradient divides by W too: `dz = dz_unnorm * (w / W)`).
+2. **`loss_and_grads(..., weights=None)`** on all four parametric families (mlp / convnet / conv1d / rnn — the shared-loop contract): weighted softmax CE *and* weighted MSE. `weights=None` runs the pre-v0.70 statements verbatim (bit-identical).
+3. **`trainer.train(..., sample_weight=None)`** threads the weights through `_train_neural`: the per-batch slice `w[idx]` (the RNG draw is untouched — G2), the early-stopping val tail `w[n_tr:]`, and the holdout probe `w[-n_tail:]`; `_training_loss(..., weights=None)` is the weighted forward-only read (val loss / loss_history).
+4. **Non-parametric families** (tree / boost / knn / gp / gam) with a non-None `sample_weight` raise a clean `SpecError` — the reweighting is defined for parametric policies (AWR, 84.3).
+
+### 84.2 The `Simulator` contract + `CartpoleSim` (`simulator.py`)
+
+1. **`Simulator` ABC** — `n_actions`, `state_dim`, `reset(seed) -> state`, `step(state, action) -> (next_state, reward, done)`, and `is_terminal(state) -> bool` (default False). A simulator is a pure function of its inputs (G2): same seed, same episode trajectory, always.
+2. **`CartpoleSim`** — the classic cartpole with discrete control {0: push left, 1: push right}. State = (x, v, theta, omega); fixed-dt Euler integration of the CartPole-v0 equations (g 9.8, cart 1.0 kg, pole 0.1 kg, length 0.5 m, force 10.0 N, dt 0.02 s). **Reward +1 per step** (the classic survival reward — maximizing total return == maximizing survival steps); terminal when |theta| > 0.2 rad or |x| > 1.6 m (`is_terminal`); episodes truncated at `max_steps` (default 200) so a good policy saturates the horizon (a clean fixed grid for AWR, 84.3).
+
+### 84.3 AWR — Advantage-Weighted Regression (`awr.py`)
+
+1. **Returns / advantages / weights** — `trajectory_returns(rewards, horizon, gamma=1.0)`: per-step (discounted) returns over fixed-horizon rollouts (gamma 1.0 = undiscounted survival returns). `advantages(returns, baseline)` with baseline in {mean (default), min, zero}. `awr_weights(adv, beta) = exp(adv / beta)` — `beta` is the temperature (larger = flatter); overflow (huge advantage / tiny beta) is a clean `SpecError`, never `inf` weights.
+2. **`rollout(policy, sim, episodes, horizon, seed)`** — the REINFORCE-style demonstration: sample each action from `softmax(policy.forward(state))` with the seeded RNG, collect `(states, actions, rewards)` plus `returns` and `total_returns`. Episodes truncate at `horizon` or `done`; past `done` the terminal state is repeated with reward 0 (keeps the dataset a clean `(episodes * horizon,)` grid — padded steps carry ~mean advantage, so their weight is ~1). Deterministic in (policy, seed) (G2).
+3. **`train_awr_policy(states, actions, rewards, horizon, spec, seed, beta, gamma, baseline, n_out, ...)`** — weight each (state, action) example by `exp(advantage / beta)` and fit the policy with **one `train(..., sample_weight=w)` call** (84.1): no new training loop, no environment access at fit time (offline RL — the rollouts ARE the dataset). `n_out` is the action count (default 2 = CartpoleSim's).
+
+### 84.4 Learned-model MPC (`mpc.py`)
+
+The model-based counterpart to AWR (84.3, model-free):
+
+1. **`learn_dynamics(states, actions, next_states, spec, seed, ...)`** — fit `(state, action) -> next_state` with the mse head (one `train()` call); actions are encoded as a single 0/1 feature column.
+2. **`mpc_act(dynamics_model, sim, state, horizon=4)`** — enumerate all `n_actions ** horizon` action sequences in a fixed `itertools.product` order, roll the learned dynamics forward from `state`, and count the steps until `sim.is_terminal` fires (or the state goes non-finite); return the first action of the best (strict `>` keeps the first on ties). **No RNG** — pure enumeration + forward passes (G2).
+
+### 84.5 Acceptance (A74)
+
+1. **sample_weight**: the weighted softmax CE and weighted MSE match hand-computed weighted means on mlp, rnn, conv1d, and convnet (gradients included — a finite-difference gradcheck on at least mlp); `weights=None` is bit-identical to the pre-v0.70 path; bad weights (wrong length, negative entry, zero sum) are clean `SpecError`s; a non-parametric family (tree) with weights is a clean `SpecError`.
+2. **CartpoleSim**: `reset` determinism (same seed, same start); `step` invariants (finite state, reward +1.0, `done` consistent with `is_terminal`); a full episode trajectory reproduces bit-exactly from (seed, action sequence); episodes truncate at `max_steps`; the terminal box is respected (a falling pole ends the episode).
+3. **AWR**: `trajectory_returns` / `advantages` / `awr_weights` match hand-computed values (gamma 1.0 *and* 0.9); `rollout` is deterministic (same policy + seed ⇒ same data) and yields the clean `(episodes * horizon,)` grid; a policy AWR-trained on collected rollouts **beats the uniform baseline's** mean total return on a fresh rollout.
+4. **MPC**: the learned dynamics beats the no-op baseline (predict current state) on next-state prediction; `mpc_act` returns a valid action, and its chosen sequence's predicted survival is ≥ the other action's; the whole MPC path is deterministic (no RNG).
+5. **Language / version / index**: the app-language scan stays green (no SPEC / version tokens in app strings); the version steps to `0.70.0` in both sources (33.1); the A-index advances (`defined == set(range(1, 75))`, 70 acceptance rows, M73 resolving to `tests/test_sequential_v070.py`).
+
+All in `tests/test_sequential_v070.py`.
+
+### 84.6 Milestone (M73)
+
+**M73** — v0.70 "Sequential decision-making": the environment learns *policies* for sequential control tasks, **offline** — `sample_weight` joins the trainer contract (84.1), a NumPy cartpole with the reset/step/is_terminal contract (84.2), AWR as advantage-weighted re-fitting through one `train()` call (84.3), and learned-model MPC as the model-based counterpart (84.4); pure additions, deterministic output (G2), no new dependency (the stdlib + numpy rule); the A-index advances to A74/M73 with `tests/test_sequential_v070.py` (84.5). Sim-in-the-loop (the rollout → AWR autonomous improvement loop, 85) follows in the next milestone (84.6).
+
+## 85. Sim-in-the-loop — the autonomous sequential improvement loop (v0.71)
+
+The third of the three "honest limits" follow-ups (83.6): the sequential decision-making pieces (84) are wired into the **autonomous loop** — the environment improves a control policy on its own, measuring the improvement curve.
+
+### 85.1 `awr_loop` — rollout → AWR retrain → repeat (`awr.py`)
+
+1. **Start** — the loop starts from the **uniform baseline policy** (no learning): iteration 0's AWR fit is on the uniform policy's rollouts (the "random" start), exactly like the AutoRefine loop's baseline spec.
+2. **Iterate** — for each of `iterations` rounds: `data = rollout(current policy, seed + 1000*(i+1))` → `policy = train_awr_policy(data, seed + 2000*(i+1), ...)` (84.3.3 — one `train()` call, no environment access at fit time). Then the **new** policy is evaluated on a **single shared evaluation seed** `seed + 9000` — identical across iterations, so the policy is the only variable and the improvement curve is an apples-to-apples comparison (85.1.2).
+3. **Record** — per-iteration `mean_total_returns` / `best_total_returns` (the improvement curve), the final `policy`, and `baseline_mean_total_return` (the uniform policy's return at that *same* evaluation seed — the reference line for "how much did the loop buy?"). Returns `{mean_total_returns, best_total_returns, policy, baseline_mean_total_return, eval_seed, iterations}`.
+4. **Determinism** (G2) — the whole loop is a pure function of (sim, budget, seeds): the data-rollout seeds, the AWR-fit seeds, and the shared evaluation seed are all derived from the one `seed` argument (85.1.2).
+
+### 85.2 Acceptance (A75)
+
+1. **Loop mechanics**: `awr_loop` runs end-to-end (3 iterations) and returns `mean_total_returns` / `best_total_returns` arrays of length `iterations`, a usable final `policy` (a forward pass over a state yields `n_actions` logits), `baseline_mean_total_return` (a finite float), and `eval_seed == seed + 9000`; `iterations < 1` is a clean `SpecError`.
+2. **Determinism**: two `awr_loop` calls with the same (sim, budget, seed, spec) yield bit-identical return curves *and* bit-identical final-policy weights (G2, 85.1.4).
+3. **Improvement**: the loop's final mean total return **beats the uniform baseline's** mean total return at the *same shared evaluation seed* (`baseline_mean_total_return`, 85.1.1/85.1.2) — the autonomous improvement, measured apples-to-apples; and the curve shows a learned (non-uniform) policy at every recorded point (no NaNs).
+4. **Language / version / index**: the app-language scan stays green; the version steps to `0.71.0` in both sources (33.1); the A-index advances (`defined == set(range(1, 76))`, 71 acceptance rows, M74 resolving to `tests/test_simloop_v071.py`).
+
+All in `tests/test_simloop_v071.py`.
+
+### 85.3 Milestone (M74)
+
+**M74** — v0.71 "Sim-in-the-loop": the environment now **autonomously improves a control policy** — `awr_loop` iterates rollout → AWR retrain (85.1) from the uniform baseline, evaluating each improved policy on a single shared evaluation seed so the improvement curve is apples-to-apples (85.1.2); pure additions, deterministic output (G2), no new dependency (the stdlib + numpy rule); the A-index advances to A75/M74 with `tests/test_simloop_v071.py` (85.2). This completes the three-part "honest limits" program (83.6): native temporal models (83) → sequential decision-making (84) → sim-in-the-loop (85).

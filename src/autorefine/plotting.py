@@ -1767,6 +1767,9 @@ def svg_architecture(spec, state_dim, n_out, width: int = 640,
         # count drive body blocks, so they highlight.
         "gp": ("gp_length_scale",),
         "gam": ("weight_decay", "gam_interactions"),
+        # SPEC.md 83 (v0.69): the temporal families' knobs drive body blocks.
+        "conv1d": ("conv1d_filters", "conv1d_kernel"),
+        "rnn": ("rnn_hidden",),
     }
     ring = hl is not None and (
         hl == "model_family" or hl in _BLOCK_BY_FAMILY.get(family, ()))
@@ -1807,6 +1810,21 @@ def svg_architecture(spec, state_dim, n_out, width: int = 640,
         blocks = [
             ("RFF kernel", kernel_detail),
             ("ridge fit", f"-> {n_out} outputs"),
+        ]
+    elif family == "conv1d":  # SPEC.md 83.2: causal conv -> pool -> FC -> head
+        cf = int(_spec_get(spec, "conv1d_filters", 8))
+        ck = int(_spec_get(spec, "conv1d_kernel", 3))
+        blocks = [
+            (f"conv1d (kernel {ck})", f"{cf} filters"),
+            ("pool (stride 2)", "time axis"),
+            ("FC 16", "fixed hidden"),
+            ("linear", f"-> {n_out} outputs"),
+        ]
+    elif family == "rnn":  # SPEC.md 83.3: Elman recurrence -> linear head
+        rh = int(_spec_get(spec, "rnn_hidden", 16))
+        blocks = [
+            ("Elman RNN", f"hidden {rh}"),
+            ("linear", f"-> {n_out} outputs"),
         ]
     elif family == "gam":  # SPEC.md 75 (v0.61): additive smoothing splines
         wd = _spec_get(spec, "weight_decay", None)

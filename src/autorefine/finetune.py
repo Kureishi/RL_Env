@@ -20,17 +20,20 @@ from typing import Any
 import numpy as np
 
 from .config import DEFAULT_SPEC, ModelSpec
+from .models.conv1d import Conv1D
 from .models.convnet import ConvNet
 from .models.gam import GAM
 from .models.gp import GP
 from .models.knn import KNN
 from .models.mlp import MLP
+from .models.rnn import RNN
 from .models.trees import BoostingEnsemble, TreeEnsemble
 
 # Families that carry transferable weights (a warm start copies their layer
 # weights). The non-parametric families (tree/boost/knn/gp/gam) memorize
 # the training rows — there is nothing to copy (80.3.3).
-PARAMETRIC = ("mlp", "convnet")
+# SPEC.md 83 (v0.69): the native temporal families carry weights too.
+PARAMETRIC = ("mlp", "convnet", "conv1d", "rnn")
 
 
 @dataclass(frozen=True)
@@ -47,9 +50,20 @@ class Checkpoint:
 
 def _detect_family(files: set[str]) -> str:
     """Family by npz key set (80.2.1). Check order: the discriminating
-    keys never collide between the families' ``save()`` formats."""
-    if "C" in files and "n_layers" in files:
+    keys never collide between the families' ``save()`` formats.
+
+    SPEC.md 83 (v0.69): the temporal families share ``C``/``n_layers``/``layer*_w``
+    with convnet, so their discriminating keys go first — conv1d stores
+    ``F`` + ``K`` (convnet has neither), convnet stores ``W`` (conv1d/rnn
+    have neither), rnn stores ``T`` + ``H`` (conv1d has no ``H``; convnet
+    has no ``T``). The mlp check (``n_layers`` + ``layer0_w``) stays last
+    of the neural families — every family above has those keys too."""
+    if "F" in files and "K" in files and "n_layers" in files:
+        return "conv1d"
+    if "C" in files and "W" in files and "n_layers" in files:
         return "convnet"
+    if "T" in files and "H" in files and "n_layers" in files:
+        return "rnn"
     if "X" in files and "k" in files:
         return "knn"
     if "omega" in files and "w" in files:
@@ -81,6 +95,17 @@ def _spec_for(family: str, model: Any) -> ModelSpec:
     elif family == "convnet":
         d["model_family"] = "convnet"
         d["architecture"] = [int(model.c1), int(model.c2)]
+        d["activation"] = model.activation
+        d["init_scale"] = float(model.init_scale)
+    elif family == "conv1d":  # SPEC.md 83.2: the temporal knobs are spec fields
+        d["model_family"] = "conv1d"
+        d["conv1d_filters"] = int(model.F)
+        d["conv1d_kernel"] = int(model.K)
+        d["activation"] = model.activation
+        d["init_scale"] = float(model.init_scale)
+    elif family == "rnn":  # SPEC.md 83.3: the Elman hidden width is a spec field
+        d["model_family"] = "rnn"
+        d["rnn_hidden"] = int(model.H)
         d["activation"] = model.activation
         d["init_scale"] = float(model.init_scale)
     elif family == "knn":
@@ -116,7 +141,8 @@ def load_checkpoint(path: str | Path) -> Checkpoint:
     with np.load(p, allow_pickle=False) as z:
         family = _detect_family(set(z.files))
     loaders = {
-        "mlp": MLP.load, "convnet": ConvNet.load, "knn": KNN.load,
+        "mlp": MLP.load, "convnet": ConvNet.load, "conv1d": Conv1D.load,
+        "rnn": RNN.load, "knn": KNN.load,
         "gp": GP.load, "gam": GAM.load,
         "tree": TreeEnsemble.load, "boost": BoostingEnsemble.load,
     }
@@ -156,6 +182,19 @@ def validate_for_task(cp: Checkpoint, task: Any) -> tuple[bool, str]:
         if grid != want:
             return False, (f"grid mismatch: the model expects {want} "
                            f"but the task's grid is {grid}")
+    elif cp.family in ("conv1d", "rnn"):  # SPEC.md 83.1: the sequence layout
+        if "sequence" not in getattr(task, "capabilities", frozenset()):
+            return False, ("the task has no 'sequence' capability (no "
+                           "(timesteps, channels) layout)")
+        T = getattr(task, "T", None)
+        C = getattr(task, "C", None)
+        if T is not None and C is not None:
+            want = (int(T), int(C))
+            have = (int(cp.model.T), int(cp.model.C))
+            if want != have:
+                return False, (f"sequence layout mismatch: the model expects "
+                               f"T={have[0]} timesteps and {have[1]} channel(s) "
+                               f"but the task has T={want[0]} and {want[1]}")
     elif cp.family == "gp":
         K = int(cp.model.fourier_K)
         want = int(task.state_dim) * (2 * K + 1)
@@ -196,6 +235,12 @@ def can_warm_start(cp: Checkpoint, spec: ModelSpec, n_out: int, head: str,
         if int(m.fourier_K) != int(spec.fourier_features):
             return False
         if in_dim is not None and m.in_dim != int(in_dim):
+            return False
+    if cp.family == "conv1d":  # SPEC.md 83.2: the temporal knobs must match
+        if int(m.F) != int(spec.conv1d_filters) or int(m.K) != int(spec.conv1d_kernel):
+            return False
+    if cp.family == "rnn":  # SPEC.md 83.3: the Elman hidden width must match
+        if int(m.H) != int(spec.rnn_hidden):
             return False
     return True
 

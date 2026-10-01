@@ -148,21 +148,30 @@ def test_unknown_mode_and_field_raise():
 # ---------------------------------------------------------------------------
 
 def test_relevant_fields_and_actions():
-    """SPEC.md 18.2 + 19.4 + 25 + 75 + 78: tree/boost ignore optimizer/lr/
-    batch/weight-decay/activation/label-smoothing and the mlp-only fields;
-    mlp uses all 18 fields (v0.11: +knn_k; v0.64: +fourier_features, the
-    spectral expansion mlp consumes); the action space is 95 (77 v0.11 +
-    v0.61 value-level: gp/gam families, adamw optimizer, 3 schedules + the
-    v0.64 fine-pattern fields, 3 × 4 values)."""
-    assert set(relevant_fields("mlp")) == set(FIELD_NAMES)
+    """SPEC.md 18.2 + 19.4 + 25 + 75 + 78 + 83: tree/boost ignore
+    optimizer/lr/batch/weight-decay/activation/label-smoothing and the
+    mlp-only fields; mlp uses the 18 pre-v0.69 fields (v0.11: +knn_k; v0.64:
+    +fine-pattern fields, consumed where they apply); the action space is
+    106 (77 v0.11 + v0.61 value-level: gp/gam families, adamw optimizer,
+    3 schedules + the v0.64 fine-pattern fields, 3 × 4 values + the v0.69
+    temporal families, SPEC.md 83: 9 model families + 3 fields × 3 values).
+    SPEC.md 83.2.5: the v0.69 temporal knobs are conv1d/rnn-only bandit
+    fields — they are NOT in the mlp pool (the §18.7 bit-exact stream's
+    lexicographic cold-start tie-break must stay wd -> steps -> optimizer)."""
+    mlp_pool = set(FIELD_NAMES) - {"conv1d_filters", "conv1d_kernel",
+                                   "rnn_hidden"}
+    assert set(relevant_fields("mlp")) == mlp_pool
     assert set(relevant_fields("tree")) == set(TREE_FIELDS)
     assert set(relevant_fields("boost")) == set(TREE_FIELDS)  # SPEC.md 19.2
-    assert len(ACTIONS) == 95
+    assert len(ACTIONS) == 106
     tree_actions = relevant_actions("tree")
-    assert len(tree_actions) == 39  # arch 23 + steps 5 + noise 4 + family 7 (SPEC.md 75)
+    assert len(tree_actions) == 41  # arch 23 + steps 5 + noise 4 + family 9 (SPEC.md 75/83)
     assert set(tree_actions) < set(range(len(ACTIONS)))
     assert all(ACTIONS[i][0] in TREE_FIELDS for i in tree_actions)
-    assert set(relevant_actions("mlp")) == set(range(95))
+    # mlp: every action except the three temporal-knob ones (SPEC.md 83.2.5)
+    mlp_actions = {i for i, (f, _v) in enumerate(ACTIONS) if f in mlp_pool}
+    assert set(relevant_actions("mlp")) == mlp_actions
+    assert len(mlp_actions) == 106 - 9  # 3 fields × 3 values stay out
 
 
 def test_bandit_tree_best_stays_in_relevant_fields():

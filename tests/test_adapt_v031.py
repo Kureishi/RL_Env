@@ -269,13 +269,14 @@ def test_ngram_features_shape_values_determinism():
 
 def test_text_registered():
     """A35 (SPEC.md 45.2.2): `"text"` is in `TASKS` with `TextTask`; the
-    registry shape advanced in place (7 → 8, the v0.8/v0.10 pattern)."""
+    registry shape advanced in place (7 → 8, the v0.8/v0.10 pattern).
+    v0.69 (SPEC.md 83.1): the sequence task advances it 10 → 11."""
     assert "text" in TASKS
     assert TASKS["text"] is TextTask
-    assert len(TASKS) == 10  # the registry pins advanced in place (7 → 8 → 10)
+    assert len(TASKS) == 11  # the registry pins advanced in place (7 → 8 → 10 → 11)
     assert set(TASKS) == {"parity-v1", "sine-v1", "cartpole-v1",
                           "gridnav-v1", "csv", "image", "audio", "text",
-                          "medical-v1", "finance-v1"}
+                          "medical-v1", "finance-v1", "sequence-motif-v1"}
 
 
 def test_text_task_softmax_protocol(tmp_path):
@@ -441,7 +442,7 @@ def test_version_round_v031():
     """A35 (SPEC.md 45.4, 33.1): the version stepped to `0.39.0` in
     both sources (v0.39 ⇒ `0.39.0`, M42)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.68.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.71.0"
 
 
 def test_spec_cites_a35_and_round():
