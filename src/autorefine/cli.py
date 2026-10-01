@@ -1495,6 +1495,53 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     return 0 if result["passed"] else 2
 
 
+def _cmd_report_nonlinearity(args, summary: dict, entries,
+                             run_dir: Path) -> int:
+    """SPEC.md 82.5 (v0.68): the ``report --nonlinearity`` human view —
+    the 82.2.1 profile printed as a labeled block (verdict + gap, the
+    linear best, the overall best, the per-family table, the
+    spectral-expansion line, the steer hint). ``rc 0`` on success; the
+    default report (no flag) stays byte-identical (the 63.5 pin
+    anchor)."""
+    from .research import nonlinearity_profile
+    prof = nonlinearity_profile(entries)
+    print(f"\nnonlinearity profile ({prof['n_scored']} scored "
+          f"candidates, {prof['n_families']} families)")
+    if prof["n_scored"] == 0:
+        print("  no scored candidates to profile")
+        return 0
+    gap = prof["gap"]
+    gap_s = f"{gap:.1f}" if gap is not None else "n/a (no linear candidate)"
+    print(f"  verdict      : {prof['verdict']} (gap {gap_s})")
+    lin = prof["linear"]
+    if lin["best"] is not None:
+        print(f"  linear best  : {lin['best']:.1f}  "
+              f"(depth-0 mlp, {lin['n']} candidate"
+              f"{'s' if lin['n'] != 1 else ''})")
+    else:
+        print("  linear best  : n/a (the run never proposed a depth-0 mlp)")
+    ov = prof["overall"]
+    print(f"  overall best : {ov['best']:.1f}  (family: {ov['family']})")
+    print("  families     :")
+    for f in prof["families"]:
+        delta = f["delta"]
+        d_s = f"{delta:+.1f} over linear" if delta is not None \
+            else "delta n/a"
+        print(f"    {f['name']:<8s} best {f['best']:6.1f}  "
+              f"({f['n']} candidate{'s' if f['n'] != 1 else ''}, {d_s})")
+    fourier = prof["fourier"]
+    if fourier["on_mean"] is not None and fourier["off_mean"] is not None:
+        print(f"  spectral     : fourier_features>0 on "
+              f"{fourier['on_mean']:.1f} vs off "
+              f"{fourier['off_mean']:.1f} "
+              f"(delta {fourier['delta']:+.1f})")
+    else:
+        print("  spectral     : the spectral expansion (fourier_features) "
+              "was not tried in this run")
+    print(f"  steer        : {prof['steer']}")
+    return 0
+
+
 def _cmd_report(args: argparse.Namespace) -> int:
     # SPEC.md 64.1 (v0.50, B5): --benchmark is a runs-dir-level view (like
     # --history): mutually exclusive with --run, --history, and every
@@ -1590,6 +1637,15 @@ def _cmd_report(args: argparse.Namespace) -> int:
             return 1
     # SPEC.md 38.3.1: --history and --run are mutually exclusive; one is
     # required (the pre-v0.24 `report --run` path below is unchanged)
+    # SPEC.md 82.5 (v0.68): --nonlinearity is a human view (the 63.2/
+    # 63.4 --user/--decision pattern) — mutually exclusive with --history;
+    # the default report (no flag) stays byte-identical (the 63.5 pin
+    # anchor). Guarded before the --history dispatch so the pair is a
+    # loud error, not a silent history report.
+    if getattr(args, "nonlinearity", False) and args.history:
+        print("--nonlinearity and --history are mutually exclusive "
+              "(SPEC.md 82.5)", file=sys.stderr)
+        return 1
     if args.history:
         if args.run is not None:
             print("--run and --history are mutually exclusive (SPEC.md 38.3.1)",
@@ -1624,6 +1680,11 @@ def _cmd_report(args: argparse.Namespace) -> int:
         return _cmd_report_user(args, summary, entries, run_dir)
     if getattr(args, "decision", False):
         return _cmd_report_decision(args, summary, entries, run_dir)
+    # SPEC.md 82.5 (v0.68): the nonlinearity profile — a human view over
+    # the same logged entries; dispatches before the default (byte-
+    # identical) report path.
+    if getattr(args, "nonlinearity", False):
+        return _cmd_report_nonlinearity(args, summary, entries, run_dir)
     # SPEC.md 56.1.1 (v0.42): the provenance certificate — the text card on
     # stdout + (with --html) the cover block in report.html. The payload is
     # pure over the run's identity + the env facts (56.1); `target` comes
@@ -2883,6 +2944,14 @@ def build_parser() -> argparse.ArgumentParser:
                             "top-3 failure modes, and one concrete next step "
                             "(--target feeds the 41.1 projection); mutually "
                             "exclusive with the other human views and --json; "
+                            "informational, rc 0")
+    p_rep.add_argument("--nonlinearity", action="store_true",
+                       help="v0.68 (SPEC.md 82.5): the nonlinearity profile "
+                            "— how much of the task's difficulty is "
+                            "nonlinear (the depth-0 linear best vs the "
+                            "overall best), the per-family deltas, and the "
+                            "measured spectral-expansion effect; a human "
+                            "view, mutually exclusive with --history; "
                             "informational, rc 0")
     p_rep.add_argument("--benchmark", action="store_true",
                        help="v0.50 (SPEC.md 64.1): the benchmark / longitudinal "

@@ -88,6 +88,7 @@ numbers and carry none.)
 | M68 | v0.65   | 79     | A69 | tests/test_dataviz_v065.py |
 | M69 | v0.66   | 80     | A70 | tests/test_finetune_v066.py |
 | M70 | v0.67   | 81     | A71 | tests/test_model_compare_v067.py |
+| M71 | v0.68   | 82     | A72 | tests/test_nonlinearity_v068.py |
 
 ---
 
@@ -7317,3 +7318,61 @@ The run already logs a full metric set per candidate, and the V5 family bars (30
 ### 81.6 Milestone (M70)
 
 **M70** — v0.67 "Model comparison — dynamic multi-model graphics": the run's scored candidates group by model family (or the top-K distinct specs) into one best-candidate representative each, read on the full metric catalog (the six logged metrics + the 58.2 size axis, 81.2) and rendered in three complementary dynamic encodings — the radar, the per-metric bars, and the model × metric matrix (81.3) — steered live by the app's metric multiselect and grouping selector (81.4), with pure derivation/rendering, deterministic output (G2), and no new dependency (66.5); the A-index advances to A71/M70 with `tests/test_model_compare_v067.py` (81.5).
+
+## 82. Nonlinearity intelligence — functionality and interconnection for nonlinear tasks (v0.68)
+
+Directive: "Add more functionality/interconnections for nonlinear tasks."
+
+Nonlinearity is the property this environment's classification tasks are built around (parity's XOR label, XOR-shaped CSVs, texture-like image tasks), but the loop has never *measured* it — the linear model is just one more candidate in the search space, and the report never says how much of the task's difficulty is nonlinear. This round makes nonlinearity first-class across the three existing surfaces: **measurement** (a pure derivation over the logged candidates), **rendering** (one new SVG interlocking with the model-comparison encodings), and **reporting** (a `report --nonlinearity` human view + an app panel). No new logged data, no loop change, no new dependency (G2; 66.5).
+
+### 82.1 Design
+
+The **nonlinearity profile** of a run answers three questions from the already-logged history:
+
+1. **How much does the task cost for being nonlinear?** — the **nonlinearity gap**: the best *linear* candidate's holdout score versus the overall best's. The linear model is the trainer's depth-0 `mlp` (SPEC.md 15: "architecture () is a linear model"), so a candidate is *linear* iff its spec's `model_family` is `mlp` (or absent, pre-v0.3 specs) **and** its `architecture` is an empty list/tuple.
+2. **Which families are the nonlinearity buying?** — per-family best scores with their delta over the linear best, in the `MODEL_FAMILIES` registry order (the same grouping as the 81.2 model comparison — the encodings agree on which color is which family, 81.3.2).
+3. **Did the spectral expansion help?** — the 78.2.1 `fourier_features` field is the spec-space answer to fine nonlinear structure; its measured effect is the mean score of `fourier_features > 0` candidates versus the `== 0`/absent ones.
+
+A verdict tiers the gap: `near-linear` (< 1.0 point), `moderately nonlinear` (1.0–5.0), `strongly nonlinear` (≥ 5.0), or `unknown` when the run has no linear candidate at all (the bandit never proposed one). A one-line **steer hint** (deterministic, data-derived, free of SPEC/§/round tokens so the app may display it verbatim — the `tests/test_app_language.py` contract) tells the researcher what to do with the verdict.
+
+### 82.2 Derivation (research.py)
+
+- **82.2.1 `nonlinearity_profile(entries) -> dict`** — the scored-candidate rule is the 81.2.2 one (kind baseline/experiment per the 35.1 kind registry, a finite `holdout_score`, a dict `spec`; screen/curriculum/invalid rows never enter). Returns:
+  - `n_scored` / `n_families` — the scored-candidate count and the family count;
+  - `linear` — `{best, n, hash}` for the linear candidates (all `None`/0/"" when the run has none);
+  - `overall` — `{best, n, hash, family}` for the run's best candidate (the `family` of that best row);
+  - `gap` — `overall.best − linear.best`, or `None` when `linear.best` is `None`;
+  - `verdict` — the 82.1 tier from the `NL_GAP_MODERATE` (1.0) / `NL_GAP_STRONG` (5.0) thresholds, or `"unknown"`;
+  - `families` — one row per family present, registry order: `{name, best, n, delta}` (`delta = best − linear.best`, `None` when there is no linear best);
+  - `fourier` — `{on_mean, off_mean, delta}` over the `fourier_features` split (all `None` when either side is empty);
+  - `steer` — the 82.1 one-line hint.
+  Pure and deterministic (G2); `entries` empty/garbage → the empty profile (`n_scored: 0`, verdict `"unknown"`), never an exception.
+- **82.2.2 interconnection** — the profile reads the *same* entries the 81.2 model comparison reads (one scored-candidate rule, one home each), the `families` block orders like the model-comparison groups (81.2.3), and `fourier` surfaces the 78.2.1 spec field — three existing features interlocked through one derivation.
+
+### 82.3 Renderer (plotting.py)
+
+**`svg_nonlinearity(profile, width=640, palette="default", dark=False)`** — one compact SVG:
+
+- a verdict chip (verdict + the gap, or `unknown` when the run has no linear baseline);
+- one horizontal bar per family (the 82.1 registry order, the shared `frontier_palette` cycle so the colors agree with the 81.3 model-comparison encodings), bar length = the family's best score over a 0–axis-max scale, the raw value at the bar end, a `<title>` per bar (family · n candidates · best · delta over linear);
+- a dashed vertical reference line at the linear best (the `baseline` theme color) with a "linear baseline" label, plus a gap annotation (`best − linear = X`); both absent when the run has no linear candidate;
+- the fourier-effect line (`on 71.2 vs off 55.3 (delta +15.9)`, or "the spectral expansion (fourier_features) was not tried in this run") — plain words, no SPEC tokens;
+- a caption naming the verdict thresholds.
+
+House rules: pure, deterministic (G2), valid XML (strict-parseable), `html.escape` every text, `<title>` tooltips, empty → header + "no scored candidates to profile" message, `palette`/`dark` through `_styled` (okabe/dark byte-different, 51.4), rendered by the app through the 69.3 `_svg_block` guard.
+
+### 82.4 App panel
+
+In the Results tab's Research views, after the Model comparison subheader: a **Nonlinearity** subheader with the steer hint as an info line, the fourier-effect line as a caption (when both sides are present), and the SVG. A friendly caption on failure (the 49.4.3 pattern) — never a page crash. No widget (AppTest-safe; display-only, like the 81.4 panel). Panel strings carry no SPEC/§/round tokens (the app-language scan stays green).
+
+### 82.5 CLI (report --nonlinearity)
+
+`autorefine report --run DIR --nonlinearity` — a human view (the `--user`/`--decision` pattern, 63.2/63.4): the profile printed as a labeled block — verdict (+ gap), the linear best (candidate count), the overall best (family), the per-family table (best · delta · count), the spectral-expansion line, and the steer hint. `rc 0` on success; mutually exclusive with `--history` (`rc 1`); the default report (no flag) stays byte-identical (the 63.5 pin anchor).
+
+### 82.6 Acceptance (A72)
+
+- **A72** — `nonlinearity_profile` classifies the depth-0 `mlp` (empty architecture, family `mlp` or absent) as linear and every other family/spec as nonlinear (82.2.1); the verdict tiers the gap at the 1.0/5.0 thresholds (`near-linear` / `moderately nonlinear` / `strongly nonlinear`) and reports `unknown` with `gap: None` when the run has no linear candidate; the `families` rows walk the `MODEL_FAMILIES` order with hand-computed `best`/`n`/`delta`; the `fourier` split computes the on/off means and delta (all `None` when one side is empty); screen/curriculum rows and non-dict garbage are excluded from `n_scored` (81.2.2); the `steer` hint is deterministic and token-clean (no `SPEC`/`§`/`v0.` substrings); repeated calls are byte-identical (G2) and empty input degrades to the empty profile (82.2.1). `svg_nonlinearity` is well-formed (`svg_is_well_formed`) and strict-XML-parseable, renders the linear-baseline line + gap annotation when a linear best exists and omits both when it does not, renders the fourier line in both states, is byte-identical across calls, byte-different under `palette="okabe"` and `dark=True` (51.4), and degrades to the empty message with no scored candidates (82.3). `report --run DIR --nonlinearity` is `rc 0` with the verdict, family table, and steer hint on a real tiny parity run, and `--nonlinearity --history` is `rc 1`; the app-language scan stays green; the version steps to `0.68.0` in both sources (33.1); the A-index advances (`defined == set(range(1, 73))`, 68 acceptance rows, M71 resolving to `tests/test_nonlinearity_v068.py`). All in `tests/test_nonlinearity_v068.py`.
+
+### 82.7 Milestone (M71)
+
+**M71** — v0.68 "Nonlinearity intelligence for nonlinear tasks": the run's nonlinearity becomes a measured, tiered, reportable quantity — the depth-0 linear best versus the overall best (the gap), the per-family deltas, and the measured spectral-expansion effect (82.2) — interlocking the model-comparison grouping (81.2), the 78.2.1 `fourier_features` field, and the reporting family (82.5/82.4), rendered as one SVG with the linear-baseline reference (82.3), with pure derivation/rendering, deterministic output (G2), and no new dependency (66.5); the A-index advances to A72/M71 with `tests/test_nonlinearity_v068.py` (82.6).

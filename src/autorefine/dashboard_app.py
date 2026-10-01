@@ -134,6 +134,7 @@ from autorefine.plotting import (
     svg_model_radar,  # 81.3.2 (v0.67) the model comparison radar
     svg_model_bars,  # 81.3.3 (v0.67) the per-metric model bars
     svg_model_matrix,  # 81.3.4 (v0.67) the model x metric matrix
+    svg_nonlinearity,  # 82.3 (v0.68) the nonlinearity profile
     svg_is_well_formed,  # 69.3 (v0.55, A59): the SVG render guard
     visual_card,  # 71.1.2 (v0.57, A61): the visual-card wrapper
     VISUAL_CSS,  # 71.1 (v0.57, A61): the shared visual-card stylesheet
@@ -158,6 +159,7 @@ from autorefine.research import (
     frontier_knee,  # the efficiency knee's data (bang for buck)
     rejection_anatomy,  # the rejection mix + stall story's data
     model_comparison,  # 81.2 (v0.67) the cross-model comparison data
+    nonlinearity_profile,  # 82.2.1 (v0.68) the nonlinearity measurement
 )
 from autorefine.tasks import CsvTask
 
@@ -1480,6 +1482,33 @@ def _render_result(res: dict) -> None:
                            svg_model_bars(_mc_view, **pal))
                 _svg_block("Model × metric matrix",
                            svg_model_matrix(_mc_view, **pal))
+
+        # 82 (v0.68): nonlinearity — measured from the already-logged
+        # candidates: the linear best vs the overall best (the gap), the
+        # per-family deltas, and the measured spectral-expansion effect.
+        # Pure derivation (no widget — AppTest-safe, like the panel
+        # above); a friendly caption on failure (the 49.4.3 pattern),
+        # never a page crash. Panel strings carry no SPEC/§/round tokens.
+        st.subheader("Nonlinearity")
+        try:
+            _nl = nonlinearity_profile(_ren)
+        except (ValueError, TypeError, KeyError) as exc:  # 49.4.3 pattern
+            st.error(f"nonlinearity profile unavailable: {exc}")
+        else:
+            if _nl["n_scored"] == 0:
+                st.caption("no scored candidates to profile yet")
+            else:
+                st.info(_nl["steer"])
+                _nl_f = _nl.get("fourier") or {}
+                if _nl_f.get("on_mean") is not None \
+                        and _nl_f.get("off_mean") is not None:
+                    st.caption(
+                        "spectral expansion (fourier_features>0): "
+                        f"on {_nl_f['on_mean']:.1f} vs "
+                        f"off {_nl_f['off_mean']:.1f} "
+                        f"(delta {_nl_f.get('delta') or 0.0:+.1f})")
+                _svg_block("Nonlinearity profile",
+                           svg_nonlinearity(_nl, **pal))
 
         # SPEC.md 59.1 (v0.45): the parameter inspector — the two real layers
         # (architecture `SPEC_FIELDS` + loop `KNOBS`) as one read-only block

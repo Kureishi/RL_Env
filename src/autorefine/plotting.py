@@ -5042,3 +5042,141 @@ def _svg_model_matrix(data, width: int) -> str:
                  f'the family has no such value</text>')
     parts.append("</svg>")
     return "\n".join(parts)
+
+
+# --- 82 (v0.68): nonlinearity intelligence for nonlinear tasks ---------------
+# Same house rules as the other renderers: pure, deterministic (G2), valid
+# XML (strict-parseable), `html.escape` every text, `<title>` tooltips,
+# empty -> header + message, `palette`/`dark` through `_styled` (51.4).
+
+
+def svg_nonlinearity(profile, width: int = 640,
+                     palette: str = "default", dark: bool = False) -> str:
+    """82.3: the nonlinearity profile — the verdict chip (verdict + the
+    gap annotation, or the no-baseline note), one horizontal bar per
+    family (the `MODEL_FAMILIES` order, the shared `frontier_palette`
+    cycle so the colors agree with the 81.3 model-comparison encodings),
+    a dashed linear-baseline reference line at the depth-0 best (absent
+    when the run has no linear candidate), the spectral-expansion effect
+    line, and the verdict-threshold caption. Pure, valid XML,
+    deterministic (G2); empty -> header + message (82.3)."""
+    with _styled(palette, dark):
+        return _svg_nonlinearity(profile, width)
+
+
+def _svg_nonlinearity(profile, width: int) -> str:
+    p = profile if isinstance(profile, dict) else {}
+    families = [f for f in (p.get("families") or []) if isinstance(f, dict)]
+    if not p.get("n_scored") or not families:
+        parts = _svg_header(width, height := 160,
+                            "nonlinearity profile (empty)")
+        parts.append(f'<text x="{width // 2}" y="{height // 2}" '
+                     f'text-anchor="middle" font-size="13" fill="{_AXIS}">'
+                     f'no scored candidates to profile</text>')
+        parts.append("</svg>")
+        return "\n".join(parts)
+    L, R = 110.0, 90.0
+    T = 64.0  # the title + the verdict chip row
+    row_h, bar_h = 30.0, 14.0
+    height = int(T + len(families) * row_h + 58)
+    pw = width - L - R
+    lin = p.get("linear") or {}
+    lin_best = lin.get("best")
+    gap = p.get("gap")
+    verdict = str(p.get("verdict") or "unknown")
+    fourier = p.get("fourier") or {}
+    bests = [f["best"] for f in families if _finite(f.get("best"))]
+    axis_max = max([1.0] + [float(b) for b in bests])
+    if _finite(lin_best):
+        axis_max = max(axis_max, float(lin_best))
+    axis_max *= 1.15
+    parts = _svg_header(width, height, "nonlinearity profile")
+    # the verdict chip + the gap annotation (82.3)
+    chip_w = 150.0 + 7.0 * len(verdict)
+    chip_tip = ("the verdict tiers the gap (overall best minus the "
+                "linear best): near-linear under 1 point · moderately 1 "
+                "to 5 points · strongly 5 points or more")
+    parts.append(f'<rect x="{L:.1f}" y="{T - 40:.1f}" width="{chip_w:.1f}" '
+                 f'height="22" rx="11" fill="{_LANE_BG}">'
+                 f'<title>{html.escape(chip_tip)}</title></rect>')
+    parts.append(f'<text x="{L + 10:.1f}" y="{T - 24:.1f}" font-size="12" '
+                 f'font-weight="bold" fill="{_AXIS}">'
+                 f'{html.escape(verdict)}</text>')
+    if _finite(gap):
+        gap_txt = f"gap = best - linear = {float(gap):.1f} points"
+    else:
+        gap_txt = "gap = n/a (no linear candidate in this run)"
+    parts.append(f'<text x="{L + chip_w + 12:.1f}" y="{T - 24:.1f}" '
+                 f'font-size="11" fill="{_AXIS}">'
+                 f'<title>{html.escape(chip_tip)}</title>'
+                 f'{html.escape(gap_txt)}</text>')
+    # one bar per family (the registry order; the 81.3 palette cycle)
+    for j, f in enumerate(families):
+        y0 = T + j * row_h
+        color = _FRONTIER_PALETTE[j % len(_FRONTIER_PALETTE)]
+        name = str(f.get("name") or f"family {j + 1}")
+        best = f.get("best")
+        n = f.get("n")
+        delta = f.get("delta")
+        tip = (f"{name} · {n if n is not None else '?'} candidates · "
+               f"best {float(best):.1f}" if _finite(best)
+               else f"{name} · best n/a")
+        if _finite(delta):
+            tip += f" · delta over linear {float(delta):+.1f}"
+        parts.append(f'<text x="{L - 8:.1f}" y="{y0 + row_h / 2 + 4:.1f}" '
+                     f'text-anchor="end" font-size="11" fill="{_AXIS}">'
+                     f'{html.escape(name)}</text>')
+        if _finite(best):
+            w = max(2.0, pw * (float(best) / axis_max))
+            parts.append(f'<rect x="{L:.1f}" '
+                         f'y="{y0 + (row_h - bar_h) / 2:.1f}" '
+                         f'width="{w:.1f}" height="{bar_h:.1f}" '
+                         f'fill="{color}" fill-opacity="0.85">'
+                         f'<title>{html.escape(tip)}</title></rect>')
+            parts.append(f'<text x="{L + w + 6:.1f}" '
+                         f'y="{y0 + row_h / 2 + 4:.1f}" font-size="10" '
+                         f'fill="{_AXIS}">{float(best):.1f}</text>')
+        else:
+            parts.append(f'<text x="{L:.1f}" y="{y0 + row_h / 2 + 4:.1f}" '
+                         f'font-size="10" fill="{_REJECTED}">'
+                         f'<title>{html.escape(tip)}</title>n/a</text>')
+    # the dashed linear-baseline reference (82.3; absent when the run
+    # has no linear candidate)
+    if _finite(lin_best):
+        x = L + pw * (float(lin_best) / axis_max)
+        y_top = T - 4
+        y_bot = T + len(families) * row_h
+        lin_tip = ("linear baseline — the best depth-0 mlp scored in this "
+                   f"run ({float(lin_best):.1f})")
+        parts.append(f'<line x1="{x:.1f}" y1="{y_top:.1f}" '
+                     f'x2="{x:.1f}" y2="{y_bot:.1f}" stroke="{_BASELINE}" '
+                     f'stroke-width="1.5" stroke-dasharray="4 3">'
+                     f'<title>{html.escape(lin_tip)}</title></line>')
+        parts.append(f'<text x="{x:.1f}" y="{y_top - 4:.1f}" '
+                     f'text-anchor="middle" font-size="10" '
+                     f'fill="{_BASELINE}">linear baseline '
+                     f'<title>{html.escape(lin_tip)}</title></text>')
+    # the spectral-expansion effect line (82.3) — plain words, no SPEC
+    # tokens (the app-language contract, 82.4)
+    fy = T + len(families) * row_h + 22
+    if _finite(fourier.get("on_mean")) and _finite(fourier.get("off_mean")):
+        ftxt = ("spectral expansion (fourier_features > 0): "
+                f"on {float(fourier['on_mean']):.1f} vs "
+                f"off {float(fourier['off_mean']):.1f} "
+                f"(delta {float(fourier.get('delta') or 0.0):+.1f})")
+    else:
+        ftxt = ("the spectral expansion (fourier_features) was not tried "
+                "in this run")
+    parts.append(f'<text x="{L:.1f}" y="{fy:.1f}" font-size="11" '
+                 f'fill="{_AXIS}">'
+                 f'<title>the measured effect of the fourier_features '
+                 f'spectral expansion on the holdout score</title>'
+                 f'{html.escape(ftxt)}</text>')
+    parts.append(f'<text x="{L:.1f}" y="{height - 8}" font-size="11" '
+                 f'fill="{_AXIS}">bars = each family best holdout score '
+                 f'(colors match the model comparison) · the dashed line '
+                 f'= the linear baseline · verdict tiers the gap: '
+                 f'near-linear under 1 point · moderately 1 to 5 points '
+                 f'· strongly 5 points or more</text>')
+    parts.append("</svg>")
+    return "\n".join(parts)

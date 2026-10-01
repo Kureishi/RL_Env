@@ -365,10 +365,15 @@ def render_report_pdf(doc, out) -> Path:
 
     import io as _io
     buf = _io.BytesIO()
-    pdf = SimpleDocTemplate(buf, pagesize=letter, canvasmaker=_DetCanvas,
+    pdf = SimpleDocTemplate(buf, pagesize=letter,
                             title=str(d.get("title", "AutoRefine report")),
                             author="autorefine")
-    pdf.build(story)
+    # reportlab 5.x silently drops a ``canvasmaker`` passed to the
+    # constructor (it is not in ``_initArgs``); ``build()`` is the
+    # documented channel. Without this, ``_DetCanvas`` (``invariant=1``)
+    # is never used and the PDF carries a wall-clock CreationDate,
+    # breaking the byte-identical re-render guarantee (G2).
+    pdf.build(story, canvasmaker=_DetCanvas)
     data = buf.getvalue()
 
     # G2: replace the per-build random /ID with a doc-deterministic one.

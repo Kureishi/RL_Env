@@ -40,6 +40,10 @@ __all__ = [
     "rejection_anatomy", # the rejection mix + stall story
     "MODEL_METRICS",     # 81.2.1 (v0.67): the all-metrics catalog
     "model_comparison",  # 81.2.3 (v0.67): the cross-model comparison data
+    "NL_GAP_MODERATE",   # 82.2.1 (v0.68): the near-linear / moderate tier cut
+    "NL_GAP_STRONG",     # 82.2.1 (v0.68): the moderate / strong tier cut
+    "is_linear_spec",    # 82.2.1 (v0.68): the depth-0 mlp predicate
+    "nonlinearity_profile",  # 82.2.1 (v0.68): the nonlinearity measurement
 ]
 
 
@@ -777,4 +781,181 @@ def model_comparison(entries, state_dim=None, n_out=None, grid=None,
         "metrics": metrics,
         "models": models,
         "n_scored": len(scored),
+    }
+
+
+# --- 82 (v0.68): nonlinearity intelligence for nonlinear tasks ----------------
+# 82.2.1: the verdict tiers on the nonlinearity gap (score points) — the
+# points the task's difficulty costs for being nonlinear (linear best vs
+# overall best). 1.0 / 5.0 are the near-linear / moderate / strong cuts.
+NL_GAP_MODERATE = 1.0
+NL_GAP_STRONG = 5.0
+
+
+def is_linear_spec(spec) -> bool:
+    """82.2.1: the linear-model predicate — a spec is the trainer's depth-0
+    `mlp` (SPEC.md 15: "architecture () is a linear model") iff its
+    `model_family` is `"mlp"` (or absent, pre-v0.3 spec JSON) AND its
+    `architecture` is an empty list/tuple. Every other family (tree/boost/
+    knn/convnet/gp/gam) and every non-empty depth is nonlinear. A
+    non-dict spec is `False` (loud-degrade: never the linear baseline)."""
+    if not isinstance(spec, dict):
+        return False
+    fam = spec.get("model_family", "mlp")
+    if fam != "mlp":
+        return False
+    arch = spec.get("architecture")
+    return isinstance(arch, (list, tuple)) and len(arch) == 0
+
+
+def _scored_candidates(entries) -> list[dict]:
+    """82.2.1: the 81.2.2 scored-candidate rule — kind baseline/experiment
+    (the 35.1 kind registry), a finite `holdout_score`, a dict `spec`. The
+    model comparison and the nonlinearity profile share this one home."""
+    out: list[dict] = []
+    if not isinstance(entries, (list, tuple)):
+        return out
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        if e.get("kind") not in (KIND_BASELINE, KIND_EXPERIMENT):  # 35.1 (C4)
+            continue
+        if _num(e.get("holdout_score")) is None \
+                or not isinstance(e.get("spec"), dict):
+            continue
+        out.append(e)
+    return out
+
+
+def _steer_hint(gap: float | None, verdict: str) -> str:
+    """82.1: the one-line steer hint — deterministic, data-derived, and
+    free of SPEC/§/round tokens so the app may display it verbatim (the
+    tests/test_app_language.py contract)."""
+    if gap is None:
+        return ("no linear-baseline candidate was logged in this run, so "
+                "the task's nonlinearity is unknown from this history — "
+                "propose a depth-0 mlp to establish the baseline")
+    if verdict == "near-linear":
+        return ("near-linear — a linear model already captures most of the "
+                "signal; extra capacity and nonlinear families buy little")
+    if verdict == "moderately nonlinear":
+        return ("moderately nonlinear — the linear baseline trails the best "
+                f"model by {gap:.1f} points; prefer nonlinear families "
+                "(deep mlp, boost, gp) or the spectral expansion "
+                "(fourier_features > 0)")
+    return ("strongly nonlinear — the linear baseline trails the best "
+            f"model by {gap:.1f} points; the signal lives in interactions: "
+            "prefer deep mlp, boost, or gp, and the spectral expansion "
+            "(fourier_features > 0)")
+
+
+def nonlinearity_profile(entries) -> dict:
+    """82.2.1: the nonlinearity profile — how much of the task's difficulty
+    is nonlinear, which families are the nonlinearity buying, and whether
+    the spectral expansion (the 78.2.1 `fourier_features` field) helped.
+
+    The scored-candidate rule is the 81.2.2 one (82.2.1). The *linear*
+    candidates are the depth-0 `mlp` specs (82.2.1); the **gap** is the
+    overall best minus the linear best (`None` when the run has no linear
+    candidate); the **verdict** tiers the gap at `NL_GAP_MODERATE` /
+    `NL_GAP_STRONG` (or `"unknown"`); `families` walks the
+    `MODEL_FAMILIES` order (the 81.2.3 grouping) with each family's
+    `best`/`n`/`delta` over the linear best; `fourier` is the on/off
+    mean split of the `fourier_features` field (all `None` when either
+    side is empty); `steer` is the 82.1 one-line hint. Pure and
+    deterministic (G2); empty/garbage input → the empty profile
+    (`n_scored: 0`, verdict `"unknown"`), never an exception.
+    """
+    scored = _scored_candidates(entries)
+    if not scored:
+        return {
+            "n_scored": 0,
+            "n_families": 0,
+            "linear": {"best": None, "n": 0, "hash": ""},
+            "overall": {"best": None, "n": 0, "hash": "", "family": ""},
+            "gap": None,
+            "verdict": "unknown",
+            "families": [],
+            "fourier": {"on_mean": None, "off_mean": None, "delta": None},
+            "steer": _steer_hint(None, "unknown"),
+        }
+
+    lin = [e for e in scored if is_linear_spec(e["spec"])]
+    lin_best = (max(_num(e["holdout_score"]) for e in lin) if lin else None)
+    lin_rep = None
+    if lin:
+        best_v = -math.inf
+        for e in lin:  # first-in-log-order on ties (the 81.2.3 convention)
+            v = _num(e["holdout_score"])
+            if v > best_v:
+                best_v = v
+                lin_rep = e
+    overall_best = max(_num(e["holdout_score"]) for e in scored)
+    rep = None
+    for e in scored:
+        if _num(e["holdout_score"]) == overall_best:
+            rep = e
+            break
+    gap = (overall_best - lin_best) if lin_best is not None else None
+    if gap is None:
+        verdict = "unknown"
+    elif gap < NL_GAP_MODERATE:
+        verdict = "near-linear"
+    elif gap < NL_GAP_STRONG:
+        verdict = "moderately nonlinear"
+    else:
+        verdict = "strongly nonlinear"
+
+    fam_groups: dict[str, list[dict]] = {}
+    for e in scored:
+        fam = str(e["spec"].get("model_family", "mlp"))
+        fam_groups.setdefault(fam, []).append(e)
+    families: list[dict] = []
+    for fam in (f for f in MODEL_FAMILIES if f in fam_groups):
+        cands = fam_groups[fam]
+        best = max(_num(c["holdout_score"]) for c in cands)
+        families.append({
+            "name": fam,
+            "best": best,
+            "n": len(cands),
+            "delta": (best - lin_best) if lin_best is not None else None,
+        })
+
+    on: list[float] = []
+    off: list[float] = []
+    for e in scored:
+        k = e["spec"].get("fourier_features")
+        v = _num(e["holdout_score"])
+        if v is None:
+            continue
+        if isinstance(k, (int, float)) and not isinstance(k, bool) and k > 0:
+            on.append(v)
+        else:
+            off.append(v)
+    fourier = {
+        "on_mean": (sum(on) / len(on)) if on else None,
+        "off_mean": (sum(off) / len(off)) if off else None,
+        "delta": ((sum(on) / len(on)) - (sum(off) / len(off)))
+                 if (on and off) else None,
+    }
+
+    def _hash(row: dict) -> str:
+        h = row.get("spec_hash") if row is not None else None
+        return h if isinstance(h, str) else ""
+
+    return {
+        "n_scored": len(scored),
+        "n_families": len(families),
+        "linear": {"best": lin_best, "n": len(lin), "hash": _hash(lin_rep)},
+        "overall": {
+            "best": overall_best,
+            "n": len(scored),
+            "hash": _hash(rep),
+            "family": str(rep["spec"].get("model_family", "mlp")),
+        },
+        "gap": gap,
+        "verdict": verdict,
+        "families": families,
+        "fourier": fourier,
+        "steer": _steer_hint(gap, verdict),
     }
