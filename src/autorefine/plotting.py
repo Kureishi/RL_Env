@@ -4705,3 +4705,340 @@ def _svg_rejection_anatomy(data, width: int, height: int) -> str:
                  f'rejections are unspent and never logged</text>')
     parts.append("</svg>")
     return "\n".join(parts)
+
+
+# --- 81 (v0.67): the model comparison graphics --------------------------------
+# "Compare different models on all metrics" (81.3): the shared
+# beneficial-direction normalization (81.3.1), then three complementary
+# encodings of the same `research.model_comparison` dict — the radar (all
+# metrics at once, 81.3.2), the per-metric grouped bars (81.3.3), and the
+# model × metric matrix (81.3.4). Same house rules as the other renderers:
+# pure, deterministic (G2), valid XML, `html.escape` every text, `<title>`
+# tooltips, empty -> header + message, `palette`/`dark` through `_styled`.
+
+
+def _mc_normalize(metrics: list[dict], models: list[dict]) -> dict:
+    """81.3.1: the per-metric 0–1 normalization, in each metric's
+    beneficial direction (`"direction"` on the catalog row) across the
+    models that carry a finite value — higher: (v−min)/(max−min), lower:
+    (max−v)/(max−min); a constant metric maps to 1.0 (all equally good);
+    a missing value (or a metric no model carries) stays `None`, and the
+    renderers degrade it to their n/a encoding. Keyed
+    `(metric name, model index)` — a pure function of the data dict
+    (G2)."""
+    out: dict = {}
+    for m in metrics:
+        name = m["name"]
+        lower = m.get("direction", "higher") == "lower"
+        vals = [mod.get("values", {}).get(name) for mod in models]
+        finite = [float(v) for v in vals if _finite(v)]
+        if not finite:
+            out.update(((name, i), None) for i in range(len(models)))
+            continue
+        lo, hi = min(finite), max(finite)
+        for i, v in enumerate(vals):
+            if not _finite(v):
+                out[(name, i)] = None
+            elif hi - lo < 1e-12:
+                out[(name, i)] = 1.0
+            else:
+                t = (float(v) - lo) / (hi - lo)
+                out[(name, i)] = (1.0 - t) if lower else t
+    return out
+
+
+def _mc_fmt(name: str, v) -> str:
+    """81.3.4: the matrix cell's short value read — scores one decimal,
+    std/gen-gap/time two decimals, the size axis an int (≥ 10 000 as
+    `12.3k`); a missing value is the shared `n/a` string."""
+    if not _finite(v):
+        return "n/a"
+    if name in ("holdout_score", "effective_score", "gen_score"):
+        return f"{float(v):.1f}"
+    if name == "model_size":
+        f = float(v)
+        return f"{f / 1000.0:.1f}k" if f >= 10000 else f"{f:.0f}"
+    return f"{float(v):.2f}"
+
+
+def _mc_model(data, idx: int) -> dict:
+    """81.3.2: the `idx`-th model row of a `model_comparison` dict — an
+    empty dict when the index is out of range (defensive; the data shape
+    is pinned by the A71 tests)."""
+    d = data if isinstance(data, dict) else {}
+    models = [m for m in (d.get("models") or []) if isinstance(m, dict)]
+    return models[idx] if 0 <= idx < len(models) else {}
+
+
+def svg_model_radar(data, width: int = 560,
+                    palette: str = "default", dark: bool = False) -> str:
+    """81.3.2: the model radar — one axis per metric (the 81.2.1 catalog
+    order, the first axis up), the 25/50/75/100% grid rings, one polygon
+    per model in the `frontier_palette` cycle (the seven families fit the
+    seven hues), a swatch legend below, and a <title> per polygon and per
+    vertex (metric · raw value · normalized; a missing value pins the
+    vertex at the center and reads `n/a`). The normalization runs in each
+    metric's beneficial direction (81.3.1), so a bigger polygon is better
+    on every axis. Pure, valid XML, deterministic (G2); empty -> header +
+    message (81.3.5)."""
+    with _styled(palette, dark):
+        return _svg_model_radar(data, width)
+
+
+def _svg_model_radar(data, width: int) -> str:
+    d = data if isinstance(data, dict) else {}
+    metrics = [m for m in (d.get("metrics") or []) if isinstance(m, dict)]
+    models = [m for m in (d.get("models") or []) if isinstance(m, dict)]
+    if not metrics or not models:
+        parts = _svg_header(width, height := 160, "model radar (empty)")
+        parts.append(f'<text x="{width // 2}" y="{height // 2}" '
+                     f'text-anchor="middle" font-size="13" fill="{_AXIS}">'
+                     f'no scored candidates to compare</text>')
+        parts.append("</svg>")
+        return "\n".join(parts)
+    n_ax = len(metrics)
+    n_mod = len(models)
+    R = min(200.0, width * 0.30)
+    cx = width / 2.0
+    T = 40.0
+    cy = T + R + 8.0
+    legend_y = cy + R + 34.0
+    height = int(legend_y + 26)
+    norm = _mc_normalize(metrics, models)
+
+    def pt(i: int, r: float) -> tuple[float, float]:
+        a = -math.pi / 2.0 + 2.0 * math.pi * i / n_ax
+        return cx + r * math.cos(a), cy + r * math.sin(a)
+
+    parts = _svg_header(width, height, "model radar (all metrics)")
+    # the grid rings + the metric axes (a single-axis catalog still draws
+    # one ring and one axis — a degenerate but valid radar)
+    for frac in (0.25, 0.5, 0.75, 1.0):
+        ring = " ".join(f"{x:.1f},{y:.1f}" for i in range(n_ax)
+                        for x, y in [pt(i, R * frac)])
+        parts.append(f'<polygon points="{ring}" fill="none" '
+                     f'stroke="{_LANE_BG}" stroke-width="1">'
+                     f'<title>grid ring at {frac:.0%} of the best '
+                     f'model on each axis</title></polygon>')
+    for i, m in enumerate(metrics):
+        x, y = pt(i, R)
+        parts.append(f'<line x1="{cx:.1f}" y1="{cy:.1f}" x2="{x:.1f}" '
+                     f'y2="{y:.1f}" stroke="{_LANE_BG}" stroke-width="1">'
+                     f'<title>{html.escape(m["label"])} — '
+                     f'{m.get("direction", "higher")} is better</title></line>')
+        lx, ly = pt(i, R + 18.0)
+        anchor = "middle"
+        if math.cos(-math.pi / 2.0 + 2.0 * math.pi * i / n_ax) > 0.35:
+            anchor = "start"
+        elif math.cos(-math.pi / 2.0 + 2.0 * math.pi * i / n_ax) < -0.35:
+            anchor = "end"
+        parts.append(f'<text x="{lx:.1f}" y="{ly + 4:.1f}" '
+                     f'text-anchor="{anchor}" font-size="11" '
+                     f'fill="{_AXIS}">{html.escape(m["label"])}</text>')
+    # one polygon per model (the 81.3.1 normalization drives the radius)
+    for j in range(n_mod):
+        mod = models[j]
+        color = _FRONTIER_PALETTE[j % len(_FRONTIER_PALETTE)]
+        label = str(mod.get("label") or mod.get("name") or f"model {j + 1}")
+        pts = []
+        titles = []
+        for i, m in enumerate(metrics):
+            v = (mod.get("values") or {}).get(m["name"])
+            r = R * (norm.get((m["name"], j)) or 0.0)
+            pts.append(pt(i, r))
+            raw = _mc_fmt(m["name"], v)
+            titles.append(f"{label} · {m['label']}: {raw}")
+        poly = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+        parts.append(f'<polygon points="{poly}" fill="{color}" '
+                     f'fill-opacity="0.14" stroke="{color}" '
+                     f'stroke-width="2"><title>{html.escape(label)} — '
+                     + " · ".join(html.escape(t) for t in titles) + "</title></polygon>")
+        for (x, y), t in zip(pts, titles):
+            parts.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3" '
+                         f'fill="{color}"><title>{html.escape(t)}</title></circle>')
+    # the swatch legend
+    lx = cx - 8.0 * 9.0 * n_mod
+    for j in range(n_mod):
+        mod = models[j]
+        color = _FRONTIER_PALETTE[j % len(_FRONTIER_PALETTE)]
+        label = str(mod.get("label") or mod.get("name") or f"model {j + 1}")
+        parts.append(f'<rect x="{lx:.1f}" y="{legend_y - 9:.1f}" width="10" '
+                     f'height="10" fill="{color}"><title>'
+                     f'{html.escape(label)}</title></rect>')
+        parts.append(f'<text x="{lx + 15:.1f}" y="{legend_y:.1f}" '
+                     f'font-size="11" fill="{_AXIS}">{html.escape(label)}</text>')
+        lx += 15.0 + 9.0 * len(label) + 18.0
+    parts.append(f'<text x="{width // 2}" y="{height - 8}" '
+                 f'text-anchor="middle" font-size="11" fill="{_AXIS}">'
+                 f'each axis normalized 0–1 in its beneficial direction '
+                 f'(higher/lower better) — a bigger polygon is better on '
+                 f'every axis · vertex at the center = n/a</text>')
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def svg_model_bars(data, width: int = 640,
+                   palette: str = "default", dark: bool = False) -> str:
+    """81.3.3: the model bars — one block per metric (the 81.2.1 order):
+    the metric label, then one bar per model in data order, bar length =
+    the 81.3.1 normalized value (in the metric's beneficial direction),
+    the raw value printed at the bar end (`n/a` when missing), the same
+    palette index as the radar (the encodings agree on which color is
+    which model), a <title> per bar, and a swatch legend on top. Pure,
+    valid XML, deterministic (G2); empty -> header + message (81.3.5)."""
+    with _styled(palette, dark):
+        return _svg_model_bars(data, width)
+
+
+def _svg_model_bars(data, width: int) -> str:
+    d = data if isinstance(data, dict) else {}
+    metrics = [m for m in (d.get("metrics") or []) if isinstance(m, dict)]
+    models = [m for m in (d.get("models") or []) if isinstance(m, dict)]
+    if not metrics or not models:
+        parts = _svg_header(width, height := 160, "model bars (empty)")
+        parts.append(f'<text x="{width // 2}" y="{height // 2}" '
+                     f'text-anchor="middle" font-size="13" fill="{_AXIS}">'
+                     f'no scored candidates to compare</text>')
+        parts.append("</svg>")
+        return "\n".join(parts)
+    n_mod = len(models)
+    L, R = 150.0, 84.0
+    T = 44.0  # the title + the legend row
+    bar_h, bar_gap, header_h, block_gap = 9.0, 2.0, 18.0, 12.0
+    block_h = header_h + n_mod * (bar_h + bar_gap)
+    height = int(T + len(metrics) * (block_h + block_gap) + 40)
+    pw = width - L - R
+    norm = _mc_normalize(metrics, models)
+    parts = _svg_header(width, height, "model bars (per metric)")
+    # the swatch legend (same colors as the radar)
+    lx = L
+    for j in range(n_mod):
+        mod = models[j]
+        color = _FRONTIER_PALETTE[j % len(_FRONTIER_PALETTE)]
+        label = str(mod.get("label") or mod.get("name") or f"model {j + 1}")
+        parts.append(f'<rect x="{lx:.1f}" y="{T - 26:.1f}" width="10" '
+                     f'height="10" fill="{color}"><title>'
+                     f'{html.escape(label)}</title></rect>')
+        parts.append(f'<text x="{lx + 15:.1f}" y="{T - 17:.1f}" '
+                     f'font-size="11" fill="{_AXIS}">{html.escape(label)}</text>')
+        lx += 15.0 + 9.0 * len(label) + 18.0
+    # one block per metric
+    for i, m in enumerate(metrics):
+        y = T + i * (block_h + block_gap)
+        parts.append(f'<text x="{L:.1f}" y="{y + 10:.1f}" font-size="12" '
+                     f'font-weight="bold" fill="{_AXIS}">'
+                     f'{html.escape(m["label"])} '
+                     f'<title>{html.escape(m["label"])} — '
+                     f'{m.get("direction", "higher")} is better</title></text>')
+        for j in range(n_mod):
+            mod = models[j]
+            color = _FRONTIER_PALETTE[j % len(_FRONTIER_PALETTE)]
+            label = str(mod.get("label") or mod.get("name") or f"model {j + 1}")
+            v = (mod.get("values") or {}).get(m["name"])
+            by = y + header_h + j * (bar_h + bar_gap)
+            t = (f"{label} · {m['label']}: "
+                 f"{_mc_fmt(m['name'], v)}")
+            if _finite(v) and _finite(norm.get((m["name"], j))):
+                w = max(2.0, pw * float(norm[(m["name"], j)]) if
+                        norm[(m["name"], j)] > 0 else 2.0)
+                parts.append(f'<rect x="{L:.1f}" y="{by:.1f}" '
+                             f'width="{w:.1f}" height="{bar_h:.1f}" '
+                             f'fill="{color}" fill-opacity="0.85">'
+                             f'<title>{html.escape(t)}</title></rect>')
+                parts.append(f'<text x="{L + w + 6:.1f}" '
+                             f'y="{by + bar_h - 1:.1f}" font-size="10" '
+                             f'fill="{_AXIS}">'
+                             f'{html.escape(_mc_fmt(m["name"], v))}</text>')
+            else:
+                parts.append(f'<text x="{L:.1f}" y="{by + bar_h - 1:.1f}" '
+                             f'font-size="10" fill="{_REJECTED}">'
+                             f'<title>{html.escape(t)}</title>n/a</text>')
+    parts.append(f'<text x="{L:.1f}" y="{height - 8}" font-size="11" '
+                 f'fill="{_AXIS}">bar length = the value normalized 0–1 in '
+                 f'the beneficial direction of the metric · raw value at '
+                 f'the bar end · colors match the radar</text>')
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def svg_model_matrix(data, width: int = 640,
+                     palette: str = "default", dark: bool = False) -> str:
+    """81.3.4: the model × metric matrix — rows = models (data order),
+    columns = metrics (the 81.2.1 order, short header), cell fill = the
+    theme line color at an opacity scaled by the 81.3.1 normalized value
+    (a missing value paints the no-score surface and reads `n/a`), the
+    raw value in every cell, and a <title> per cell (model · metric ·
+    raw · normalized · beneficial direction). The tabular ground truth
+    behind the radar and the bars. Pure, valid XML, deterministic (G2);
+    empty -> header + message (81.3.5)."""
+    with _styled(palette, dark):
+        return _svg_model_matrix(data, width)
+
+
+def _svg_model_matrix(data, width: int) -> str:
+    d = data if isinstance(data, dict) else {}
+    metrics = [m for m in (d.get("metrics") or []) if isinstance(m, dict)]
+    models = [m for m in (d.get("models") or []) if isinstance(m, dict)]
+    if not metrics or not models:
+        parts = _svg_header(width, height := 160, "model matrix (empty)")
+        parts.append(f'<text x="{width // 2}" y="{height // 2}" '
+                     f'text-anchor="middle" font-size="13" fill="{_AXIS}">'
+                     f'no scored candidates to compare</text>')
+        parts.append("</svg>")
+        return "\n".join(parts)
+    short = {"holdout_score": "holdout", "effective_score": "effective",
+             "gen_score": "gen", "std": "std", "gen_gap": "gap",
+             "train_seconds": "time", "model_size": "size"}
+    L, Rm = 112.0, 16.0
+    T = 48.0  # the title + the header row
+    row_h = 30.0
+    height = int(T + len(models) * row_h + 40)
+    cw = (width - L - Rm) / len(metrics)
+    norm = _mc_normalize(metrics, models)
+    parts = _svg_header(width, height, "model × metric matrix")
+    for i, m in enumerate(metrics):
+        x0 = L + i * cw
+        parts.append(f'<text x="{x0 + cw / 2.0:.1f}" y="{T - 12:.1f}" '
+                     f'text-anchor="middle" font-size="11" '
+                     f'font-weight="bold" fill="{_AXIS}">'
+                     f'{html.escape(short.get(m["name"], m["label"]))} '
+                     f'<title>{html.escape(m["label"])} — '
+                     f'{m.get("direction", "higher")} is better '
+                     f'(darker = better)</title></text>')
+    for j, mod in enumerate(models):
+        y0 = T + j * row_h
+        color = _FRONTIER_PALETTE[j % len(_FRONTIER_PALETTE)]
+        label = str(mod.get("label") or mod.get("name") or f"model {j + 1}")
+        parts.append(f'<rect x="{L - 8:.1f}" y="{y0 + row_h / 2.0 - 8:.1f}" '
+                     f'width="4" height="16" fill="{color}"><title>'
+                     f'{html.escape(label)}</title></rect>')
+        parts.append(f'<text x="{L - 14:.1f}" y="{y0 + row_h / 2.0 + 4:.1f}" '
+                     f'text-anchor="end" font-size="11" fill="{_AXIS}">'
+                     f'{html.escape(label)}</text>')
+        for i, m in enumerate(metrics):
+            x0 = L + i * cw
+            v = (mod.get("values") or {}).get(m["name"])
+            raw = _mc_fmt(m["name"], v)
+            n = norm.get((m["name"], j))
+            t = (f"{label} · {m['label']}: {raw}"
+                 + (f" ({n:.2f} of best)" if _finite(n) else " (n/a)")
+                 + f" — {m.get('direction', 'higher')} is better")
+            if _finite(v) and _finite(n):
+                fill, fill_op = _LINE, f"{0.06 + 0.84 * float(n):.3f}"
+            else:
+                fill, fill_op = _NOSCORE_BG, "1"
+            parts.append(f'<rect x="{x0:.1f}" y="{y0:.1f}" '
+                         f'width="{cw - 2:.1f}" height="{row_h - 2:.1f}" '
+                         f'fill="{fill}" fill-opacity="{fill_op}">'
+                         f'<title>{html.escape(t)}</title></rect>')
+            parts.append(f'<text x="{x0 + cw / 2.0:.1f}" '
+                         f'y="{y0 + row_h / 2.0 + 4:.1f}" '
+                         f'text-anchor="middle" font-size="11" '
+                         f'fill="{_AXIS}">{html.escape(raw)}</text>')
+    parts.append(f'<text x="{L:.1f}" y="{height - 8}" font-size="11" '
+                 f'fill="{_AXIS}">cell shading = the value normalized 0–1 '
+                 f'in the beneficial direction of the metric (darker = '
+                 f'better) · row swatch colors match the radar · n/a = '
+                 f'the family has no such value</text>')
+    parts.append("</svg>")
+    return "\n".join(parts)

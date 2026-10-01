@@ -87,6 +87,7 @@ numbers and carry none.)
 | M67 | v0.64   | 78     | A68 | tests/test_modeling_v064.py |
 | M68 | v0.65   | 79     | A69 | tests/test_dataviz_v065.py |
 | M69 | v0.66   | 80     | A70 | tests/test_finetune_v066.py |
+| M70 | v0.67   | 81     | A71 | tests/test_model_compare_v067.py |
 
 ---
 
@@ -7277,3 +7278,42 @@ A user with a model they trust (from an earlier run, or a colleague's) should be
 ### 80.5 Milestone (M69)
 
 **M69** — v0.66 "Fine-tuning — start from a trained model": a saved `*.npz` model of any family is loadable (`load_checkpoint`), its spec reconstructed and validated against the task (80.2); the loop scores it as the never-retrained baseline (`from_model: true`, `train_seconds 0.0`) and warm-starts compatible mlp/convnet candidates from its weights (`copy_weights`, atomic, 80.3), with `initial_model=None` keeping every path byte-identical (80.1.5); the recipe gains `--from-model` end-to-end — env kwarg, `RunConfig.initial_model`, `fit`/`run` flags, the app's uploader with pre-validation and the RL-policy guard (80.1.2–80.1.4) — and the A-index advances to A70/M69 with `tests/test_finetune_v066.py` (80.4).
+
+## 81. Model comparison — dynamic multi-model graphics (v0.67)
+
+Directive: "Include dynamic graphics which compares different models on all metrics."
+
+The run already logs a full metric set per candidate, and the V5 family bars (30.5) and the 3-objective frontier (58.2) each show one slice of it. This round makes the **cross-model, all-metrics comparison** a first-class surface: every model family (or the top-K distinct specs) as one representative, read on the **entire metric catalog** in three complementary encodings — a radar (all metrics at once), per-metric grouped bars, and a model × metric matrix (the tabular ground truth). "Dynamic" = the app's two display-only widgets (a metric multiselect + a grouping selector) re-render all three graphics live; the core stays pure hand-rolled SVG + the existing widget idioms — no new dependency (66.5), no new logged data, no loop change (G2).
+
+### 81.1 Design
+
+- **81.1.1 "models" = groups of the run's scored candidates** — grouped by **model family** (default; the `config.MODEL_FAMILIES` registry order) or by **distinct spec** (`group_by="spec"`, capped at `top_k`, ordered by best holdout desc then `spec_hash` asc). Each group's representative is its best-holdout-score candidate (ties → first in log order); the group also carries the **mean** of each metric across its candidates (the stability context behind the representative's point).
+- **81.1.2 "all metrics" = the full logged catalog** — the six per-candidate logged metrics (`holdout_score`, `effective_score`, `gen_score`, `std`, `gen_gap`, `train_seconds`) plus the 58.2 **size axis** (`spec_n_params`; `None` for the data-dependent families) — one fixed catalog with each metric's beneficial direction, shared by every renderer (81.2.1).
+- **81.1.3 "dynamic" = interactive re-render, core stays pure** — the app panel (81.4) exposes two display-only widgets — a metric multiselect (which axes appear in all three graphics) and a grouping selector (family vs top-K specs) — each re-render being a deterministic function of the same experiments.jsonl (G2). The renderers are hand-rolled SVG like the rest of the chart set (no new dependency), and the app-language scan keeps the panel strings clean.
+
+### 81.2 Derivation (research.py)
+
+- **81.2.1 the metric catalog** — `MODEL_METRICS`: the fixed `(name, direction, label)` rows — `holdout_score`/`effective_score`/`gen_score` higher, `std`/`gen_gap`/`train_seconds`/`model_size` lower — in this order everywhere (the radar's axes, the bars' blocks, the matrix's columns).
+- **81.2.2 the scored-candidate rule** — the same as the 57.2/58.2 shapers: kind baseline/experiment (35.1), a finite `holdout_score`, a dict `spec`; screen/curriculum/invalid rows and non-dict garbage never enter the comparison.
+- **81.2.3 `model_comparison(entries, state_dim, n_out, grid, group_by="family", top_k=5)`** — returns `{"group_by", "metrics", "models", "n_scored"}`; each model: `name` (the family, or the `spec_hash` in spec mode), `label` (family + best architecture, or the 57.1 family·hash label), `family`, `n_candidates`, `values` (the representative's catalog read, `model_size` via the 58.2 axis — `None` for tree/boost/knn), `mean` (the per-metric mean over the group's candidates that carry it, `None` when none do), and `best_hash`. Family mode walks `MODEL_FAMILIES` (empty families skipped); spec mode sorts best-holdout desc → hash asc and caps at `top_k`. `group_by` outside {"family","spec"} and a non-positive `top_k` are loud `ValueError`s. Pure, deterministic (G2); no scored candidates → `models: []`, `n_scored: 0`.
+
+### 81.3 Renderers (plotting.py)
+
+- **81.3.1 the shared normalization** — per metric, each model's value maps to 0–1 **in its beneficial direction** across the models that carry a finite value (higher: (v−min)/(max−min); lower: (max−v)/(max−min)); a constant metric maps to 1.0 (all equally good); a missing value stays `None` and degrades to the renderer's n/a encoding — so on the radar, **bigger polygon = better on every axis**.
+- **81.3.2 `svg_model_radar`** — one axis per metric (the 81.2.1 order, the first axis up), grid rings at 25/50/75/100%, one polygon per model in the `frontier_palette` cycle (the seven families fit the seven hues), a `<title>` per polygon and per vertex (metric · raw value; a missing value pins the vertex at the center and reads `n/a`), a swatch legend below.
+- **81.3.3 `svg_model_bars`** — one block per metric (the metric label, then the models' bars in data order), bar length = the 81.3.1 normalized value, the raw value printed at the bar end (`n/a` when missing), the same palette index as the radar (the encodings agree on which color is which model), a `<title>` per bar, a swatch legend on top.
+- **81.3.4 `svg_model_matrix`** — the model × metric heatmap: rows = models (a row-swatch in the shared palette color), columns = metrics (short header), cell fill = the theme line color at an opacity scaled by the normalized value (a missing value paints the no-score surface and reads `n/a`), the raw value in every cell, a `<title>` per cell (model · metric · raw · normalized · beneficial direction).
+- **81.3.5 house rules** — all three are pure, deterministic (G2), valid XML (strict-parseable), `html.escape` every text, `<title>` tooltips, empty → header + "no scored candidates to compare" message, `palette`/`dark` kwargs through `_styled` (okabe/dark byte-different from the default, 51.4), and the app renders them through the 69.3/71.1 `_svg_block` guard (malformed → the friendly caption, never a broken page).
+
+### 81.4 App panel
+
+- **81.4.1 placement** — the Results tab's Research views: a **Model comparison** subheader after the Conclusions block — `st.radio` (Compare: model family / each spec), `st.multiselect` (Metrics, default all), and — in spec mode — `st.selectbox` (Top K: 2/3/5/8) — each change re-renders the three graphics (radar, bars, matrix) from the same run data (81.1.3); the widgets are display-only (no run effect, AppTest-safe).
+- **81.4.2 failure semantics** — a zero-scored run shows the "no scored candidates to compare yet" caption; a derivation failure shows the friendly 49.4.3-style error (never a page crash); selecting no metrics falls back to the full catalog.
+
+### 81.5 Acceptance (A71)
+
+- **A71** — `model_comparison` groups synthetic multi-family entries in `MODEL_FAMILIES` order with the best candidate as the representative (the `mean` over its candidates agreeing with the hand-computed mean), `model_size` finite for mlp and `None` for tree/knn (58.2), screen/curriculum rows and non-dict garbage excluded from `n_scored` (81.2.2), spec mode capped and ordered by best holdout → hash, and a loud `ValueError` on a bad `group_by`/`top_k` (81.2.3); `svg_model_radar` / `svg_model_bars` / `svg_model_matrix` are well-formed (`svg_is_well_formed`) and strict-XML-parseable, byte-identical across repeated calls (G2), byte-different under `palette="okabe"` and `dark=True` (51.4), render the n/a encoding for a missing size (81.3.2–81.3.4), and degrade to the empty message with no scored candidates (81.3.5); the app-language scan stays green (the panel strings carry no SPEC/§/round tokens); the version steps to `0.67.0` in both sources (33.1); the A-index advances (`defined == set(range(1, 72))`, 67 acceptance rows, M70 resolving to `tests/test_model_compare_v067.py`). All in `tests/test_model_compare_v067.py`.
+
+### 81.6 Milestone (M70)
+
+**M70** — v0.67 "Model comparison — dynamic multi-model graphics": the run's scored candidates group by model family (or the top-K distinct specs) into one best-candidate representative each, read on the full metric catalog (the six logged metrics + the 58.2 size axis, 81.2) and rendered in three complementary dynamic encodings — the radar, the per-metric bars, and the model × metric matrix (81.3) — steered live by the app's metric multiselect and grouping selector (81.4), with pure derivation/rendering, deterministic output (G2), and no new dependency (66.5); the A-index advances to A71/M70 with `tests/test_model_compare_v067.py` (81.5).

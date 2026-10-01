@@ -191,8 +191,8 @@ from .rl_dashboard import (  # 68 (v0.54, A58): the RL loop in the dashboard
 
 # SPEC.md 33.1 (C1): single version source — must equal pyproject.toml's
 # [project].version (enforced by the A23 test); one step per feature round
-# (v0.66 ⇒ 0.66.0, M69, SPEC.md 80)
-__version__ = "0.66.0"
+# (v0.67 ⇒ 0.67.0, M70, SPEC.md 81)
+__version__ = "0.67.0"
 
 __all__ = [
     "AutoRefineEnv",

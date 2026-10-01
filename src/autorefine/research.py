@@ -16,6 +16,7 @@ app renders the block in `_render_result` (57.6).
 """
 from __future__ import annotations
 
+import json
 import math
 
 from .memory import (
@@ -25,7 +26,7 @@ from .memory import (
     KIND_SCREEN,
 )
 from .accounting import GEN_GAP_TOL, account_run, candidate_reason
-from .config import spec_n_params  # 58.2 (v0.44): the size axis
+from .config import MODEL_FAMILIES, spec_n_params  # 58.2 (v0.44): the size axis
 
 __all__ = [
     "spec_lineage",
@@ -37,6 +38,8 @@ __all__ = [
     "knob_signal",       # the decisive-knob ranking (signal vs noise)
     "frontier_knee",     # the efficiency knee (bang-for-buck pick)
     "rejection_anatomy", # the rejection mix + stall story
+    "MODEL_METRICS",     # 81.2.1 (v0.67): the all-metrics catalog
+    "model_comparison",  # 81.2.3 (v0.67): the cross-model comparison data
 ]
 
 
@@ -641,4 +644,137 @@ def rejection_anatomy(summary, entries) -> dict:
         "dominant": dominant,
         "first_improvement": ttf,
         "story": _stall_story(accepted, buckets, dominant, ttf),
+    }
+
+
+# --- 81 (v0.67): the model comparison across all metrics ---------------------
+# The "compare models on all metrics" surface (81.1): the run's scored
+# candidates grouped by model family (default) or by distinct spec, each
+# group represented by its best-holdout candidate, read on the full metric
+# catalog (81.2.1) — the six per-candidate logged metrics plus the 58.2 size
+# axis. Pure derivation (G2), same scored-candidate rule as the 57/58
+# shapers; the three SVG renderers live in `plotting.py` (81.3).
+
+# 81.2.1: the metric catalog — the fixed (name, direction, label) rows every
+# model-comparison renderer walks, in this order (the radar's axes, the
+# bars' blocks, the matrix's columns). `direction` is the beneficial
+# direction: the radar/bars normalize in it, so "bigger = better" on every
+# axis (81.3.1). `model_size` is the 58.2 axis (spec_n_params) — None for
+# the data-dependent families (tree/boost/knn).
+MODEL_METRICS = (
+    ("holdout_score", "higher", "holdout score"),
+    ("effective_score", "higher", "effective score"),
+    ("gen_score", "higher", "gen score"),
+    ("std", "lower", "holdout std"),
+    ("gen_gap", "lower", "gen gap"),
+    ("train_seconds", "lower", "train time"),
+    ("model_size", "lower", "model size"),
+)
+
+
+def model_comparison(entries, state_dim=None, n_out=None, grid=None,
+                     group_by: str = "family", top_k: int = 5) -> dict:
+    """81.2.3: the model comparison — the run's scored candidates grouped
+    by **model family** (default; the `config.MODEL_FAMILIES` registry
+    order, empty families skipped) or by **distinct spec**
+    (`group_by="spec"`, ordered best-holdout desc then `spec_hash` asc and
+    capped at `top_k`), one representative per group: the candidate with
+    the best `holdout_score` (ties -> first in log order).
+
+    The scored-candidate rule is the 57.2/58.2 one (81.2.2): kind
+    baseline/experiment (35.1), a finite `holdout_score`, a dict `spec` —
+    screen/curriculum/invalid rows and non-dict garbage never enter. Each
+    group carries `values` — the representative's full catalog read
+    (81.2.1; `model_size` via the 58.2 `spec_n_params`, `None` for the
+    data-dependent families) — and `mean`, the per-metric mean over the
+    group's candidates that carry it (None when none do). `metrics` is the
+    catalog with each metric's beneficial direction. A group's `name` is
+    the family (or the spec_hash in spec mode), `label` the family + best
+    architecture (or the 57.1 family-hash label), `n_candidates` the group
+    size, and `best_hash` the representative's `spec_hash` (empty string
+    when the row predates the key). `group_by` outside {"family","spec"}
+    and a non-positive `top_k` are loud `ValueError`s (81.2.3). Pure and
+    deterministic (G2); no scored candidates -> `models: []`,
+    `n_scored: 0`.
+    """
+    if group_by not in ("family", "spec"):
+        raise ValueError(f"group_by must be 'family' or 'spec', got "
+                         f"{group_by!r}")
+    if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 1:
+        raise ValueError(f"top_k must be a positive int, got {top_k!r}")
+
+    def _catalog(e: dict) -> dict:
+        out = {}
+        for name, _d, _l in MODEL_METRICS:
+            if name == "model_size":
+                out[name] = spec_n_params(e["spec"], state_dim, n_out, grid)
+                continue
+            out[name] = _num(e.get(name))
+        return out
+
+    scored: list[dict] = []
+    for e in entries or []:
+        if not isinstance(e, dict):
+            continue
+        if e.get("kind") not in (KIND_BASELINE, KIND_EXPERIMENT):  # 35.1 (C4)
+            continue
+        if _num(e.get("holdout_score")) is None \
+                or not isinstance(e.get("spec"), dict):
+            continue
+        scored.append(e)
+
+    groups: dict[str, list[dict]] = {}
+    for e in scored:
+        if group_by == "family":
+            key = str(e["spec"].get("model_family", "mlp"))
+        else:
+            h = e.get("spec_hash")
+            key = (h if isinstance(h, str) and h
+                   else json.dumps(e["spec"], sort_keys=True, default=str))
+        groups.setdefault(key, []).append(e)
+
+    if group_by == "family":
+        order = [f for f in MODEL_FAMILIES if f in groups]
+    else:  # 81.2.3: best-holdout desc -> hash asc, capped at top_k
+        def _best(key: str) -> float:
+            return max(_num(c.get("holdout_score")) for c in groups[key])
+        order = sorted(groups, key=lambda k: (-_best(k), k))[:top_k]
+
+    metrics = [{"name": name, "direction": direction, "label": label}
+               for name, direction, label in MODEL_METRICS]
+    models: list[dict] = []
+    for key in order:
+        cands = groups[key]
+        cats = [_catalog(c) for c in cands]
+        best_i = 0
+        for i, c in enumerate(cats):
+            if c["holdout_score"] > cats[best_i]["holdout_score"]:
+                best_i = i
+        rep = cands[best_i]
+        mean = {}
+        for name, _d, _l in MODEL_METRICS:
+            vals = [c[name] for c in cats if c[name] is not None]
+            mean[name] = (sum(vals) / len(vals)) if vals else None
+        if group_by == "spec":
+            label = _label(rep["spec"], key)
+        else:
+            arch = rep["spec"].get("architecture")
+            arch_s = (",".join(str(v) for v in arch)
+                      if isinstance(arch, (list, tuple)) and arch else "")
+            label = f"{key} ({arch_s})" if arch_s else key
+        h = rep.get("spec_hash")
+        models.append({
+            "name": key,
+            "label": label,
+            "family": str(rep["spec"].get("model_family", "mlp")),
+            "n_candidates": len(cands),
+            "values": cats[best_i],
+            "mean": mean,
+            "best_hash": h if isinstance(h, str) and h else "",
+        })
+    return {
+        "group_by": group_by,
+        "metrics": metrics,
+        "models": models,
+        "n_scored": len(scored),
     }

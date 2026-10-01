@@ -131,6 +131,9 @@ from autorefine.plotting import (
     svg_knob_signal,  # the decisive-knob ranking (signal vs noise)
     svg_efficiency_knee,  # the efficiency knee (bang for buck)
     svg_rejection_anatomy,  # the rejection mix + stall story
+    svg_model_radar,  # 81.3.2 (v0.67) the model comparison radar
+    svg_model_bars,  # 81.3.3 (v0.67) the per-metric model bars
+    svg_model_matrix,  # 81.3.4 (v0.67) the model x metric matrix
     svg_is_well_formed,  # 69.3 (v0.55, A59): the SVG render guard
     visual_card,  # 71.1.2 (v0.57, A61): the visual-card wrapper
     VISUAL_CSS,  # 71.1 (v0.57, A61): the shared visual-card stylesheet
@@ -154,6 +157,7 @@ from autorefine.research import (
     knob_signal,  # the decisive-knob ranking's data (signal vs noise)
     frontier_knee,  # the efficiency knee's data (bang for buck)
     rejection_anatomy,  # the rejection mix + stall story's data
+    model_comparison,  # 81.2 (v0.67) the cross-model comparison data
 )
 from autorefine.tasks import CsvTask
 
@@ -1437,6 +1441,45 @@ def _render_result(res: dict) -> None:
                                              **pal))
         except (ValueError, TypeError, KeyError) as exc:  # 49.4.3 pattern
             st.error(f"conclusions unavailable: {exc}")
+
+        # 81 (v0.67): model comparison — the run's scored candidates
+        # compared on the full metric catalog, in three dynamic encodings
+        # (81.3), steered by two display-only widgets (81.4: the metric
+        # multiselect + the grouping selector; no run effect, AppTest-safe).
+        # A friendly caption on failure (the 49.4.3 pattern), never a page
+        # crash.
+        st.subheader("Model comparison")
+        try:
+            _mc_kw = dict(state_dim=res.get("state_dim"),
+                          n_out=res.get("n_out"), grid=res.get("grid"))
+            _mc_base = model_comparison(_ren, **_mc_kw)
+        except (ValueError, TypeError, KeyError) as exc:  # 49.4.3 pattern
+            st.error(f"model comparison unavailable: {exc}")
+        else:
+            if _mc_base["n_scored"] == 0:
+                st.caption("no scored candidates to compare yet")
+            else:
+                _mc_names = [m["name"] for m in _mc_base["metrics"]]
+                _mc_group = st.radio("Compare", ("model family", "each spec"),
+                                     horizontal=True, key="mc_group")
+                _mc_sel = st.multiselect("Metrics", _mc_names,
+                                         default=_mc_names, key="mc_metrics")
+                _mc_k = None
+                if _mc_group == "each spec":
+                    _mc_k = int(st.selectbox("Top K specs", (2, 3, 5, 8),
+                                              index=2, key="mc_topk"))
+                _mc_data = _mc_base if _mc_k is None else model_comparison(
+                    _ren, group_by="spec", top_k=_mc_k, **_mc_kw)
+                _mc_sel = _mc_sel or _mc_names  # all off -> the full catalog
+                _mc_view = dict(_mc_data)
+                _mc_view["metrics"] = [m for m in _mc_data["metrics"]
+                                       if m["name"] in _mc_sel]
+                _svg_block("Model radar (all metrics)",
+                           svg_model_radar(_mc_view, **pal))
+                _svg_block("Model bars (per metric)",
+                           svg_model_bars(_mc_view, **pal))
+                _svg_block("Model × metric matrix",
+                           svg_model_matrix(_mc_view, **pal))
 
         # SPEC.md 59.1 (v0.45): the parameter inspector — the two real layers
         # (architecture `SPEC_FIELDS` + loop `KNOBS`) as one read-only block
