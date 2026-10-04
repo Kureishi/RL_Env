@@ -204,11 +204,15 @@ from .awr import (  # SPEC.md 84.3 (v0.70) + 85.1 (v0.71): AWR + the loop
     trajectory_returns,
 )
 from .mpc import learn_dynamics, mpc_act  # SPEC.md 84.4 (v0.70): learned-model MPC
+from .transfer import (  # SPEC.md 86 (v0.72): transfer to similar tasks
+    SearchPrior,
+    read_search_prior,
+)
 
 # SPEC.md 33.1 (C1): single version source — must equal pyproject.toml's
 # [project].version (enforced by the A23 test); one step per feature round
-# (v0.71 ⇒ 0.71.0, M74, SPEC.md 85)
-__version__ = "0.71.0"
+# (v0.72 ⇒ 0.72.0, M75, SPEC.md 86)
+__version__ = "0.72.0"
 
 __all__ = [
     "AutoRefineEnv",
@@ -304,6 +308,8 @@ __all__ = [
     "Simulator", "CartpoleSim",
     "trajectory_returns", "advantages", "awr_weights", "rollout",
     "train_awr_policy", "learn_dynamics", "mpc_act", "awr_loop",
+    # SPEC.md 86 (v0.72, A76): transfer to similar tasks (the search prior)
+    "SearchPrior", "read_search_prior",
     # SPEC.md 84.1 (v0.70): sample weights live on the trainer contract
     # (train(..., sample_weight=...)) — no new top-level name.
     "ParetoFrontier",

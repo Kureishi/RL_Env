@@ -1088,7 +1088,8 @@ def _run(csv_path: str, label: str, target: float, policy: str, seed: int,
          episodes: int = 5, epsilon: float = 0.0, epsilon_decay: float = 1.0,
          keep_best: bool = True,
          initial_policy_bytes: "bytes | None" = None,
-         initial_model: "str | None" = None) -> None:
+         initial_model: "str | None" = None,
+         prior_run: "str | None" = None) -> None:
     """Start the live loop (SPEC.md 51.2.3): build the runner, launch the
     daemon worker, then drain its messages synchronously into the live UI.
 
@@ -1121,6 +1122,8 @@ def _run(csv_path: str, label: str, target: float, policy: str, seed: int,
             steering=steering,  # SPEC.md 59.2 (v0.45): the steering rules (None = off)
             # SPEC.md 80 (v0.66): the uploaded trained model (None = fresh)
             initial_model=initial_model,
+            # SPEC.md 86 (v0.72): the search prior (None = a fresh run)
+            prior_run=prior_run,
         )
     record = {
         "thread": None,
@@ -2309,6 +2312,24 @@ def main() -> None:
              "as the baseline (never retrained) and its weights seed the "
              "compatible candidates — fine-tuning the loop on your data. "
              "Works with the bandit and search policies.")
+    # SPEC.md 86.4.3 (v0.72): start from a previous run's search knowledge —
+    # the selectbox lists the finished run dirs (a summary.json marks a
+    # finished run); rendered only when ≥1 exists (an empty options list is
+    # not a valid widget)
+    _prior_rd = (st.session_state.get("runs_dir")
+                 or _launcher_runs_dir() or "runs")
+    _prior_options = sorted(
+        str(p.parent) for p in Path(str(_prior_rd)).glob("*/summary.json"))
+    if _prior_options:
+        side.selectbox(
+            "Start from a previous run — optional",
+            options=["-"] + _prior_options,
+            index=0, key="prior_run_select",
+            help=("Optional: a finished AutoRefine run on similar data. "
+                  "Its best model recipe becomes this run's baseline "
+                  "(retrained on your data) and the search starts informed "
+                  "from what worked there. Works with the bandit and search "
+                  "policies."))
 
     # 48.1.2 (UI fix): the Advanced knob set was a collapsed ``st.expander``,
     # which some Streamlit/theme builds render with its children escaping the
@@ -2595,6 +2616,19 @@ def main() -> None:
                 # materialized defaults when it is off. The uploaded policy
                 # (the sidebar's file_uploader) is its raw bytes.
                 _rl_up = st.session_state.get("rl_policy_upload")
+                # SPEC.md 86.4.3 (v0.72): the selected previous run ("-" =
+                # off / unset) — a stale selection (the dir is gone) is
+                # treated as off; the RL loop cannot take one (its runner
+                # owns no such kwarg, like the uploaded model)
+                _prior_sel = st.session_state.get("prior_run_select", "-")
+                _prior_path = (_prior_sel if (_prior_sel and _prior_sel != "-"
+                                              and Path(_prior_sel).is_dir())
+                               else None)
+                if _prior_path is not None and policy == "rl":
+                    st.warning("Starting from a previous run needs the bandit "
+                               "or search policy — switch the policy or "
+                               "clear the selection.")
+                    st.stop()
                 _run(path, label.strip() or None, float(target), policy,
                      int(seed), int(experiments), float(max_train),
                      runs_dir.strip() or "runs", quality,
@@ -2608,7 +2642,8 @@ def main() -> None:
                      initial_policy_bytes=(
                          _rl_up.getvalue() if (_rl_up is not None
                                                and policy == "rl") else None),
-                     initial_model=_mod_path)
+                     initial_model=_mod_path,
+                     prior_run=_prior_path)
         elif result is not None:
             # 69.4 (v0.55, A59): the run is finished — point at the Results
             # tab instead of a blank re-run area

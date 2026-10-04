@@ -191,9 +191,15 @@ def _drive(args: argparse.Namespace, env: AutoRefineEnv) -> None:
         # SPEC.md 59.2 (v0.45): steering pins drop their field from the
         # proposal pool (the env's force-set in step() is the backstop)
         excl = tuple(f for f, _v in env.steering.pins) if env.steering else ()
+        # SPEC.md 86.4.2 (v0.72): the env's search prior seeds the bandit's
+        # field beliefs (None = the exact legacy proposal stream, G2); the
+        # search/RL policies own no per-field bookkeeping (86.4.2)
+        prior = (env.prior.to_bandit_prior()
+                 if getattr(env, "prior", None) is not None else None)
         policy = (SearchPolicy(seed=args.seed, exclude_fields=excl)
                   if args.policy == "search"
-                  else BanditPolicy(seed=args.seed, exclude_fields=excl))
+                  else BanditPolicy(seed=args.seed, exclude_fields=excl,
+                                    prior=prior))
         while not env.done:
             action = policy.propose(state)
             state, reward, done, info = env.step(action)
@@ -272,6 +278,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # budget; the other `run` flags are ignored (41.3.1)
     if args.demo:
         return _cmd_demo(args)
+    if getattr(args, "prior_run", None) is not None \
+            and getattr(args, "from_model", None) is not None:
+        # SPEC.md 86.4.1 (v0.72): both define the baseline's starting point
+        print("--prior-run and --from-model are mutually exclusive "
+              "(SPEC.md 86.4.1)", file=sys.stderr)
+        return 1
     # SPEC.md 59.2 (v0.45): the steering rules (None = off, pre-v0.45 path)
     try:
         steering = _steering_from_args(args)
@@ -311,6 +323,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         rl_episodes=args.rl_episodes if args.policy == "rl" else None,
         steering=steering,  # SPEC.md 59.2 (v0.45)
         initial_model=args.from_model,  # v0.66 (SPEC.md 80; None = off)
+        prior_run=args.prior_run,  # v0.72 (SPEC.md 86; None = off)
         **quality,
     )
     _drive(args, env)
@@ -438,6 +451,11 @@ def _cmd_fit(args: argparse.Namespace) -> int:
             print("--tasks is mutually exclusive with --data and --from-run "
                   "(SPEC.md 46.3)", file=sys.stderr)
             return 1
+        if getattr(args, "prior_run", None) is not None:
+            # SPEC.md 86.4.1 (v0.72): one prior belongs to one task
+            print("--prior-run and --tasks are mutually exclusive "
+                  "(SPEC.md 86.4.1)", file=sys.stderr)
+            return 1
         if getattr(args, "dry_run", False):
             return _fit_dry_run_portfolio(args)
         return _fit_portfolio(args)
@@ -456,6 +474,19 @@ def _cmd_fit(args: argparse.Namespace) -> int:
         print("--data and --from-run are mutually exclusive (SPEC.md 37.1.4)",
               file=sys.stderr)
         return 1
+    if getattr(args, "prior_run", None) is not None:
+        # SPEC.md 86.4.1 (v0.72): the search prior is a single-task seed —
+        # a re-run executes the old recipe exactly (37.1.4), a portfolio
+        # spans tasks (checked above); the uploaded model already claims
+        # the baseline slot (80.2.5)
+        if args.from_run is not None:
+            print("--prior-run and --from-run are mutually exclusive "
+                  "(SPEC.md 86.4.1)", file=sys.stderr)
+            return 1
+        if getattr(args, "from_model", None) is not None:
+            print("--prior-run and --from-model are mutually exclusive "
+                  "(SPEC.md 86.4.1)", file=sys.stderr)
+            return 1
     if getattr(args, "dry_run", False):
         return _fit_dry_run(args)  # 40.1 (v0.26): plan only, no training
     if args.from_run is not None:
@@ -801,6 +832,7 @@ def _fit_data(args: argparse.Namespace) -> tuple:
         rl_episodes=args.rl_episodes if args.policy == "rl" else None,
         steering=steering,  # SPEC.md 59.2 (v0.45)
         initial_model=args.from_model,  # v0.66 (SPEC.md 80; None = off)
+        prior_run=args.prior_run,  # v0.72 (SPEC.md 86; None = off)
         **quality,
     )
     return env, args.target, metric
@@ -2821,6 +2853,11 @@ def build_parser() -> argparse.ArgumentParser:
                             "trained model (*.npz) — scored as the baseline, "
                             "its weights warm-start compatible candidates; "
                             "default: none (a fresh baseline)")
+    p_run.add_argument("--prior-run", default=None, metavar="RUN_DIR",
+                       help="v0.72 (SPEC.md 86): start from a finished run's "
+                           "search knowledge — its best spec becomes the "
+                           "baseline (retrained on this task) and the bandit "
+                           "starts informed; default: none (a fresh run)")
     p_run.add_argument("--demo", action="store_true",
                        help="v0.27 (SPEC.md 41.3): the narrated demo — one tiny, "
                             "deterministic parity-v1 loop (3 experiments, 60 s "
@@ -3078,6 +3115,11 @@ def build_parser() -> argparse.ArgumentParser:
                             "trained model (*.npz) — scored as the baseline, "
                             "its weights warm-start compatible candidates; "
                             "default: none (a fresh baseline)")
+    p_fit.add_argument("--prior-run", default=None, metavar="RUN_DIR",
+                       help="v0.72 (SPEC.md 86): start from a finished run's "
+                           "search knowledge — its best spec becomes the "
+                           "baseline (retrained on this task) and the bandit "
+                           "starts informed; default: none (a fresh run)")
     p_fit.add_argument("--quiet", action="store_true",
                        help="v0.33 (SPEC.md 47.3): suppress the per-experiment "
                             "loop output and the per-class diagnostics (keep "

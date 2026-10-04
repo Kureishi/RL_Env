@@ -224,13 +224,13 @@ def test_app_imports_and_renders_data_flow():
 # --- 33.1 version + SPEC index (A69) --------------------------------------------
 
 def test_version_and_spec_cite_a69():
-    """A69 (33.1): the version steps to `0.71.0` in both sources; SPEC §79
+    """A69 (33.1): the version steps to `0.72.0` in both sources; SPEC §79
     cites A69; the A25 index row for M68 points at this file."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.71.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.72.0"
     init = (REPO / "src" / "autorefine" / "__init__.py").read_text(
         encoding="utf-8")
-    assert '"0.71.0"' in init
+    assert '"0.72.0"' in init
     spec = SPEC.read_text(encoding="utf-8")
     assert "## 79. Data flow" in spec
     assert "Acceptance (A69)" in spec

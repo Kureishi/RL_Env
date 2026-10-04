@@ -21,7 +21,7 @@ from .catalog import relevant_fields
 
 class BanditPolicy:
     def __init__(self, seed: int, alpha: float = 1.0, mode: str = "local",
-                 exclude_fields: tuple = ()) -> None:
+                 exclude_fields: tuple = (), prior: dict | None = None) -> None:
         self.rng = np.random.default_rng(seed)
         self.alpha = float(alpha)  # exploration weight in the UCB bonus
         # SPEC.md 18.1: "local" is the v0.4 default; "uniform" restores the
@@ -33,6 +33,17 @@ class BanditPolicy:
         self.exclude_fields = tuple(exclude_fields)
         self.trials: dict[str, int] = {f: 0 for f in FIELD_NAMES}
         self.wins: dict[str, float] = {f: 0.0 for f in FIELD_NAMES}
+        # SPEC.md 86.2 (v0.72): the search prior — per-field trial/win credit
+        # transferred from a finished run on a similar task. A field with
+        # prior credit starts informed (finite UCB); a zero-trial field keeps
+        # the cold-start priority (tried once before exploitation).
+        # prior=None (default) leaves the tables at zero — the bit-identical
+        # pre-v0.72 proposal stream (A1-A4 pins green, G2)
+        if prior is not None:
+            for field, slot in prior.items():
+                if field in self.trials and isinstance(slot, dict):
+                    self.trials[field] = int(slot.get("trials", 0))
+                    self.wins[field] = float(slot.get("wins", 0.0))
 
     # --- feedback --------------------------------------------------------------
     def _update(self, env_state: dict[str, Any]) -> None:

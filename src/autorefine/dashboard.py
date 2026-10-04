@@ -71,7 +71,8 @@ class DashboardRunner:
                  stall_patience: int | None = None,
                  objectives: tuple | None = None,
                  steering: SteeringState | None = None,
-                 initial_model: str | None = None) -> None:
+                 initial_model: str | None = None,
+                 prior_run: str | None = None) -> None:
         if policy not in ("bandit", "search"):
             raise ValueError(f"unsupported policy {policy!r}: {_RL_HINT}")
         if search_quality not in ("v04", "legacy"):
@@ -109,6 +110,9 @@ class DashboardRunner:
         # SPEC.md 80 (v0.66): the uploaded trained model to start from
         # (None = a fresh baseline, the exact pre-v0.66 path)
         self.initial_model = initial_model
+        # SPEC.md 86 (v0.72): the search-prior run dir (None = a fresh
+        # run, the exact pre-v0.72 path)
+        self.prior_run = prior_run
         self.env: AutoRefineEnv | None = None
         self.policy: SearchPolicy | BanditPolicy | None = None
         self._state: dict | None = None
@@ -201,13 +205,20 @@ class DashboardRunner:
             steering=self.steering,
             # SPEC.md 80 (v0.66): the uploaded model (None = fresh baseline)
             initial_model=self.initial_model,
+            # SPEC.md 86 (v0.72): the search prior (None = fresh run)
+            prior_run=self.prior_run,
         )
         # SPEC.md 59.2 (v0.45): steering pins drop their field from the
         # proposal pool (the env's force-set in step() is the backstop)
         excl = tuple(f for f, _v in self.steering.pins) if self.steering else ()
+        # SPEC.md 86.4.2 (v0.72): the env's prior seeds the bandit's field
+        # beliefs (None = the exact legacy proposal stream, G2)
+        prior = (self.env.prior.to_bandit_prior()
+                 if self.env.prior is not None else None)
         self.policy = (SearchPolicy(seed=self.seed, exclude_fields=excl)
                        if self.policy_name == "search"
-                       else BanditPolicy(seed=self.seed, exclude_fields=excl))
+                       else BanditPolicy(seed=self.seed, exclude_fields=excl,
+                                         prior=prior))
         self._state = self.env.reset()
         self._phase = "running"
         return {
@@ -307,6 +318,7 @@ class DashboardRunner:
             objectives=self.objectives,  # v0.23 (SPEC.md 37.2)
             steering=self.steering,  # SPEC.md 59.2 (v0.45)
             initial_model=self.initial_model,  # SPEC.md 80 (v0.66)
+            prior_run=self.prior_run,  # SPEC.md 86 (v0.72)
         )
 
     def _clone(self, seed: int) -> "DashboardRunner":

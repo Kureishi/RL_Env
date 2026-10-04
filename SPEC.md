@@ -92,6 +92,7 @@ numbers and carry none.)
 | M72 | v0.69   | 83     | A73 | tests/test_temporal_v069.py |
 | M73 | v0.70   | 84     | A74 | tests/test_sequential_v070.py |
 | M74 | v0.71   | 85     | A75 | tests/test_simloop_v071.py |
+| M75 | v0.72   | 86     | A76 | tests/test_transfer_v072.py |
 
 ---
 
@@ -7501,3 +7502,51 @@ All in `tests/test_simloop_v071.py`.
 ### 85.3 Milestone (M74)
 
 **M74** — v0.71 "Sim-in-the-loop": the environment now **autonomously improves a control policy** — `awr_loop` iterates rollout → AWR retrain (85.1) from the uniform baseline, evaluating each improved policy on a single shared evaluation seed so the improvement curve is apples-to-apples (85.1.2); pure additions, deterministic output (G2), no new dependency (the stdlib + numpy rule); the A-index advances to A75/M74 with `tests/test_simloop_v071.py` (85.2). This completes the three-part "honest limits" program (83.6): native temporal models (83) → sequential decision-making (84) → sim-in-the-loop (85).
+
+## 86. Transfer to similar tasks — the search prior (v0.72)
+
+A run that improved a model on task A leaves behind the *search knowledge* — the best spec it found and the per-field trial/win record of its search. Today a run on a **similar** task B (new data, possibly different input dimensions) starts from scratch: the default baseline spec plus cold-start search beliefs. Fine-tuning (80) only transfers weights when the dimensions match exactly. §86 transfers the search knowledge itself: the new run **starts where the old one finished** — the baseline is the source run's best spec (retrained on the new task, so the score is honest), and the bandit's field beliefs start informed instead of uniform.
+
+### 86.1 `transfer.py` — the search prior (core module, stdlib only)
+
+1. **`SearchPrior`** — a frozen dataclass carrying one finished run's learned search knowledge: `task` (the source task name), `source_run` (the run directory's name), `best_spec` (the spec dict), `best_score` (the run's final best holdout score), `trials` (`{field: int}`) and `wins` (`{field: float}`) per-field credit, and `n_experiments` (the run's scored-experiment count). `to_dict()` / `from_dict()` round-trip it (deterministic, G2); `to_bandit_prior()` yields `{field: {"trials": int, "wins": float}}` — the JSON-safe shape `BanditPolicy` consumes (86.2).
+2. **`read_search_prior(run_dir)`** — a pure reader over the two finish-time artifacts: `summary.json` (the task, the final best score, `experiments_run`, and the canonical `mutation_win_rate` per-field credit — the same computation the summary already publishes, SPEC.md 26.1) and `best_spec.json` (the best spec). Only **finished** runs are transferable: a missing `summary.json` (an interrupted run) or `best_spec.json` is a fail-loud `ValueError` (the 80.2.4 style), not a silent empty prior. Deterministic (G2): no RNG, fixed iteration order.
+3. **`prior_spec(prior)`** — `ModelSpec.from_dict(prior.best_spec)`; a malformed spec is a clean construction-time error, never a mid-run crash.
+
+### 86.2 `BanditPolicy` belief prior (`improver/bandit.py`)
+
+1. New kwarg `prior: dict | None = None` — the `to_bandit_prior()` shape (86.1.1). It seeds the bandit's `trials` / `wins` tables, so UCB starts informed: a field with prior credit is ranked by its transferred win rate plus the usual exploration bonus; a field with **zero** prior trials keeps the cold-start priority (tried exactly once before exploitation, 17's rule) — "untried in the source run" and "informed from the source run" split exploration/exploitation exactly as they should.
+2. `prior=None` (the default) leaves the tables at zero — the **bit-identical** pre-v0.72 proposal stream (the A1–A4 pins stay green, G2).
+
+### 86.3 `AutoRefineEnv` spec prior (`improver/meta_env.py`)
+
+1. New kwarg `prior_run: str | Path | None = None` — **not a knob** (absent from the KNOBS registry, 33.2) and recorded in the `RunConfig` (86.5). At construction the prior is read and its spec validated (fail-loud, before any `reset` — the 80.2.4 style).
+2. **The baseline becomes the prior's best spec, retrained on the current task** — its holdout score on the new data is the loop's honest starting point (the 80.2 free-baseline pattern, but retrained: the weights are *not* reused, only the architecture choice). Steering interaction: pins still force-set their fields over the prior's spec (an explicit user choice beats the transferred prior); biases/constraints act on candidates only, exactly as before (59.2.2). No prior → the exact legacy `_base_spec` path (bit-identical, G2).
+3. `env.prior` is exposed so a driver can wire the belief prior into its bandit (86.2); `env.prior_run_path` is the string form recorded in the recipe.
+4. **Mutually exclusive with `initial_model`** — both define the baseline's starting point (the uploaded checkpoint's spec vs the prior's best spec); a construction-time `ValueError` says so (the 80.2.5 style).
+5. **Provenance**: the baseline log row and the summary carry the additive *conditional* key `from_prior_run` (the source run's directory name) — absent on fresh runs, so pre-v0.72 key sets stay intact (the 80.2.4 pattern).
+
+### 86.4 Driver wiring
+
+1. **CLI**: `--prior-run RUN_DIR` on both `run` and `fit`. Mutual exclusions (fail loud, `rc 1`): with `--from-model` (both define the starting point), with `--from-run` (a re-run executes the old recipe exactly, 37.1.4), and with `--tasks` (a portfolio spans several tasks; one prior belongs to one task, 46.3).
+2. **Bandit wiring**: the drivers (the CLI's `run`/`fit` loops and `DashboardRunner`) pass `prior=env.prior.to_bandit_prior()` to `BanditPolicy` when the env carries a prior and the policy is the bandit. `SearchPolicy` and the RL policies are untouched (they own no per-field bookkeeping).
+3. **App**: a "Start from a previous run" selectbox in the Setup sidebar lists the finished run directories under the runs dir (rendered only when ≥ 1 exists, so an empty runs dir adds no widget) and passes the path through `_run()` → `DashboardRunner(prior_run=...)`.
+
+### 86.5 `RunConfig` (the recipe)
+
+New field `prior_run: str | None = None` — **optional in `from_dict`** (absent → `None`, so pre-v0.72 `run_config.json` files still load — the 59.4 back-compat pattern); `from_env` reads `env.prior_run_path`; `fit_recipe` emits `--prior-run` only when set; `runconfig_to_flags` emits `prior-run` only when set (the 80 recipe pattern).
+
+### 86.6 Acceptance (A76)
+
+1. **The reader**: `read_search_prior` over a real finished run returns the task, the best spec (a valid `ModelSpec`), the final best score, per-field trials/wins consistent with the run's `mutation_win_rate`, and the experiment count; two reads are bit-identical; a missing `summary.json` / `best_spec.json` (or a malformed one) is a fail-loud `ValueError`; `to_dict` / `from_dict` round-trips exactly; `to_bandit_prior` yields the documented shape.
+2. **The bandit**: a `prior` seeds the trial/win tables — a field with prior credit has a finite UCB (no longer the cold-start `inf`), a zero-prior-trial field keeps the cold-start priority; `prior=None` is the **bit-identical** legacy proposal stream (the A1–A4 pins stay green, G2).
+3. **The env**: `prior_run` makes the reset baseline the prior's best spec retrained on the current task (the baseline row's spec equals it, the row carries `from_prior_run`, and the score is a fresh holdout score); pins override the prior's fields; `prior_run` × `initial_model` is a construction-time `ValueError`; a bad directory is a fail-loud `ValueError`; the default `prior_run=None` keeps the exact legacy reset (the A-pins stay green, G2).
+4. **The recipe**: `RunConfig` round-trips `prior_run` (set and unset); `fit_recipe` / `runconfig_to_flags` emit the flag only when set; a pre-v0.72 config (the field absent) still loads.
+5. **The CLI**: `--prior-run` exists on `run` and `fit` (help text); the three mutual-exclusion refusals fire with `rc 1`.
+6. **Language / version / index**: the app-language scan stays green (no SPEC / version tokens in app strings); the version steps to `0.72.0` in both sources (33.1); the A-index advances (`defined == set(range(1, 77))`, 72 acceptance rows, M75 resolving to `tests/test_transfer_v072.py`).
+
+All in `tests/test_transfer_v072.py`.
+
+### 86.7 Milestone (M75)
+
+**M75** — v0.72 "Transfer to similar tasks": the environment adapts to a similar task by **carrying its search knowledge across runs** — the search prior (86.1) reads a finished run's best spec and per-field credit, the bandit starts informed instead of cold (86.2), and the new run's baseline is the source run's best architecture retrained on the new data (86.3); the CLI, the dashboard runner, the app, and the canonical recipe all expose the one `--prior-run` knob of intent (86.4/86.5); pure additions, deterministic output (G2), no new dependency (the stdlib + numpy rule); the A-index advances to A76/M75 with `tests/test_transfer_v072.py` (86.6).

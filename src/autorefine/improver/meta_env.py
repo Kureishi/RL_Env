@@ -42,6 +42,7 @@ from ..finetune import (  # SPEC.md 80 (v0.66): fine-tuning
 )
 from ..steering import SteeringState, apply_steering  # SPEC.md 59.2 (v0.45)
 from ..tasks import TASKS
+from ..transfer import SearchPrior, prior_spec, read_search_prior  # SPEC.md 86 (v0.72)
 from ..trainer import train
 from .curriculum import ParityCurriculum  # SPEC.md 20.1 (type reference)
 
@@ -272,6 +273,13 @@ class AutoRefineEnv:
         # compatible candidates (80.3). Not a knob: absent from KNOBS;
         # recorded in RunConfig (80.4) and the summary (80.2.4).
         initial_model: str | Path | None = None,
+        # --- v0.72 transfer (SPEC.md 86; None = off, pre-v0.72 exact) ----
+        # path to a finished run dir whose search knowledge (best spec +
+        # per-field credit) seeds this run: the baseline is the source
+        # run's best spec retrained on this task, and the bandit starts
+        # informed. Not a knob (86.3.1); mutually exclusive with
+        # initial_model (86.3.4).
+        prior_run: str | Path | None = None,
     ) -> None:
         if task not in TASKS:  # registry: SPEC.md 15 "more tasks"
             raise ValueError(f"unknown task {task!r} (available: {sorted(TASKS)})")
@@ -288,8 +296,26 @@ class AutoRefineEnv:
             raise ValueError(
                 f"steering must be a SteeringState or None, got "
                 f"{type(steering).__name__} (SPEC.md 59.2)")
+        # SPEC.md 86.3 (v0.72): the search prior from a finished run
+        # (None = off). Read and spec-validated at construction — fail
+        # loud, before any reset (86.3.1); mutually exclusive with
+        # initial_model (86.3.4). prior_run × pins is allowed: pins
+        # override the prior's fields (an explicit choice beats the
+        # transferred prior, 86.3.2)
+        self.prior: SearchPrior | None = None
+        self.prior_run_path: str | None = None
+        if prior_run is not None:
+            if initial_model is not None:
+                raise ValueError(
+                    "prior_run and initial_model are mutually "
+                    "exclusive: both define the baseline's starting "
+                    "point (SPEC.md 86.3.4)")
+            self.prior = read_search_prior(prior_run)  # fail-loud (86.3.1)
+            prior_spec(self.prior)  # validate the spec now (86.1.3)
+            self.prior_run_path = str(prior_run)
         if steering is not None and steering.pins:
-            base = DEFAULT_SPEC.to_dict()
+            base = (prior_spec(self.prior).to_dict() if self.prior is not None
+                    else DEFAULT_SPEC.to_dict())
             for f, v in steering.pins:
                 base[f] = v
             try:
@@ -403,7 +429,15 @@ class AutoRefineEnv:
         baseline — DEFAULT_SPEC with the steering **pins** force-set
         (biases/constraints act on candidates only, 59.2.2). No steering
         (or no pins) returns DEFAULT_SPEC exactly — the pre-v0.45 path
-        (G2)."""
+        (G2). SPEC.md 86.3.2 (v0.72): with a search prior the baseline is
+        the prior's best spec (retrained on this task), pins still
+        force-set over it; no prior = the exact legacy code path."""
+        if self.prior is not None:
+            base = prior_spec(self.prior).to_dict()
+            if self.steering is not None and self.steering.pins:
+                for f, v in self.steering.pins:
+                    base[f] = v
+            return ModelSpec.from_dict(base)
         if self.steering is not None and self.steering.pins:
             base = DEFAULT_SPEC.to_dict()
             for f, v in self.steering.pins:
@@ -507,6 +541,10 @@ class AutoRefineEnv:
             "loss_history": base_loss_history,  # SPEC.md 28.1 (C1)
             # SPEC.md 80 (v0.66): provenance — additive conditional key
             **({"from_model": True} if cp is not None else {}),
+            # SPEC.md 86.3.5 (v0.72): provenance — additive conditional
+            # key (the source run's dir name), absent on fresh runs
+            **({"from_prior_run": self.prior.source_run}
+               if self.prior is not None else {}),
         })
         self._dup_streak = 0  # SPEC.md 20.2: fresh episode, fresh streak
         self._stall_streak = 0  # SPEC.md 31.1: fresh episode, fresh patience
@@ -1067,6 +1105,11 @@ class AutoRefineEnv:
                 "family": self.initial_checkpoint.family,
                 "baseline_score": self.initial_baseline_score,
             }
+        # SPEC.md 86.3.5 (v0.72): transfer provenance — additive
+        # *conditional* key (the source run's dir name), absent on fresh
+        # runs (the pre-v0.72 key set stays intact)
+        if self.prior is not None:
+            summary["from_prior_run"] = self.prior.source_run
         self.memory.save_summary(summary)
         # SPEC.md 38.1 (v0.24, T1): the run registry — one appended entry
         # per finished run (recovery-safe, 38.1.4); the same wall seconds
