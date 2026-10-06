@@ -17,7 +17,7 @@ quantity from the already-logged candidates:
     `tests/test_app_language.py` keeps the panel strings clean);
   * 82.5  — `report --nonlinearity` (rc 0 on a real tiny run;
     mutually exclusive with ``--history``);
-  * 82.6  — the version steps to `0.72.0` in both sources (33.1) and
+  * 82.6  — the version steps to `0.73.0` in both sources (33.1) and
     the A-index advances (asserted in `tests/test_coherency_v021.py`,
     A25).
 
@@ -362,11 +362,11 @@ def test_cli_report_nonlinearity_history_exclusive(capsys):
 def test_spec_and_version():
     """A72 (SPEC.md 82.6): SPEC.md defines the A72 acceptance block,
     the M71 index row + milestone, and the version stepped to
-    `0.72.0` in both sources (33.1)."""
+    `0.73.0` in both sources (33.1)."""
     spec = SPEC.read_text(encoding="utf-8")
     assert "### 82.6 Acceptance (A72)" in spec
     assert "### 82.7 Milestone (M71)" in spec
     assert ("| M71 | v0.68   | 82     | A72 | "
             "tests/test_nonlinearity_v068.py |") in spec
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.72.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.73.0"

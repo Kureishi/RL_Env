@@ -122,6 +122,14 @@ from .reporting import (  # 63 (v0.49, B2/B3/B4) + 64.1 (v0.50, B5)
     user_guide_view,
 )
 from .uncertainty import headline_uncertainty  # 64.2 (v0.50, B6): the ± read
+from .goal import ask_command, go_budget, resolve_goal  # 87.1/87.3 (v0.73, A1/A3)
+from .vocab import plain_free  # 87.4 (v0.73, B1): the jargon guard
+from .briefing import plain_verdict, so_what  # 87.5/87.6 (v0.73, B2/B3)
+from .modelcard import (  # 87.8 (v0.73, C2)
+    model_card,
+    render_model_card,
+    render_model_card_md,
+)
 from .calibration import ece as _ece  # 61.4: the domain-view calibration metric
 from .preflight import (  # 43.1 (v0.29): the data-health preflight leaf
     _SMOKE_WALL_SECONDS,
@@ -274,6 +282,10 @@ def _steering_from_args(args: argparse.Namespace):
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
+    # SPEC.md 87.2 (v0.73, A2): the plain-language tour — the 41.3 tiny loop
+    # narrated in three beats; like --demo, the other `run` flags are ignored
+    if getattr(args, "tour", False):
+        return _cmd_tour(args)
     # SPEC.md 41.3 (v0.27, S5): the narrated demo — parity-v1, a tiny fixed
     # budget; the other `run` flags are ignored (41.3.1)
     if args.demo:
@@ -361,6 +373,143 @@ def _cmd_demo(args: argparse.Namespace) -> int:
         "baseline_score", "final_best_score", "improvement_factor",
         "experiments_run", "wall_seconds", "finished_reason")}, indent=2))
     print(f"artifacts: {env.run_dir}")
+    return 0
+
+
+def _cmd_tour(args: argparse.Namespace) -> int:
+    """SPEC.md 87.2 (v0.73, A2): `run --tour` — the tiny deterministic loop
+    (the 41.3.1 env: parity-v1, 3 experiments / 60 s / 10 s, un-gated) told
+    in three plain beats (the 87.4 vocabulary, asserted jargon-free) + the
+    one-sentence verdict (87.6). Same env / budget / determinism as the
+    demo (G2). rc 0 (41.3.3)."""
+    env = AutoRefineEnv(
+        task="parity-v1", seed=args.seed,
+        budget=Budget(3, 60.0, 10.0),  # 41.3.1: the tiny fixed budget
+        runs_dir=args.runs_dir,
+        policy="search", target=None,  # un-gated (like `run`)
+        **search_quality_v04())
+    policy = SearchPolicy(seed=args.seed)
+    state = env.reset()
+    while not env.done:
+        state, _r, _d, _i = env.step(policy.propose(state))
+    summary = env.memory.load_summary() if env.memory else {}
+    base = summary.get("baseline_score")
+    final = summary.get("final_best_score")
+    n = summary.get("experiments_run", 3)
+    base_s = (f"{float(base):.1f}"
+              if isinstance(base, (int, float)) and not isinstance(base, bool)
+              else "-")
+    final_s = (f"{float(final):.1f}"
+               if isinstance(final, (int, float)) and not isinstance(final, bool)
+               else "-")
+    # 87.2: the tour is ASCII-only (the 48.5 console rule)
+    print("AutoRefine tour - one tiny loop, told in plain words")
+    print(f"  1. Start simple: a starter model scores {base_s}.")
+    print(f"  2. Try better: {n} tries, each a small change to the recipe.")
+    print(f"  3. Pick the winner: the best try scores {final_s}.")
+    print(f"verdict : {plain_verdict(summary, None)}")
+    print(f"run dir : {env.run_dir}")
+    return 0
+
+
+def _cmd_ask(args: argparse.Namespace) -> int:
+    """SPEC.md 87.1 (v0.73, A1): `autorefine ask "..."` — a goal in the
+    user's words -> the plain plan (heard / note / plan) + the
+    copy-pasteable `fit` command. No training, no run dir. rc 0 on a
+    resolved plan; rc 1 on an unresolvable goal (a fail-loud
+    `ValueError`, 87.1.3)."""
+    try:
+        resolved = resolve_goal(args.goal, data_path=args.data)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(f"heard  : {resolved['plain_summary']}")
+    if resolved["unrecognized"]:
+        print("note   : I did not pick out a specific ask in that sentence - "
+              "the plan uses my defaults (a 95% bar, 30 experiments, "
+              "auto task)")
+    print(f"plan   : data {resolved['data'] or '<your data>'} | task "
+          f"{resolved['task']} | target {resolved['target']:g} | "
+          f"experiments {resolved['experiments']}")
+    print(f"command: {' '.join(ask_command(resolved))}")
+    return 0
+
+
+def _cmd_go(args: argparse.Namespace) -> int:
+    """SPEC.md 87.3 (v0.73, A3): `autorefine go --data PATH` — `fit` with
+    a data-sized default budget: when `--experiments` is absent, the
+    budget comes from `go_budget(train-split size)` (87.3.2). The loop
+    reuses `_fit_data` / `_drive` / `_fit_gate` verbatim (byte-identical
+    loop semantics), then prints the one-sentence plain verdict (87.6).
+    Exit codes are `fit`'s: 0 PASS / 2 MISS / 1 setup error."""
+    if args.data is None:
+        print("go requires --data (a data file or directory)", file=sys.stderr)
+        return 1
+    if getattr(args, "experiments", None) is None:
+        # 87.3.2: the budget is a deterministic step function of the
+        # train-split size — the *same* probe `fit` builds (one split,
+        # G2)
+        from .tasks import TASKS
+        data = Path(args.data)
+        try:
+            task_name = _resolve_fit_task(
+                data, getattr(args, "task", "auto") or "auto")
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        config: dict = {"path": str(data)}
+        if args.label is not None:
+            config["label"] = args.label
+        if args.split_frac != 0.2:
+            config["split_frac"] = args.split_frac
+        if getattr(args, "temporal", False):
+            config["split_mode"] = "temporal"
+        if getattr(args, "metric", "accuracy") != "accuracy":
+            config["metric"] = args.metric
+        try:
+            probe = TASKS[task_name](seed=args.seed, **config)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        args.experiments = go_budget(
+            getattr(probe, "default_dataset_size", None))
+    env, bar, metric = _fit_data(args)
+    if env is None:
+        return 1
+    _drive(args, env)
+    rc = _fit_gate(args, env, bar, metric)
+    if not getattr(args, "quiet", False):  # 47.3.2: the diagnostics block
+        _print_fit_diagnostics(env)
+    summary = env.memory.load_summary() if env.memory else {}
+    print(f"verdict : {plain_verdict(summary, bar)}")
+    return rc
+
+
+def _cmd_card(args: argparse.Namespace) -> int:
+    """SPEC.md 87.8 (v0.73, C2): `autorefine card --run DIR [--md]` — the
+    model-card one-pager from a finished run's artifacts (summary +
+    experiments.jsonl + best model, the 63.2 sources). `--md` renders the
+    Markdown form. rc 0 on a readable run; rc 1 on a missing / broken run
+    dir."""
+    run_dir = Path(args.run)
+    sp = run_dir / "summary.json"
+    if not sp.is_file():
+        print(f"no summary.json in {run_dir} (a finished run is needed)",
+              file=sys.stderr)
+        return 1
+    summary = json.loads(sp.read_text(encoding="utf-8"))
+    entries: list[dict] = []
+    exp_path = run_dir / "experiments.jsonl"
+    if exp_path.is_file():
+        for line in exp_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                entries.append(json.loads(line))
+    task, model = _user_guide_sources(summary, run_dir)
+    hl = headline_uncertainty(
+        summary.get("final_best_score"), _seed_spread_for(run_dir, summary))
+    view = model_card(summary, entries, task=task, model=model,
+                      n_examples=args.examples, headline=hl)
+    print(render_model_card_md(view) if args.md else render_model_card(view))
     return 0
 
 
@@ -2707,6 +2856,18 @@ _EP_FIT = """examples (README Quickstart):
   autorefine fit --from-run runs/<run_id>
   autorefine fit --tasks a.csv,b.csv
 """
+_EP_ASK = """examples:
+  autorefine ask "reach 96% on this churn table, quick"
+  autorefine ask "at least 90 percent on my photos" --data examples/data
+"""
+_EP_GO = """examples:
+  autorefine go --data examples/data/churn_sample.csv
+  autorefine go --data sales.csv --target 93 --experiments 20
+"""
+_EP_CARD = """examples:
+  autorefine card --run runs/<run_id>
+  autorefine card --run runs/<run_id> --md
+"""
 _EP_DASHBOARD = """examples:
   autorefine dashboard            # needs pip install autorefine[gui]
 """
@@ -2862,6 +3023,11 @@ def build_parser() -> argparse.ArgumentParser:
                        help="v0.27 (SPEC.md 41.3): the narrated demo — one tiny, "
                             "deterministic parity-v1 loop (3 experiments, 60 s "
                             "wall) printed with the full decision trace; "
+                            "--task/--experiments/etc. are ignored")
+    p_run.add_argument("--tour", action="store_true",
+                       help="v0.73 (SPEC.md 87.2): the plain-language tour — "
+                            "the same tiny parity-v1 loop told in three plain "
+                            "beats + a one-sentence verdict (no jargon); "
                             "--task/--experiments/etc. are ignored")
     p_run.add_argument("--quiet", action="store_true",
                        help="v0.33 (SPEC.md 47.3): suppress the per-experiment "
@@ -3143,6 +3309,83 @@ def build_parser() -> argparse.ArgumentParser:
                             "--constrain train_steps=200,400 (repeatable)")
     _add_config_flag(p_fit)  # 47.1.2
     p_fit.set_defaults(func=_cmd_fit)
+
+    # v0.73 (SPEC.md 87.1, A1): the plain-language goal entry
+    p_ask = sub.add_parser(
+        "ask", help="v0.73 (SPEC.md 87.1): say what you want in your own "
+                   "words — get back a plain plan + the fit command to copy "
+                   "(no training)",
+        epilog=_EP_ASK,  # 47.2.2
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p_ask.add_argument("goal",
+                       help='the goal in a sentence, e.g. "reach 96% on '
+                            'this churn table, quick"')
+    p_ask.add_argument("--data", default=None,
+                       help="optional data path to fold into the plan "
+                            "(file or directory)")
+    _add_config_flag(p_ask)  # 47.1.2
+    p_ask.set_defaults(func=_cmd_ask)
+
+    # v0.73 (SPEC.md 87.3, A3): `fit` with a data-sized default budget
+    p_go = sub.add_parser(
+        "go", help="v0.73 (SPEC.md 87.3): fit your data with a budget sized "
+                   "to the data (or --experiments to override) and a plain-"
+                   "language verdict after the gate",
+        epilog=_EP_GO,  # 47.2.2
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p_go.add_argument("--data", default=None,
+                      help="CSV file, or a directory of labelled images/audio "
+                           "(required)")
+    p_go.add_argument("--label", default=None,
+                      help="label column (default: label/target/y/class, else "
+                           "last column)")
+    p_go.add_argument("--task", default="auto",
+                      choices=("auto", "csv", "image", "audio", "text"),
+                      help="force the data task; default auto (file -> csv, "
+                           "directory -> detected)")
+    p_go.add_argument("--target", type=float, default=95.0,
+                      help="your acceptance bar on final_best_score "
+                           "(default 95.0)")
+    p_go.add_argument("--experiments", type=int, default=None,
+                      help="override the data-sized budget (default: derived "
+                           "from the train-split size — small tables need "
+                           "fewer experiments)")
+    p_go.add_argument("--seed", type=int, default=7)
+    p_go.add_argument("--policy", default="bandit",
+                      choices=("search", "bandit", "rl"),
+                      help="improver: UCB field-bandit (default), v1 search, "
+                           "or meta-RL")
+    p_go.add_argument("--runs-dir", default="runs")
+    p_go.add_argument("--quiet", action="store_true",
+                      help="suppress the per-experiment loop output and the "
+                           "per-class diagnostics (keep the gate verdict, "
+                           "the summary block, and the verdict line)")
+    # 87.3.4: the shared driver / gate / budget read these — the fit
+    # defaults, materialized once (the `go` surface keeps its own flag set)
+    p_go.set_defaults(
+        split_frac=0.2, temporal=False, metric="accuracy", rl_episodes=5,
+        search_quality="v04", ensemble_final=False, stall_patience=None,
+        screen_frac=1.0, kfold=0, from_model=None, prior_run=None,
+        gate=[], max_seconds=900.0, max_train_seconds=30.0,
+        tasks=None, dry_run=False, from_run=None)
+    _add_config_flag(p_go)  # 47.1.2
+    p_go.set_defaults(func=_cmd_go)
+
+    # v0.73 (SPEC.md 87.8, C2): the model-card one-pager
+    p_card = sub.add_parser(
+        "card", help="v0.73 (SPEC.md 87.8): print the model-card one-pager "
+                     "for a finished run (what it predicts, real examples, "
+                     "when to distrust it, how to read the number)",
+        epilog=_EP_CARD,  # 47.2.2
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p_card.add_argument("--run", required=True, help="path to a run directory")
+    p_card.add_argument("--md", action="store_true",
+                        help="render the Markdown form (wikis / PRs / Slack)")
+    p_card.add_argument("--examples", type=int, default=3,
+                        help="how many real holdout examples to show "
+                             "(default 3)")
+    _add_config_flag(p_card)  # 47.1.2
+    p_card.set_defaults(func=_cmd_card)
 
     # SPEC.md 59.3 (v0.45): manual/expert mode — train one exact spec
     p_man = sub.add_parser(

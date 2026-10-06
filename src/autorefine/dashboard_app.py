@@ -68,6 +68,24 @@ from autorefine.gate import Objective, model_size
 from autorefine.dossier import build_dossier  # 58.3 (v0.44): the run dossier
 from autorefine.runconfig import RunConfig, fit_recipe  # 50.1.5/50.2 (v0.36)
 from autorefine.narrate import narrate_baseline, narrate_run, narrate_step
+# v0.73 (SPEC.md 87): the plain-language reader surfaces (A1/B1/B2/B3/C2) —
+# the app is a thin renderer over these pure cores (23.1; one home each,
+# the 87.x.3 pattern).
+from autorefine.goal import ask_command, resolve_goal  # 87.1 (A1)
+from autorefine.vocab import plain  # 87.4 (B1): the plain-language translation
+from autorefine.briefing import so_what  # 87.5 (B2): the "So what?" card
+from autorefine.modelcard import (  # 87.8 (C2): the model-card one-pager
+    model_card,
+    render_model_card,
+    render_model_card_md,
+)
+from autorefine.reporting import (  # 87.7 (C1): the format downloads
+    build_report_doc,
+    render_report,
+    render_report_pdf,
+)
+from autorefine.audience import build_view, render_view  # 87.7 (C1)
+from autorefine.uncertainty import headline_uncertainty  # 87.8 (C2)
 # SPEC.md 65 (v0.51): the Quickstart core — one source (65.1), the app's
 # first screen (65.2) + the no-data demo action (65.4); the app is a
 # thin renderer (23.1).
@@ -1147,6 +1165,29 @@ def _render_result(res: dict) -> None:
     the live run and the restored view (SPEC.md 23.2)."""
     st.divider()
     st.subheader("Result")
+    # v0.73 (87.5, B2): the "So what?" card - the four plain lines at the top
+    # of the result view, in the reader's words (87.4). Pure over the stored
+    # artifacts (G2); a missing or unreadable run dir is a friendly caption
+    # (the 49.4.3 pattern), never a page crash.
+    try:
+        _sw_rd = Path(res["run_dir"])
+        _sw_summary = json.loads(
+            (_sw_rd / "summary.json").read_text(encoding="utf-8"))
+        _sw_entries = _load_entries(res["run_dir"])
+    except (ValueError, OSError, json.JSONDecodeError) as exc:
+        st.caption(f"summary unavailable: {exc}")
+    else:
+        # 28.2 (diag) + 64.2 (seed spread) stay with their owners in cli
+        from autorefine.cli import _report_extras, _seed_spread_for
+        _sw_diag = _report_extras(_sw_summary, _sw_rd)["diagnostics"]
+        _sw_spread = _seed_spread_for(_sw_rd, _sw_summary)
+        _sw = so_what(_sw_summary, _sw_entries, seed_spread=_sw_spread,
+                      diag=_sw_diag)
+        if _sw:
+            st.markdown(f"**So what?** \u2014 {_sw['headline']}")
+            st.caption(_sw["when_to_distrust"])
+            st.caption(_sw["where_it_fails"])
+            st.caption("next: " + _sw["next_step"])
     if res["verdict"] == "PASS":
         st.success(
             f"PASS: final **{res['final_best_score']:.2f}** ≥ target "
@@ -1170,7 +1211,13 @@ def _render_result(res: dict) -> None:
     # SPEC.md 48.4 (v0.34): the plain-English "what happened" narrative —
     # always shown here (the live narrate toggle, 48.5, is separate); pure
     # over the stored result, so the restored view renders the same block.
-    st.markdown(narrate_run(res))
+    # v0.73 (87.4, B1): the plain-language toggle (default off) translates the
+    # narration with the 87.4 table - off, the default branch renders exactly
+    # the pre-v0.73 markdown (byte-identical, and the 48.4.3 source pin holds).
+    if st.session_state.get("plain_language", False):
+        st.markdown(plain(narrate_run(res)))
+    else:
+        st.markdown(narrate_run(res))
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("baseline → final",
               f"{res['baseline_score']:.2f}",
@@ -1219,7 +1266,11 @@ def _render_result(res: dict) -> None:
     st.caption("Next steps")
     for _ns in next_steps("PASS" if res["verdict"] == "PASS" else "MISS",
                           res.get("finished_reason")):
-        st.caption(f"- {_ns}")
+        # v0.73 (87.4, B1): the same plain-language pipe as the narration
+        _ns_line = _ns
+        if st.session_state.get("plain_language", False):
+            _ns_line = plain(_ns_line)
+        st.caption(f"- {_ns_line}")
 
     # 69.1 (v0.55, A59): the result view grouped into six sub-tabs — the
     # same sections in the same order as the pre-v0.55 scroll, each behind
@@ -1317,6 +1368,124 @@ def _render_result(res: dict) -> None:
             f"{', '.join(SPEC_FIELD_NAMES)}"
         )
 
+        # v0.73 (87.9, C3): the "Hand off" grouping — the plain-English
+        # recipe sentence, the audience share, the format downloads, and the
+        # model card: the "send this to a colleague" block next to the
+        # copy-paste recipe above (the 50.2 bridge). The app writes nothing
+        # into the runs tree (23.1): the PDF lands in a tempfile that is read
+        # and removed; every pre-existing `key=` below stays untouched.
+        _ho_rd = Path(res["run_dir"])
+        _ho_summary = {}
+        _sjson = _ho_rd / "summary.json"
+        if _sjson.is_file():
+            try:
+                _ho_summary = json.loads(_sjson.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                _ho_summary = {}
+        _ho_entries: list = []
+        _ejl = _ho_rd / "experiments.jsonl"
+        if _ejl.is_file():
+            try:
+                _ho_entries = [json.loads(l) for l in
+                               _ejl.read_text(encoding="utf-8").splitlines()
+                               if l.strip()]
+            except (OSError, json.JSONDecodeError):
+                _ho_entries = []
+        # 28.2 (diag) + 64.2 (spread) + 63.2 (sources) stay with their owners
+        from autorefine.cli import (  # noqa: E402
+            _report_extras, _seed_spread_for, _user_guide_sources)
+        _ho_spread = _seed_spread_for(_ho_rd, _ho_summary)
+        _ho_diag = _report_extras(_ho_summary, _ho_rd)["diagnostics"]
+
+        # C3 (87.9): the plain-English recipe sentence (87.4 words only)
+        _ho_target = _ho_summary.get("target")
+        if isinstance(_ho_target, bool) or not isinstance(
+                _ho_target, (int, float)):
+            _ho_recipe = ("In plain words: start with a starter model on "
+                          "your data, try small changes, and keep the best "
+                          "one.")
+        else:
+            _ho_runs = _ho_summary.get("experiments_run")
+            _ho_recipe = (
+                "In plain words: start with a starter model on your data, "
+                "try small changes and keep the best one, and check it "
+                f"against a {float(_ho_target):g}% bar"
+                + (f" — {int(_ho_runs)} tries were made"
+                   if isinstance(_ho_runs, int) else "") + ".")
+        st.caption(_ho_recipe)
+
+        # C1 (87.7): "Share as…" — the audience view rendered as text
+        _share_as = st.selectbox(
+            "Share as…", ["(none)", "exec", "domain", "technical",
+                          "regulator"], index=0, key="share_as")
+        if _share_as != "(none)":
+            try:
+                _sv = build_view(_share_as, _ho_summary, _ho_entries,
+                                 diag=_ho_diag, seed_spread=_ho_spread)
+                st.code(render_view(_sv, _share_as), language="text")
+            except (ValueError, KeyError, TypeError) as exc:
+                st.caption(f"share view unavailable: {exc}")
+
+        # C1 (87.7): the format downloads — Markdown / text / PDF of the same
+        # report doc (63.1); the PDF builds into a tempfile, is read and
+        # removed, and a missing optional dependency is a caption, not a crash
+        try:
+            _ho_doc = build_report_doc(_ho_summary, _ho_entries)
+        except (ValueError, OSError) as exc:
+            st.caption(f"report unavailable: {exc}")
+        else:
+            st.download_button(
+                "Download report (Markdown)",
+                data=render_report("md", _ho_doc),
+                file_name=f"{_ho_rd.name}-report.md", mime="text/markdown",
+                key="dl_report_md")
+            st.download_button(
+                "Download report (text)",
+                data=render_report("txt", _ho_doc),
+                file_name=f"{_ho_rd.name}-report.txt", mime="text/plain",
+                key="dl_report_txt")
+            _ho_pdf_path: str | None = None
+            try:
+                _ho_tmp = tempfile.NamedTemporaryFile(
+                    suffix=".pdf", delete=False)
+                _ho_tmp.close()
+                _ho_pdf_path = _ho_tmp.name
+                render_report_pdf(_ho_doc, _ho_pdf_path)
+                with open(_ho_pdf_path, "rb") as _fp:
+                    _ho_pdf_bytes = _fp.read()
+            except (ImportError, OSError, ValueError) as exc:
+                st.caption(f"PDF report unavailable: {exc}")
+            else:
+                st.download_button(
+                    "Download report (PDF)",
+                    data=_ho_pdf_bytes,
+                    file_name=f"{_ho_rd.name}-report.pdf",
+                    mime="application/pdf", key="dl_report_pdf")
+            finally:
+                if _ho_pdf_path is not None:
+                    try:
+                        os.unlink(_ho_pdf_path)
+                    except OSError:
+                        pass
+
+        # C2 (87.8): the model card — the one-pager for the person who will
+        # use the model (the 63.2 + 87.6 one home, 87.8.3)
+        _mc_task, _mc_model = _user_guide_sources(_ho_summary, _ho_rd)
+        _mc_headline = headline_uncertainty(
+            _ho_summary.get("final_best_score"), _ho_spread)
+        _mc_view = model_card(_ho_summary, _ho_entries, task=_mc_task,
+                              model=_mc_model, headline=_mc_headline)
+        st.download_button(
+            "Download model card",
+            data=render_model_card(_mc_view),
+            file_name=f"{_ho_rd.name}-model-card.txt", mime="text/plain",
+            key="dl_modelcard")
+        st.download_button(
+            "Download model card (Markdown)",
+            data=render_model_card_md(_mc_view),
+            file_name=f"{_ho_rd.name}-model-card.md", mime="text/markdown",
+            key="dl_modelcard_md")
+
         st.subheader("Artifacts")
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.download_button("report.html", res["report_html"], mime="text/html",
@@ -1363,6 +1532,23 @@ def _render_result(res: dict) -> None:
                             lambda: svg_score_curve(_load_entries(res["run_dir"]),
                                                     **pal)))
         _svg_block("Pareto frontier", res["svg_pareto"])
+
+        # v0.73 (87.10, D1): the run's data — every logged candidate in one
+        # table next to the score curve (the "what was actually tried" read).
+        # A missing experiments.jsonl is a friendly caption (49.4.3), and the
+        # entries carry no experiment index, so the row number is derived.
+        with st.expander("View data", expanded=False):
+            try:
+                _vd_rows = _load_entries(res["run_dir"])
+            except (ValueError, OSError) as exc:
+                st.caption(f"data unavailable: {exc}")
+            else:
+                st.dataframe([
+                    {"row": i, "kind": e.get("kind"),
+                     "score": e.get("holdout_score"),
+                     "gen_gap": e.get("gen_gap"),
+                     "accepted": e.get("accepted")}
+                    for i, e in enumerate(_vd_rows)], width="stretch")
 
         # decision views, final state (SPEC.md 26.5) — pure over the stored
         # update stream, so the restored view re-renders them with no new state
@@ -2266,6 +2452,35 @@ def main() -> None:
     # applied when the selection CHANGES (48.3.3): it fills the knobs it
     # defines — including the Advanced ones — and a later re-selection of
     # the same preset does not clobber the user's manual edits.
+    # v0.73 (87.1, A1): the plain-language goal entry — optional, default
+    # empty (an empty box renders nothing new; the 87.11 rule). Typing a
+    # goal shows the plain plan + the copy-paste command; "Apply this
+    # plan" fills the target + budget knobs (only when the user applies).
+    _goal_text = side.text_input(
+        "What do you want? (optional)", value="", key="goal_text",
+        help='Say it in your own words, e.g. "reach 96% on this churn '
+             'table, quick" — I will turn it into a plan (a score bar and '
+             'a budget) that you can apply.')
+    if _goal_text.strip():
+        try:
+            _goal = resolve_goal(
+                _goal_text,
+                data_path=(st.session_state.get("csv_path") or None))
+        except ValueError as exc:
+            side.warning(f"I could not read that goal: {exc}")
+        else:
+            side.caption(_goal["plain_summary"])
+            if _goal["unrecognized"]:
+                side.caption("I did not pick out a specific ask in that "
+                             "sentence — the plan uses my defaults (a 95% "
+                             "bar, 30 experiments).")
+            st.code(" ".join(ask_command(_goal)))
+            if side.button("Apply this plan", key="apply_goal"):
+                st.session_state["target"] = float(_goal["target"])
+                st.session_state["experiments"] = int(_goal["experiments"])
+                side.caption("Applied — the target and budget knobs now "
+                             "carry the plan's values.")
+
     preset_pairs = preset_choices()  # 48.3.2: stable (name, label) order
     preset_labels = ["(none)"] + [lab for _name, lab in preset_pairs]
     label_to_name = {lab: name for name, lab in preset_pairs}
@@ -2423,6 +2638,16 @@ def main() -> None:
                             help="A friendly line per experiment instead of the "
                                  "terse caption.")
 
+    # v0.73 (87.4, B1): the plain-language toggle — default off, so the
+    # default render stays byte-identical (87.11; the 48.5 precedent). When
+    # on, the result narration + the "Next steps" lines are translated to
+    # the reader's words (one home, 87.4.3).
+    side.checkbox(
+        "Plain language", value=False, key="plain_language",
+        help="Translate the loop's words to yours: 'starter model' instead "
+             "of 'baseline', 'tries' instead of 'candidates', 'small "
+             "change' instead of 'mutation', and so on. Off by default.")
+
     live_mode = side.checkbox("Live dashboard (tick mode)", value=False,
                               key="live_mode",
                               help="Tick the page as experiments land instead "
@@ -2489,8 +2714,11 @@ def main() -> None:
                 "token; the `okabe`/`dark` overrides are applied by the "
                 "active theme.")
             _tok = resolve_tokens()
+            # display-only: string every value so the Arrow conversion is
+            # clean (palette tokens are lists/tuples, not cell scalars)
             st.dataframe(
-                [{"token": k, "value": v} for k, v in _tok.items()],
+                [{"token": k, "value": v if isinstance(v, str) else str(v)}
+                 for k, v in _tok.items()],
                 width="stretch")
         # SPEC.md 59.2 (v0.45): the human-in-the-loop steering verbs —
         # pin (freeze a field), bias (redirect a mutation), constrain

@@ -208,11 +208,32 @@ from .transfer import (  # SPEC.md 86 (v0.72): transfer to similar tasks
     SearchPrior,
     read_search_prior,
 )
+from .goal import (  # SPEC.md 87.1 (v0.73, A1): the plain-language goal entry
+    ask_command,
+    go_budget,
+    resolve_goal,
+)
+from .vocab import (  # SPEC.md 87.4 (v0.73, B1): the plain-language table
+    PLAIN,
+    plain,
+    plain_free,
+)
+from .briefing import (  # SPEC.md 87.5/87.6 (v0.73, B2/B3): the "So what?" card
+    confidence_tier,
+    plain_verdict,
+    so_what,
+    when_to_distrust,
+)
+from .modelcard import (  # SPEC.md 87.8 (v0.73, C2): the model-card one-pager
+    model_card,
+    render_model_card,
+    render_model_card_md,
+)
 
 # SPEC.md 33.1 (C1): single version source — must equal pyproject.toml's
 # [project].version (enforced by the A23 test); one step per feature round
-# (v0.72 ⇒ 0.72.0, M75, SPEC.md 86)
-__version__ = "0.72.0"
+# (v0.73 ⇒ 0.73.0, M76, SPEC.md 87)
+__version__ = "0.73.0"
 
 __all__ = [
     "AutoRefineEnv",
@@ -354,5 +375,10 @@ __all__ = [
     "svg_is_well_formed",
     # v0.57: the visual-card interface (SPEC.md 71, A61)
     "visual_card", "VISUAL_CSS",
+    # v0.73: the broader-demographic reader surfaces (SPEC.md 87, A77)
+    "resolve_goal", "ask_command", "go_budget",
+    "PLAIN", "plain", "plain_free",
+    "so_what", "confidence_tier", "when_to_distrust", "plain_verdict",
+    "model_card", "render_model_card", "render_model_card_md",
     "__version__",
 ]

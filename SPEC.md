@@ -93,6 +93,7 @@ numbers and carry none.)
 | M73 | v0.70   | 84     | A74 | tests/test_sequential_v070.py |
 | M74 | v0.71   | 85     | A75 | tests/test_simloop_v071.py |
 | M75 | v0.72   | 86     | A76 | tests/test_transfer_v072.py |
+| M76 | v0.73   | 87     | A77 | tests/test_reach_v073.py |
 
 ---
 
@@ -7550,3 +7551,98 @@ All in `tests/test_transfer_v072.py`.
 ### 86.7 Milestone (M75)
 
 **M75** — v0.72 "Transfer to similar tasks": the environment adapts to a similar task by **carrying its search knowledge across runs** — the search prior (86.1) reads a finished run's best spec and per-field credit, the bandit starts informed instead of cold (86.2), and the new run's baseline is the source run's best architecture retrained on the new data (86.3); the CLI, the dashboard runner, the app, and the canonical recipe all expose the one `--prior-run` knob of intent (86.4/86.5); pure additions, deterministic output (G2), no new dependency (the stdlib + numpy rule); the A-index advances to A76/M75 with `tests/test_transfer_v072.py` (86.6).
+
+## 87. Broader reach — zero-jargon in, plain understanding out, results in the reader's format (v0.73)
+
+A first-time user still has to *speak the tool's language* to use it: know the flag vocabulary, read the technical verdict, and take the result away in a format the tool happens to emit. §87 closes the three remaining gaps for a broader demographic, in order: **A. get in with zero jargon** (87.1–87.3), **B. understand without an ML background** (87.4–87.6), **C. take results away in the reader's format** (87.7–87.9), and the **D1 accessibility remainder** (87.10). Every piece is a thin surface over machinery that already exists (the 40.1 plan resolver, the 41.3 demo loop, the 62 audience views, the 63.1 format breadth, the 63.2 user guide, the 64.2/66.1 uncertainty reads) — no new training semantics, no new dependency (the stdlib + numpy rule), defaults unchanged (the legacy pins and the app's default render stay green, G2), and every new behavior is opt-in or a new surface (the screening precedent).
+
+### 87.1 `goal.py` — plain-language goal entry (A1)
+
+`autorefine ask "..."` (and the app's "What do you want?" box) accepts a goal in the user's own words and resolves it to the recipe `fit` already understands.
+
+1. **87.1.1** — `resolve_goal(text, data_path=None)` is a pure, deterministic resolver (G2) returning `{data, task, target, experiments, plain_summary, unrecognized}`. Absent details keep the CLI's own defaults (target 95, task `auto`, 30 experiments), so a bare goal is a valid plan.
+2. **87.1.2** — the reads, all word-boundary and case-insensitive: the first `N%` / "at least N percent" is the target (out-of-range `<= 0` / `> 100` is a fail-loud `ValueError`); the first modality keyword (churn/classify/rows → `csv`, image/picture/photo → `image`, audio/sound/speech → `audio`, text/sentiment/review → `text`) is the task; `quick`/`fast` → 8 experiments, `thorough`/`exhaustive` → 60.
+3. **87.1.3** — `plain_summary` is one ASCII sentence that reads the goal back in the reader's words (87.4 vocabulary); `unrecognized` is `[text]` when no trigger word matched (defaults only) else `[]`.
+4. **87.1.4** — `ask_command(resolved)` is the copy-pasteable `autorefine fit …` (the 37.1.4 recipe pattern): `--data` (or the `<your data>` placeholder), `--task` only when named, `--target` always, `--experiments` only when not the default. `autorefine ask "..." [--data PATH]` prints heard / plan / command, rc 0; rc 1 on a `ValueError`. The app's Setup sidebar carries the same resolver in a "What do you want?" box whose apply button fills the `target` / `experiments` knobs (opt-in; default empty renders nothing new).
+
+### 87.2 `run --tour` — the 60-second guided tour (A2)
+
+`run --tour` runs the 41.3 tiny loop (parity-v1, 3 experiments / 60 s / 10 s, un-gated — the demo's exact budget and determinism) and prints the loop narrated in **three plain beats** — *start simple / try better / pick the winner* — plus the 87.3.3 plain verdict. ASCII-only, jargon-free (asserted against the 87.4 table), a normal run dir and artifacts (a tour is a run), rc 0. The other `run` flags are ignored, like `--demo` (41.3.1).
+
+### 87.3 `autorefine go` — one command from data to verdict (A3)
+
+`autorefine go --data PATH` is `fit` with the beginner's defaults decided *by the data*, so a new user types one command:
+
+1. **87.3.1** — task resolution, the label, and the gate are `fit`'s own (86.3 reuse — `_fit_data` + `_drive` + `_fit_gate`, byte-identical loop semantics); `go` adds no knobs of its own.
+2. **87.3.2** — the default budget comes from the data: `go_budget(size)` = 15 (< 100 rows), 30 (< 1000), 40 (else), 30 (unknown size). An explicit `--experiments` wins (the `fit` rule).
+3. **87.3.3** — after the gate line, `go` prints `briefing.plain_verdict(summary, bar)`: one sentence in plain words ("You asked for 95. We got 96.2 — that beats the bar, and the model is ready to use."). The exit code is `fit`'s (0 PASS / 2 MISS / 1 error) — the verdict is commentary, not a new gate.
+
+### 87.4 `vocab.py` — the plain-language translation layer (B1)
+
+One home for "say it the reader's way":
+
+1. **87.4.1** — `PLAIN`: the ordered jargon → plain table (`baseline` → starter model, `candidate(s)` → try/tries, `mutation(s)` → small change(s), `hyperparameter(s)` → knob(s), `overfit(ting)` → memorizing the training data, `holdout` → held-out, `UCB` → exploration score, `bandit` → knob picker, `Pareto` → best trade-off, `gen_gap` → train-vs-test gap, `gradient` → learning step, `epoch(s)` → pass(es) over the data, `feature(s)` → input column(s), `converge*` → settle*, `spec` → model recipe, `gate` → acceptance bar, `frontier` → best trade-offs found).
+2. **87.4.2** — `plain(text)` applies the keys **longest-first** with word boundaries, case-insensitively (a capitalized match keeps a capitalized replacement); it is **idempotent** — the table's replacements contain no keys (an A77 invariant, not an assumption). Non-strings pass through.
+3. **87.4.3** — one home: the tour (87.2), the `go` verdict (87.3.3), the briefing (87.5/87.6), and the app all read the same table. The app's Setup sidebar gains a "Plain language" toggle (default **off** — the default render is byte-identical): when on, the result narration and the "Next steps" lines render through `plain()`.
+4. **87.4.4** — `plain_free(text)` answers "does this carry any table key"; the tour / verdict / briefing reader-facing strings are asserted jargon-free (A77.2/A77.3/A77.5). The table and its replacements are ASCII-safe (48.5) and carry no SPEC / version tokens (the app-language scan applies to rendered strings).
+
+### 87.5 `briefing.py` — the "So what?" card (B2)
+
+`so_what(summary, entries, seed_spread, diag)` builds the four plain lines a non-technical reader needs, from data already logged (zero new capture):
+
+1. **87.5.1** — `headline` / `met` / `margin`: "We hit your bar." / "We missed your bar by X." / "Final score X (no bar was set)." The target resolves through the 66.1.1 `summary_target` home (a run's canonical `run_config.target` counts); `None` when the summary has no finite final score.
+2. **87.5.2** — `where_it_fails`: the weakest holdout class from a 28.2 `diag` ("weakest: class X — 54% correct"), else the honest "no per-class data was logged for this run" — the holdout pass stays with its 28.2 owner (the briefing re-derives nothing).
+3. **87.5.3** — `next_step`: the plain next move (met → put it to work; missed → bigger budget or lower bar; no bar → set a target). The app renders the card at the **top of the Results panel** (above the verdict block, additive like the 69.4.3 "Next steps" block), pure over the stored result so the restored view renders it too.
+
+### 87.6 The confidence chip (B3)
+
+Every headline number earns a trust read in the reader's words:
+
+1. **87.6.1** — `confidence_tier(target, best, seed_spread)` re-skins the 66.1 robustness status: `robust_*` → **high**, `marginal_*` → **medium**, `unassessable` (one seed / no target) → **low**, `None` when there is no final score.
+2. **87.6.2** — `when_to_distrust(tier)` is the one-line caution (high → the remaining risk is new unseen data; medium → a different seed could flip it; low → one seed was run). The card (87.5) and the model card (87.8) carry the same chip, so no surface says a number without saying how sure it is (the 64.2 rule, re-skinned).
+
+### 87.7 The app's audience-preset export (C1)
+
+The Export tab gains a **"Share as…"** surface over the *existing* 62 audience machinery and the 63.1 format breadth — wiring, not new views:
+
+1. **87.7.1** — a "Share as…" select (default **"(none)"** — the default render is unchanged) offers the 62.1 `AUDIENCES` (exec / domain / technical / regulator). A selection renders `build_view` + `render_view` of the run (summary / entries / the 28.2 `diag` / the 64.2.2 seed spread, the 62.6 call shape) with a download button for the same text.
+2. **87.7.2** — one-click **format breadth**: `report.md`, `report.txt` (the 63.1 `build_report_doc` + `render_report` renderers, in memory — the app writes nothing into the runs tree, 49.2.1) and `report.pdf` (the 63.1 `render_report_pdf` renderer into a temp file, streamed as a download) — the "send it in the reader's format" case without the CLI.
+
+### 87.8 `modelcard.py` — the model card one-pager (C2)
+
+1. **87.8.1** — `model_card(summary, entries, task=None, model=None, n_examples=3, headline=None)` assembles the end-user's page on the 63.2 `user_guide_view` (what it predicts · the first 3 real input → output holdout rows · when to distrust · known limits · how to read the number) + the 87.6 `trust` chip + the 87.5 `verdict` line. One holder, no second holdout pass (the 28.2 protocol stays with its owner); episode / synthetic tasks degrade to the 63.2 note (never invented rows).
+2. **87.8.2** — `render_model_card(view)` (text one-pager) and `render_model_card_md(view)` (Markdown, the 63.1 sibling) are pure and byte-identical on re-render (G2).
+3. **87.8.3** — surfaces: `autorefine card --run DIR [--md]` prints the card (rc 1 on a broken run dir — the 47.4.4 contract), reusing the 63.2 task/model reconstruction; the app's Export tab carries a **"Download model card"** button (text or Markdown via the same renderers).
+
+### 87.9 The app's "Hand off" panel (C3)
+
+The Export tab groups the take-it-away actions in one place (all additive, new keys, default render otherwise unchanged):
+
+1. **87.9.1** — a plain-English recipe sentence ("To run this again: …") over the stored `fit` recipe (37.1.4), piped through 87.4 when the plain-language toggle is on;
+2. **87.9.2** — the one-click trio: **Build share bundle** (the 50.2.3 button, now referenced in the group), **Download model card** (87.8.3), and **Download run_config.json** (the 50.2.2 button) — the GUI-for-exploration → CLI-for-CI bridge (50.2) with the reader's formats (87.7) beside it.
+
+### 87.10 D1 — the accessibility remainder
+
+The 51.4 polish already delivered the colorblind-safe palettes, the dark-mode sets, the `role="img"` + `aria-label` on every SVG root, and the `<title>` tooltips. The remaining gap for a keyboard / screen-reader reader is the **hover-only data**: a chart's numbers live in the SVG, not in the DOM.
+
+1. **87.10.1** — a **"View data" companion** next to the Results score curve: an expander (default closed) whose `st.dataframe` lists the chart's rows (experiment, kind, score, accepted) — the table equivalent of the hover tooltips, keyboard-reachable with zero extra capture.
+2. **87.10.2** — the existing `cb_palette` / dark toggle wiring is re-verified (51.4.4) rather than rebuilt; no new palette machinery.
+
+### 87.11 Acceptance (A77)
+
+1. **The goal resolver (87.1)**: `resolve_goal` parses the target ("96%", "at least 90 percent"), the task hint (churn → `csv`, image, audio, text), and the budget hint (quick → 8, thorough → 60); an empty goal and an out-of-range target are fail-loud `ValueError`s; the no-trigger case resolves to defaults with the text in `unrecognized`; `plain_summary` is deterministic and jargon-free; `ask_command` emits the documented flags (defaults omitted); `autorefine ask` prints heard / plan / command with rc 0 (rc 1 on failure).
+2. **The tour (87.2)**: `run --tour` runs the 41.3 tiny loop to a normal run dir, prints the three plain beats + the plain verdict, all ASCII and jargon-free (against the 87.4 table), deterministic per seed.
+3. **`go` (87.3)**: `go_budget` is the documented step function; `autorefine go --data CSV` on a real table resolves the task, runs the gated loop, and prints the 87.3.3 plain verdict (beat / just-short forms), with `fit`'s exit code; a bad data path is rc 1.
+4. **The vocabulary (87.4)**: `plain()` is deterministic, longest-first, idempotent, and case-preserving; `plain_free` flags any table key; the table and its replacements carry no SPEC / version tokens; the app-language scan stays green with the new app strings; the app's "Plain language" toggle exists (default off) and pipes the narration through `plain()` when on.
+5. **The briefing (87.5/87.6)**: `so_what` returns the headline / met / margin / confidence / where-it-fails / next-step block (and `None` without a final score); `confidence_tier` maps robust → high, marginal → medium, unassessable → low, `None` → `None`; the `when_to_distrust` lines are the documented words; `plain_verdict` prints the beat / just-short / no-bar sentences; the reader-facing templates are jargon-free (87.4.4).
+6. **The audience export (87.7)**: the app's "Share as…" select defaults to "(none)"; selecting an audience renders the 62 `build_view` text (exec / domain / technical / regulator) with a download; the md / txt / pdf buttons produce non-empty content (the pdf begins `%PDF`).
+7. **The model card (87.8)**: `model_card` carries what-it-predicts + up to 3 real examples + the 87.6 trust chip + the 87.5 verdict + how-to-read; the text and Markdown renderers are byte-identical on re-render; `autorefine card --run DIR` prints the card (rc 1 on a broken dir); the app's Export tab carries the download button.
+8. **The hand-off (87.9)**: the app's Export tab groups the plain-English recipe sentence, the model-card download, the share bundle, and the run_config download (new keys; existing keys untouched).
+9. **D1 (87.10)**: the "View data" companion expander renders the score-curve rows as a dataframe; the `cb_palette` wiring is unchanged (51.4.4).
+10. **Language / version / index**: the app-language scan stays green (no SPEC / version tokens in app strings); the version steps to `0.73.0` in both sources (33.1); the A-index advances (`defined == set(range(1, 78))`, 73 acceptance rows, M76 resolving to `tests/test_reach_v073.py`).
+
+All in `tests/test_reach_v073.py`.
+
+### 87.12 Milestone (M76)
+
+**M76** — v0.73 "Broader reach": the environment meets a broader demographic at the door — a goal in the user's own words resolves to a real recipe (`ask`, 87.1), a 60-second tour narrates the loop in three plain beats (`run --tour`, 87.2), one command takes data to a plain verdict (`go`, 87.3); the reader understands without an ML background — one jargon table every surface shares (87.4), the "So what?" card (87.5), and the trust chip on every headline number (87.6); and the results travel in the reader's format — the audience views and md/txt/pdf land in the app (87.7), the model card one-pager joins the CLI and the app (87.8), the "Hand off" panel groups the one-click takeaways (87.9), and the score curve earns a keyboard-reachable data table (87.10); all thin surfaces over existing machinery (62/63.1/63.2/64.2/66.1), pure and deterministic (G2), no new dependency, defaults unchanged (the A-pins and the app's default render stay green); the A-index advances to A77/M76 with `tests/test_reach_v073.py` (87.11).

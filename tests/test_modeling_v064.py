@@ -310,13 +310,13 @@ def test_legacy_spec_json_still_loads():
 # --- 33.1 version + SPEC index (A68) ------------------------------------------
 
 def test_version_and_spec_cite_a68():
-    """A68 (33.1): the version steps to `0.72.0` in both sources; SPEC §78
+    """A68 (33.1): the version steps to `0.73.0` in both sources; SPEC §78
     cites A68; the A25 index row for M67 points at this file."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.72.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.73.0"
     init = (REPO / "src" / "autorefine" / "__init__.py").read_text(
         encoding="utf-8")
-    assert '"0.72.0"' in init
+    assert '"0.73.0"' in init
     spec = SPEC.read_text(encoding="utf-8")
     assert "## 78. Modeling capability v0.64" in spec
     assert "Acceptance (A68)" in spec
