@@ -192,12 +192,12 @@ def test_app_test_settled_frame_is_all_green_with_verdict():
 # --- 33.1 / A25 the round bookkeeping (A67) ----------------------------------
 
 def test_version_and_spec_round():
-    """A67 (77.5 / 33.1 / A25): the version steps to `0.73.0` in both
+    """A67 (77.5 / 33.1 / A25): the version steps to `0.74.0` in both
     sources; SPEC §77 cites A67; the acceptance index row M66 points at
     this test file."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.73.0"
-    assert '"0.73.0"' in INIT.read_text(encoding="utf-8")
+    assert py["project"]["version"] == autorefine.__version__ == "0.74.0"
+    assert '"0.74.0"' in INIT.read_text(encoding="utf-8")
     spec = SPEC.read_text(encoding="utf-8")
     assert "## 77. Workflow-strip settle" in spec
     assert "### 77.5 Acceptance (A67)" in spec

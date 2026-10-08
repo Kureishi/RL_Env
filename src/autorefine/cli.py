@@ -122,9 +122,19 @@ from .reporting import (  # 63 (v0.49, B2/B3/B4) + 64.1 (v0.50, B5)
     user_guide_view,
 )
 from .uncertainty import headline_uncertainty  # 64.2 (v0.50, B6): the ± read
-from .goal import ask_command, go_budget, resolve_goal  # 87.1/87.3 (v0.73, A1/A3)
+from .goal import (  # 87.1/87.3 (v0.73, A1/A3) + 88.2-88.5 (v0.74, A2/B4/B5)
+    ask_command,
+    auto_target,
+    experiments_for_time,
+    extract_data_path,
+    fair_bar_line,
+    go_budget,
+    measured_per_exp,
+    resolve_goal,
+)
 from .vocab import plain_free  # 87.4 (v0.73, B1): the jargon guard
-from .briefing import plain_verdict, so_what  # 87.5/87.6 (v0.73, B2/B3)
+from .briefing import plain_verdict, so_what, why_this_model  # 87.5-87.6 (v0.73) + 88.9 (v0.74, D9)
+from .discover import label_column, pick_data  # 88.1 (v0.74, A1): the path-less go
 from .modelcard import (  # 87.8 (v0.73, C2)
     model_card,
     render_model_card,
@@ -424,6 +434,11 @@ def _cmd_ask(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 1
     print(f"heard  : {resolved['plain_summary']}")
+    if resolved["data"] and not Path(resolved["data"]).exists():
+        # 88.2.3 (v0.74, A2): the sentence carried a path that is not here
+        # yet — the command stays a valid plan (rc 0)
+        print("note   : I did not find that path on this machine yet - the "
+              "command is ready for when it is")
     if resolved["unrecognized"]:
         print("note   : I did not pick out a specific ask in that sentence - "
               "the plan uses my defaults (a 95% bar, 30 experiments, "
@@ -435,44 +450,361 @@ def _cmd_ask(args: argparse.Namespace) -> int:
     return 0
 
 
+def _go_probe(args: argparse.Namespace, data: Path, task_name: str):
+    """SPEC.md 88.4 (v0.74, B4): the deterministic probe `fit` builds for
+    the data — the *same* config `_fit_data` passes to the task
+    constructor (one split, G2). ``None`` on a bad path/task (the caller
+    degrades to a `note :` line; the fit path reports the error itself).
+    """
+    from .tasks import TASKS
+    config: dict = {"path": str(data)}
+    if args.label is not None:
+        config["label"] = args.label
+    if args.split_frac != 0.2:
+        config["split_frac"] = args.split_frac
+    if getattr(args, "temporal", False):
+        config["split_mode"] = "temporal"
+    if getattr(args, "metric", "accuracy") != "accuracy":
+        config["metric"] = args.metric
+    try:
+        return TASKS[task_name](seed=args.seed, **config)
+    except (ValueError, OSError) as exc:
+        print(str(exc), file=sys.stderr)
+        return None
+
+
+def _latest_prior_run(runs_dir: str, task_name: str):
+    """SPEC.md 88.6 (v0.74, C6): the most recent registry entry of the
+    same task -> ``(run_dir, final_score | None)``; ``None`` when there
+    is no such entry (or no readable registry). Newest by ``(timestamp,
+    run_id)`` — the 88.3 tie-break (G2)."""
+    try:
+        entries = load_registry(runs_dir)
+    except Exception:  # a vanished / unreadable registry is "no prior"
+        return None
+    same = [e for e in entries
+            if isinstance(e, dict) and e.get("task") == task_name
+            and e.get("run_id")]
+    if not same:
+        return None
+    best = max(same, key=lambda e: (str(e.get("timestamp") or ""),
+                                   str(e.get("run_id") or "")))
+    score = best.get("final_score")
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        score = None
+    return (str(Path(runs_dir) / str(best["run_id"])),
+            None if score is None else float(score))
+
+
+def _go_why(env: AutoRefineEnv, summary: dict) -> str:
+    """SPEC.md 88.9 (v0.74, D9): the `why :` line — the starter spec vs
+    the winning spec through `why_this_model` (the run's artifacts: the
+    baseline entry, `best_spec.json` with the max-holdout entry as the
+    fallback, and the summary's scores)."""
+    entries = env.memory.load_experiments() if env.memory else []
+    baseline_spec = next((e.get("spec") for e in entries
+                          if e.get("kind") == KIND_BASELINE), None)  # 35.1 (C4)
+    best_spec = None
+    bp = Path(env.run_dir) / "best_spec.json"
+    if bp.is_file():
+        try:
+            best_spec = json.loads(bp.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            best_spec = None
+    if best_spec is None:
+        scored = [e for e in entries
+                  if isinstance(e.get("holdout_score"), (int, float))]
+        if scored:
+            best_spec = max(scored, key=lambda e: e["holdout_score"]).get("spec")
+    return why_this_model(baseline_spec, best_spec,
+                          summary.get("baseline_score"),
+                          summary.get("final_best_score"))
+
+
+def _go_handoff(env: AutoRefineEnv, args: argparse.Namespace) -> None:
+    """SPEC.md 88.7 (v0.74, C7): one command leaves the whole hand-off —
+    `report.md` / `report.txt` (63.1 renderers over the 62 doc),
+    `model_card.txt` / `model_card.md` (87.8), `report.pdf` when
+    reportlab is present (63.1.3), and the deterministic share bundle
+    (47.4) — each writer degrades to a `note :` line, never an error
+    (88.7). Pure over the run's artifacts; the zip is byte-identical for
+    a byte-identical run dir (G2)."""
+    run_dir = Path(env.run_dir)
+    summary = env.memory.load_summary() if env.memory else {}
+    entries = env.memory.load_experiments() if env.memory else []
+    written: list[str] = []
+    doc = build_report_doc(summary, entries)
+    for name, fmt in (("report.md", "md"), ("report.txt", "txt")):
+        try:
+            (run_dir / name).write_text(render_report(fmt, doc),
+                                        encoding="utf-8")
+            written.append(name)
+        except Exception as exc:
+            print(f"note : {name} skipped ({exc})")
+    try:
+        task_name, model_name = _user_guide_sources(summary, run_dir)
+        hl = headline_uncertainty(
+            summary.get("final_best_score"), _seed_spread_for(run_dir, summary))
+        view = model_card(summary, entries, task=task_name, model=model_name,
+                          n_examples=3, headline=hl)
+        (run_dir / "model_card.txt").write_text(render_model_card(view),
+                                                encoding="utf-8")
+        written.append("model_card.txt")
+        (run_dir / "model_card.md").write_text(render_model_card_md(view),
+                                               encoding="utf-8")
+        written.append("model_card.md")
+    except Exception as exc:
+        print(f"note : model card skipped ({exc})")
+    try:
+        render_report_pdf(doc, run_dir / "report.pdf")
+        written.append("report.pdf")
+    except ImportError:  # reportlab is optional (SPEC.md 3)
+        print("note : report.pdf skipped (reportlab not installed)")
+    except Exception as exc:
+        print(f"note : report.pdf skipped ({exc})")
+    zip_name = f"{run_dir.name}-share.zip"
+    try:
+        payload = share_payload(run_dir, _share_report_html(run_dir))
+        write_share_zip(payload, run_dir.parent / zip_name)
+        written.append(zip_name)
+    except Exception as exc:
+        print(f"note : {zip_name} skipped ({exc})")
+    print(f"handoff : everything is in {run_dir}:")
+    if written:
+        print("  " + " \u00b7 ".join(written))
+
+
+def _go_score_labels(path: Path) -> list[str] | None:
+    """SPEC.md 88.8 (v0.74, D8): the score file's label-column values in
+    row order (the 88.1.1 `label_column` read, stdlib csv, utf-8-sig);
+    ``None`` when the file is unreadable or has no resolvable label
+    column (no agreement line, 88.8)."""
+    import csv as _csv
+    try:
+        with path.open(newline="", encoding="utf-8-sig") as fh:
+            reader = _csv.reader(fh)
+            try:
+                header = next(reader)
+            except StopIteration:
+                return None
+            col = label_column(header)
+            if col is None:
+                return None
+            out: list[str] = []
+            for row in reader:
+                if not row:
+                    continue
+                out.append(row[col].strip() if col < len(row) else "")
+            return out
+    except OSError:
+        return None
+
+
+def _go_score(args: argparse.Namespace, env: AutoRefineEnv) -> bool:
+    """SPEC.md 88.8 (v0.74, D8): score every row of `go --score CSV` with
+    the run's best model — the 42.1 path (`csv_rows_to_features` +
+    `standardize` + `predict_features`, the 42.1 per-row format) — plus,
+    when the file carries a resolvable label column (88.1.1) and the task
+    has `class_values`, the `agreement :` line (the fraction of rows
+    whose prediction equals the file's label). A bad file is a fail-loud
+    ``False`` (the run already finished; its artifacts stand, 88.8)."""
+    try:
+        _summary, task, model = _run_task_and_model(Path(env.run_dir))
+    except (ValueError, FileNotFoundError) as exc:
+        print(f"score: {exc}", file=sys.stderr)
+        return False
+    if int(getattr(task, "max_steps", 1)) > 1:  # 42.1.2: fitting tasks only
+        print("score: episode tasks are not supported by the 42.1 scoring "
+              "path (SPEC.md 42.1.2)", file=sys.stderr)
+        return False
+    try:
+        raws = csv_rows_to_features(args.score, task)
+    except (ValueError, TypeError, FileNotFoundError, OSError) as exc:
+        print(f"score: {exc}", file=sys.stderr)
+        return False
+    if not raws:
+        print(f"score: no rows in {args.score}", file=sys.stderr)
+        return False
+    preds: list = []
+    for i, raw in enumerate(raws):
+        try:
+            feat = standardize(task, raw)
+            r = predict_features(task, model, feat)
+        except (ValueError, TypeError) as exc:
+            print(f"score: row {i}: {exc}", file=sys.stderr)
+            return False
+        preds.append(r["prediction"])
+    print(f"scored  : {len(preds)} rows with the best model "
+          f"(task {getattr(task, 'name', '?')})")
+    for i, p in enumerate(preds):
+        print(f"{i}\t{_pred_str(p)}")
+    labels = _go_score_labels(Path(args.score))
+    if labels is not None and len(labels) == len(preds) \
+            and getattr(task, "class_values", None):
+        agree = 0
+        for pred, lab in zip(preds, labels):
+            try:
+                agree += float(pred) == float(lab)
+            except (TypeError, ValueError):
+                agree += str(pred) == str(lab)
+        print(f"agreement : {100.0 * agree / len(preds):.1f}% "
+              f"({agree}/{len(preds)} rows agree with the label column)")
+    return True
+
+
+def _go_seeds(args: argparse.Namespace, env: AutoRefineEnv,
+              task_name: str) -> list | None:
+    """SPEC.md 88.10 (v0.74, D10): the additional seeds of `go --seeds N`
+    — the 29.1 `seed_sweep` machinery (``seed+1 .. seed+N-1``) over the
+    base run's core knobs; ``None`` on a bad setup (the base run stands,
+    the caller degrades). A measurement (88.10.3): the gate and the exit
+    code follow the base run."""
+    from .dashboard import DashboardRunner
+    try:
+        runner = DashboardRunner(
+            csv_path=str(args.data), label=args.label,
+            split_frac=args.split_frac, target=args.target,
+            policy=args.policy, seed=args.seed,
+            experiments=args.experiments, max_seconds=args.max_seconds,
+            max_train_seconds=args.max_train_seconds, runs_dir=args.runs_dir,
+            search_quality=args.search_quality, modality=task_name,
+            stall_patience=args.stall_patience,  # v0.17 (SPEC.md 31.1)
+            objectives=None)  # go's gate is the 22.1 score bar (no --gate)
+        n = int(getattr(args, "seeds", 0))
+        seeds = [int(args.seed) + i for i in range(1, n)]
+        return list(runner.seed_sweep(seeds))
+    except Exception as exc:
+        print(f"seeds : {exc} (the base run stands)", file=sys.stderr)
+        return None
+
+
 def _cmd_go(args: argparse.Namespace) -> int:
-    """SPEC.md 87.3 (v0.73, A3): `autorefine go --data PATH` — `fit` with
-    a data-sized default budget: when `--experiments` is absent, the
-    budget comes from `go_budget(train-split size)` (87.3.2). The loop
-    reuses `_fit_data` / `_drive` / `_fit_gate` verbatim (byte-identical
-    loop semantics), then prints the one-sentence plain verdict (87.6).
-    Exit codes are `fit`'s: 0 PASS / 2 MISS / 1 setup error."""
+    """SPEC.md 87.3 (v0.73, A3) + 88 (v0.74, A1..D10): `autorefine go` —
+    data to verdict in one command, with the fewest possible inputs:
+
+    - the data is found in the current folder when not named (88.1);
+    - a previous same-task run is offered, and `--continue` takes it
+      (88.6); `--auto-target` derives the bar from the data's class
+      structure (88.4); `--time SECONDS` derives the budget from the
+      measured per-experiment rate (88.5), else the data-sized default
+      (87.3.2);
+    - the loop reuses `_fit_data` / `_drive` / `_fit_gate` verbatim
+      (byte-identical loop semantics);
+    - after the gate: the plain verdict (87.3.3) with its seed band
+      (88.10), the `why :` line (88.9), the one-line seed nudge (88.10.2),
+      the full hand-off (88.7), and the optional second-file score (88.8).
+
+    Exit codes are `fit`'s: 0 PASS / 2 MISS / 1 error (a bad `--score`
+    file is rc 1 — the run already finished, its artifacts stand, 88.8).
+    """
+    # 88.1 (A1): the data is found when it is not named
     if args.data is None:
-        print("go requires --data (a data file or directory)", file=sys.stderr)
-        return 1
+        cand = pick_data(Path.cwd())
+        if cand is None:
+            print("go could not find a data file in the current folder - "
+                  "pass --data PATH, or run this inside the folder holding "
+                  "your data (SPEC.md 88.1.2)", file=sys.stderr)
+            return 1
+        args.data = cand["path"]
+        print(f"found : {Path(cand['path']).name} ({cand['reason']}) - "
+              f"using it (SPEC.md 88.1)")
+    data = Path(args.data)
+
+    # the task name, once, for the offers and derivations below (the env
+    # re-resolves identically; a failure here only loses the hints)
+    try:
+        task_name = _resolve_fit_task(
+            data, getattr(args, "task", "auto") or "auto")
+    except ValueError:
+        task_name = None
+
+    # 88.6 (C6): the prior run is offered, and one flag takes it
+    if getattr(args, "continue_", False):
+        if task_name is None:
+            print("continue : the data task did not resolve - starting "
+                  "from scratch")
+        else:
+            hit = _latest_prior_run(args.runs_dir, task_name)
+            if hit is None:
+                print(f"continue : no earlier run of {task_name} in "
+                      f"{args.runs_dir} - starting from scratch")
+            else:
+                prior_dir, score = hit
+                args.prior_run = prior_dir
+                s = f"{score:.1f}" if score is not None else "?"
+                print(f"continue : starting from {Path(prior_dir).name} "
+                      f"(final {s}) - its best spec seeds the search prior")
+    elif task_name is not None:
+        hit = _latest_prior_run(args.runs_dir, task_name)
+        if hit is not None:
+            prior_dir, score = hit
+            s = f"{score:.1f}" if score is not None else "?"
+            print(f"earlier  : {Path(prior_dir).name} scored {s} on "
+                  f"{task_name} - pass --continue to start from its best "
+                  f"spec instead of scratch")
+
+    # 88.4 (B4): a fair bar when none was set
+    if getattr(args, "auto_target", False):
+        if task_name is None:
+            print("target : auto - the data task did not resolve; keeping "
+                  "the current bar")
+        else:
+            probe = _go_probe(args, data, task_name)
+            if probe is None:
+                print("target : auto - the data task did not resolve; "
+                      "keeping the current bar")
+            elif not getattr(probe, "class_values", None):
+                print("target : auto - no class structure in this task; "
+                      "keeping the current bar")
+            else:
+                try:
+                    _x, y = probe.make_dataset()
+                except Exception:
+                    y = None
+                counts: dict = {}
+                n = 0
+                if y is not None:
+                    for v in y:
+                        counts[str(v)] = counts.get(str(v), 0) + 1
+                        n += 1
+                if not n:
+                    print("target : auto - no rows in the dataset; keeping "
+                          "the current bar")
+                else:
+                    maj = max(counts.values()) / n
+                    args.target = auto_target(maj)
+                    print(f"target : auto - {fair_bar_line(maj, args.target)}")
+
     if getattr(args, "experiments", None) is None:
-        # 87.3.2: the budget is a deterministic step function of the
-        # train-split size — the *same* probe `fit` builds (one split,
-        # G2)
-        from .tasks import TASKS
-        data = Path(args.data)
+        # 87.3.2 (v0.73): the budget is a deterministic step function of
+        # the train-split size — the *same* probe `fit` builds (one split,
+        # G2); 88.5 (v0.74, B5): `--time` derives it from the measured
+        # per-experiment rate instead
         try:
             task_name = _resolve_fit_task(
                 data, getattr(args, "task", "auto") or "auto")
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 1
-        config: dict = {"path": str(data)}
-        if args.label is not None:
-            config["label"] = args.label
-        if args.split_frac != 0.2:
-            config["split_frac"] = args.split_frac
-        if getattr(args, "temporal", False):
-            config["split_mode"] = "temporal"
-        if getattr(args, "metric", "accuracy") != "accuracy":
-            config["metric"] = args.metric
-        try:
-            probe = TASKS[task_name](seed=args.seed, **config)
-        except ValueError as exc:
-            print(str(exc), file=sys.stderr)
+        probe = _go_probe(args, data, task_name)
+        if probe is None:
             return 1
-        args.experiments = go_budget(
-            getattr(probe, "default_dataset_size", None))
+        if getattr(args, "time", None) is not None:
+            per = measured_per_exp(load_registry(args.runs_dir), task_name)
+            if per is not None:
+                args.experiments = experiments_for_time(args.time, per)
+                print(f"budget : {args.experiments} experiments (about "
+                      f"{args.experiments * per:.0f}s at the measured "
+                      f"{per:.1f}s/experiment on {task_name})")
+            else:
+                args.experiments = go_budget(
+                    getattr(probe, "default_dataset_size", None))
+                print(f"note : no measured per-experiment time for "
+                      f"{task_name} yet - used the data-size default (the "
+                      f"--time {args.time:g}s target was noted)")
+        else:
+            args.experiments = go_budget(
+                getattr(probe, "default_dataset_size", None))
     env, bar, metric = _fit_data(args)
     if env is None:
         return 1
@@ -481,7 +813,47 @@ def _cmd_go(args: argparse.Namespace) -> int:
     if not getattr(args, "quiet", False):  # 47.3.2: the diagnostics block
         _print_fit_diagnostics(env)
     summary = env.memory.load_summary() if env.memory else {}
-    print(f"verdict : {plain_verdict(summary, bar)}")
+
+    # 88.10 (D10): the seed band — measured before the verdict so the
+    # line can carry it (88.10.1); a measurement, not a gate (88.10.3)
+    n_seeds = getattr(args, "seeds", None)
+    band = ""
+    if n_seeds is not None and int(n_seeds) >= 2 and task_name is not None:
+        base_final = summary.get("final_best_score")
+        finals: list[float] = []
+        seed_items: list[str] = []
+        if (isinstance(base_final, (int, float))
+                and not isinstance(base_final, bool)):
+            finals.append(float(base_final))
+            seed_items.append(f"{args.seed} -> {float(base_final):.2f}")
+        sweep = _go_seeds(args, env, task_name)
+        if sweep is not None:
+            for s in sweep:
+                if isinstance(s.get("final"), (int, float)):
+                    finals.append(float(s["final"]))
+                seed_items.append(f"{int(s['seed'])} -> {s['final']:.2f}")
+            if seed_items:
+                print("seeds   : " + ", ".join(seed_items))
+            if finals:
+                mean = sum(finals) / len(finals)
+                half = (max(finals) - min(finals)) / 2.0
+                band = (f" - band {mean:g} +/- {half:g} "
+                        f"across {len(finals)} seeds")
+                print(f"spread  : {mean:.2f} +/- {half:.2f} "
+                      f"(across {len(finals)} seeds)")
+    print(f"verdict : {plain_verdict(summary, bar)}{band}")
+    # 88.9 (D9): the verdict says why this model
+    print(f"why     : {_go_why(env, summary)}")
+    # 88.10.2: the one-line nudge when a single seed was run
+    if n_seeds is None or int(n_seeds) < 2:
+        print("note    : one seed was run - pass --seeds 3 for a spread "
+              "estimate (how sure to be)")
+    # 88.7 (C7): one command leaves the whole hand-off
+    _go_handoff(env, args)
+    # 88.8 (D8): the same command scores a second file
+    if getattr(args, "score", None) is not None:
+        if not _go_score(args, env):
+            return 1
     return rc
 
 
@@ -648,6 +1020,28 @@ def _cmd_fit(args: argparse.Namespace) -> int:
             print("one of --data or --from-run is required (SPEC.md 37.1.4)",
                   file=sys.stderr)
             return 1
+        # 88.6 (v0.74, C6): --continue — the most recent same-task run is
+        # the search prior (the 86 plumbing; an explicit --prior-run wins)
+        if getattr(args, "continue_", False) and args.prior_run is None:
+            try:
+                _t = _resolve_fit_task(
+                    Path(args.data), getattr(args, "task", "auto") or "auto")
+            except ValueError:
+                _t = None
+            if _t is None:
+                print("continue : the data task did not resolve - starting "
+                      "from scratch")
+            else:
+                hit = _latest_prior_run(args.runs_dir, _t)
+                if hit is None:
+                    print(f"continue : no earlier run of {_t} in "
+                          f"{args.runs_dir} - starting from scratch")
+                else:
+                    prior_dir, score = hit
+                    args.prior_run = prior_dir
+                    s = f"{score:.1f}" if score is not None else "?"
+                    print(f"continue : starting from {Path(prior_dir).name} "
+                          f"(final {s}) - its best spec seeds the search prior")
         env, bar, metric = _fit_data(args)
     if env is None:
         return 1
@@ -2334,11 +2728,44 @@ def _pred_str(pred: object) -> str:
 
 
 def _cmd_predict(args: argparse.Namespace) -> int:
-    """`predict` (SPEC.md 42.1, v0.28): score NEW rows with the run's best
-    model. Exactly one input mode (42.1.1); fitting tasks only (42.1.2);
-    preprocessing = the task's own train stats (42.1.3); one forward pass
-    per row (42.1.4)."""
-    run_dir = Path(args.run)
+    """`predict` (SPEC.md 42.1, v0.28; 88.3, v0.74): score NEW rows with
+    the run's best model. The run is named (`--run DIR`, explicit wins)
+    or the most recent finished run from the registry (`--latest`,
+    88.3.1); neither is a fail-loud rc 1 (88.3.2). Exactly one input mode
+    (42.1.1); fitting tasks only (42.1.2); preprocessing = the task's own
+    train stats (42.1.3); one forward pass per row (42.1.4). The scoring
+    path is 42.1's, byte-identical."""
+    if args.run:
+        run_dir = Path(args.run)
+    elif getattr(args, "latest", False):
+        # 88.3 (v0.74, A3): the registry's most recent run (timestamp,
+        # then run_id — the 88.3.1 tie-break)
+        try:
+            entries = load_registry(args.runs_dir)
+        except Exception:
+            entries = []
+        if not entries:
+            print(f"predict: no finished runs in {args.runs_dir} - run "
+                  f"autorefine go or fit first (SPEC.md 88.3.2)",
+                  file=sys.stderr)
+            return 1
+        best = max(entries, key=lambda e: (str(e.get("timestamp") or ""),
+                                          str(e.get("run_id") or "")))
+        run_dir = Path(args.runs_dir) / str(best.get("run_id", "?"))
+        if not (run_dir / "summary.json").is_file():
+            print(f"predict: the latest run {run_dir} has no summary.json - "
+                  f"finish it first (SPEC.md 88.3.2)", file=sys.stderr)
+            return 1
+        score = best.get("final_score")
+        score_s = (f"{float(score):g}"
+                   if isinstance(score, (int, float)) and not isinstance(score, bool)
+                   else "?")
+        print(f"using   : latest run {best.get('run_id')} (task "
+              f"{best.get('task')}, final {score_s}) (SPEC.md 88.3)")
+    else:
+        print("predict needs --run DIR or --latest (SPEC.md 88.3)",
+              file=sys.stderr)
+        return 1
     try:
         _summary, task, model = _run_task_and_model(run_dir)
     except (ValueError, FileNotFoundError) as exc:
@@ -3286,6 +3713,12 @@ def build_parser() -> argparse.ArgumentParser:
                            "search knowledge — its best spec becomes the "
                            "baseline (retrained on this task) and the bandit "
                            "starts informed; default: none (a fresh run)")
+    p_fit.add_argument("--continue", dest="continue_", action="store_true",
+                       default=False,
+                       help="v0.74 (SPEC.md 88.6): start from the most recent "
+                            "same-task run in the registry — one-flag alias "
+                            "for --prior-run over the registry (an explicit "
+                            "--prior-run wins; --data mode only)")
     p_fit.add_argument("--quiet", action="store_true",
                        help="v0.33 (SPEC.md 47.3): suppress the per-experiment "
                             "loop output and the per-class diagnostics (keep "
@@ -3335,7 +3768,8 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p_go.add_argument("--data", default=None,
                       help="CSV file, or a directory of labelled images/audio "
-                           "(required)")
+                           "(optional: found in the current folder when "
+                           "omitted, SPEC.md 88.1)")
     p_go.add_argument("--label", default=None,
                       help="label column (default: label/target/y/class, else "
                            "last column)")
@@ -3346,10 +3780,38 @@ def build_parser() -> argparse.ArgumentParser:
     p_go.add_argument("--target", type=float, default=95.0,
                       help="your acceptance bar on final_best_score "
                            "(default 95.0)")
+    p_go.add_argument("--auto-target", dest="auto_target", action="store_true",
+                      default=False,
+                      help="v0.74 (SPEC.md 88.4): derive the bar from the "
+                           "data's own class structure — 5 points above the "
+                           "majority-class ceiling, held between the 95 "
+                           "default and the 99.5 cap (classification tasks "
+                           "only; otherwise the current bar stands)")
     p_go.add_argument("--experiments", type=int, default=None,
                       help="override the data-sized budget (default: derived "
                            "from the train-split size — small tables need "
                            "fewer experiments)")
+    p_go.add_argument("--time", type=float, default=None, metavar="SECONDS",
+                      help="v0.74 (SPEC.md 88.5): spend about this many "
+                           "seconds, budget derived from this task's "
+                           "measured per-experiment rate (only while "
+                           "--experiments is absent; an explicit "
+                           "--experiments wins)")
+    p_go.add_argument("--continue", dest="continue_", action="store_true",
+                      default=False,
+                      help="v0.74 (SPEC.md 88.6): start from the most recent "
+                           "same-task run in the registry — its best spec "
+                           "seeds the search prior instead of scratch")
+    p_go.add_argument("--score", default=None, metavar="CSV",
+                      help="v0.74 (SPEC.md 88.8): after the gate, also score "
+                           "the rows of this CSV with the best model (one "
+                           "prediction per row, + an agreement line when the "
+                           "file carries a label column)")
+    p_go.add_argument("--seeds", type=int, default=None, metavar="N",
+                      help="v0.74 (SPEC.md 88.10): N >= 2 — also run seeds "
+                           "seed+1..seed+N-1 with the same budget and report "
+                           "the spread band (a measurement; the gate and "
+                           "exit code follow the base run)")
     p_go.add_argument("--seed", type=int, default=7)
     p_go.add_argument("--policy", default="bandit",
                       choices=("search", "bandit", "rl"),
@@ -3460,7 +3922,16 @@ def build_parser() -> argparse.ArgumentParser:
                         "best model (--row/--csv/--stdin/--item; fitting tasks)",
         epilog=_EP_PREDICT,  # 47.2.2
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    p_pred.add_argument("--run", required=True, help="path to a run directory")
+    p_pred.add_argument("--run", default=None,
+                        help="path to a run directory (or --latest for the "
+                             "most recent finished run)")
+    p_pred.add_argument("--latest", action="store_true",
+                        help="v0.74 (SPEC.md 88.3): score with the most "
+                             "recent finished run from the registry (an "
+                             "explicit --run wins when both are given)")
+    p_pred.add_argument("--runs-dir", default="runs",
+                        help="the runs dir the registry lives in "
+                             "(default runs; for --latest)")
     p_pred.add_argument("--row", default=None,
                         help="one row as JSON: an object keyed by feature "
                              "name (case-insensitive) or an array of exactly "

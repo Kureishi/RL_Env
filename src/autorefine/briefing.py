@@ -191,3 +191,35 @@ def jargon_free_check() -> list[str]:
     carry an 87.4 jargon key (expected ``[]`` - the A77 invariant)."""
     from .vocab import plain_free
     return [t for t in _JARGON_FREE_TEMPLATES if not plain_free(t)]
+
+
+def why_this_model(baseline_spec: dict | None, best_spec: dict | None,
+                   baseline_score=None, best_score=None) -> str:
+    """SPEC.md 88.9 (v0.74, D9): the verdict's ``why :`` line — why this
+    model won, in the 87.4 vocabulary (plain, ASCII-safe).
+
+    - no field differs between the starter and the winner -> "the starter
+      model was already the best - no change beat it";
+    - otherwise the **first** differing field in sorted field order
+      (deterministic, G2), both values, and the score pair in a
+      parenthetical when both scores are known (either ``None`` -> the
+      parenthetical is omitted).
+
+    Pure; missing specs (``None``) are read as empty, so a run with only
+    one spec still reports its one differing field (or the no-diff line).
+    """
+
+    def _num(x) -> bool:
+        return isinstance(x, (int, float)) and not isinstance(x, bool)
+
+    a = dict(baseline_spec or {})
+    b = dict(best_spec or {})
+    for field in sorted(set(a) | set(b)):
+        va, vb = a.get(field), b.get(field)
+        if va != vb:
+            line = f"the change that won: {field} {va} -> {vb}"
+            if _num(baseline_score) and _num(best_score):
+                line += (f" (final {float(best_score):.1f} "
+                         f"vs starter {float(baseline_score):.1f})")
+            return line
+    return "the starter model was already the best - no change beat it"

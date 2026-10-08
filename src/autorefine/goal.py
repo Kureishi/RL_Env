@@ -117,7 +117,12 @@ def resolve_goal(text: str, data_path: str | None = None) -> dict:
                or any(_word_in(lowered, w) for w in _TRIGGER_WORDS))
     unrecognized: list[str] = [] if matched else [text.strip()]
 
-    data_part = (f"on {data_path}" if data_path else
+    # 88.2.2 (v0.74, A2): the sentence may carry the path itself — the
+    # explicit ``data_path`` argument always wins; a path token in the
+    # text (88.2.1) is the fallback, so ``ask "... on C:\data\churn.csv"``
+    # embeds the real path instead of the <your data> placeholder.
+    data = data_path if data_path else extract_data_path(text)
+    data_part = (f"on {data}" if data else
                  "on your data (add a data path to run it)")
     task_part = task if task != DEFAULT_TASK else "your data's kind (auto)"
     plain_summary = (
@@ -125,7 +130,7 @@ def resolve_goal(text: str, data_path: str | None = None) -> dict:
         f"(a {task_part} problem), spending {experiments} experiments."
     )
     return {
-        "data": data_path,
+        "data": data,
         "task": task,
         "target": target,
         "experiments": experiments,
@@ -172,3 +177,95 @@ def go_budget(dataset_size: int | None) -> int:
     if dataset_size < 1000:
         return 30
     return 40
+
+
+# 88.2.1 (v0.74, A2): the data-extension vocabulary — a name ending in one
+# of these is a data path (a drive path, below, is one too).
+_DATA_EXTENSIONS = (".csv", ".png", ".jpg", ".jpeg", ".mp3", ".wav", ".txt")
+
+# 88.2.1: a Windows drive path — ``C:\...`` or ``C:/...`` (either slash).
+_DRIVE_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
+# 88.2.1: the sentence punctuation a path token may be wrapped in.
+_PATH_TRIM = '(),.;:!"\''
+
+
+def extract_data_path(text: str) -> str | None:
+    r"""SPEC.md 88.2.1 (v0.74, A2): the first whitespace-delimited token of
+    the goal sentence that *is* a data path — a Windows drive path
+    (``C:\...`` / ``C:/...``) or a name ending in a known data extension
+    (``.csv .png .jpg .jpeg .mp3 .wav .txt``) — with its surrounding
+    sentence punctuation (``(),.;:!"'``) stripped; else ``None``.
+
+    No other heuristics (88.2.1): a bare word — ``churn table``, ``this
+    csv`` — is never a path. Pure and deterministic (G2)."""
+    if not isinstance(text, str):
+        return None
+    for token in text.split():
+        cand = token.strip(_PATH_TRIM)
+        if not cand:
+            continue
+        if _DRIVE_PATH_RE.match(cand) or cand.lower().endswith(_DATA_EXTENSIONS):
+            return cand
+    return None
+
+
+def auto_target(majority_frac: float) -> float:
+    """SPEC.md 88.4.1 (v0.74, B4): the fair bar from the dataset's own
+    class structure — ``min(99.5, max(95.0, majority*100 + 5))``: five
+    points above the majority-class ceiling, floored at the 95 default,
+    capped at 99.5 (0.5 -> 95, 0.9 -> 95, 0.95 -> 99.5). A fraction
+    outside ``[0.5, 1.0]`` is a fail-loud ``ValueError`` (88.4.1) — below
+    0.5 is not a majority, above 1.0 is impossible."""
+    if not isinstance(majority_frac, (int, float)) or isinstance(majority_frac, bool):
+        raise ValueError(
+            f"auto_target: majority fraction must be a number, got {majority_frac!r}")
+    if not (0.5 <= float(majority_frac) <= 1.0):
+        raise ValueError(
+            f"majority fraction {float(majority_frac):.3g} is outside "
+            "[0.5, 1.0] - the larger class must be at least half of the rows")
+    return min(99.5, max(95.0, float(majority_frac) * 100.0 + 5.0))
+
+
+def fair_bar_line(majority_frac: float, target: float) -> str:
+    """SPEC.md 88.4.1 (v0.74, B4): the one plain line that explains the
+    auto-target (the 87.4 vocabulary, ASCII-safe): the majority class's
+    share of the rows, and why the bar sits where it sits."""
+    return (f"the majority class is {float(majority_frac) * 100.0:.1f}% of the "
+            f"rows - a fair bar sits 5 points above it: {float(target):g}% "
+            f"(held between the 95 default and the 99.5 cap)")
+
+
+def measured_per_exp(entries, task: str) -> float | None:
+    """SPEC.md 88.5.1 (v0.74, B5): the measured per-experiment wall time
+    for one task — the mean ``wall_seconds / experiments_run`` over that
+    task's registry entries with both values positive; ``None`` when no
+    such entry exists (the caller falls back, 88.5.2). Deterministic
+    (order-insensitive mean, G2)."""
+    rates: list[float] = []
+    for e in entries:
+        if not isinstance(e, dict) or e.get("task") != task:
+            continue
+        wall = e.get("wall_seconds")
+        exps = e.get("experiments_run")
+        if (isinstance(wall, (int, float)) and not isinstance(wall, bool)
+                and isinstance(exps, (int, float)) and not isinstance(exps, bool)
+                and wall > 0 and exps > 0):
+            rates.append(float(wall) / float(exps))
+    if not rates:
+        return None
+    return sum(rates) / len(rates)
+
+
+def experiments_for_time(seconds, per_exp) -> int:
+    """SPEC.md 88.5.1 (v0.74, B5): the budget behind a wall-time ask —
+    ``max(1, min(200, round(seconds / per_exp)))``; non-positive or
+    missing inputs fall back to 1 (a run, not a crash)."""
+    try:
+        s = float(seconds)
+        p = float(per_exp)
+    except (TypeError, ValueError):
+        return 1
+    if not (s > 0.0 and p > 0.0):
+        return 1
+    return max(1, min(200, int(round(s / p))))

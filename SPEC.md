@@ -94,6 +94,7 @@ numbers and carry none.)
 | M74 | v0.71   | 85     | A75 | tests/test_simloop_v071.py |
 | M75 | v0.72   | 86     | A76 | tests/test_transfer_v072.py |
 | M76 | v0.73   | 87     | A77 | tests/test_reach_v073.py |
+| M77 | v0.74   | 88     | A78 | tests/test_mininput_v074.py |
 
 ---
 
@@ -7646,3 +7647,83 @@ All in `tests/test_reach_v073.py`.
 ### 87.12 Milestone (M76)
 
 **M76** — v0.73 "Broader reach": the environment meets a broader demographic at the door — a goal in the user's own words resolves to a real recipe (`ask`, 87.1), a 60-second tour narrates the loop in three plain beats (`run --tour`, 87.2), one command takes data to a plain verdict (`go`, 87.3); the reader understands without an ML background — one jargon table every surface shares (87.4), the "So what?" card (87.5), and the trust chip on every headline number (87.6); and the results travel in the reader's format — the audience views and md/txt/pdf land in the app (87.7), the model card one-pager joins the CLI and the app (87.8), the "Hand off" panel groups the one-click takeaways (87.9), and the score curve earns a keyboard-reachable data table (87.10); all thin surfaces over existing machinery (62/63.1/63.2/64.2/66.1), pure and deterministic (G2), no new dependency, defaults unchanged (the A-pins and the app's default render stay green); the A-index advances to A77/M76 with `tests/test_reach_v073.py` (87.11).
+
+## 88. Minimum input, maximum return — found data, fair bars, reused runs, one-command hand-off (v0.74)
+
+The door is now plain language (87); this section closes the distance between "the user says the least" and "the run does the most": the data is found when it is not named (88.1), the sentence may carry the path itself (88.2), the latest run is addressable without remembering its directory (88.3), the bar and the budget can be derived from the data and the measured past (88.4/88.5), a previous run's search prior is offered and one flag takes it (88.6), one command leaves the whole hand-off behind (88.7), the same command can score a second file with the result (88.8), the verdict says why this model won (88.9), and the headline number can carry its seed spread (88.10).
+
+House rules hold: stdlib + numpy only (no new dependency, 3); pure and deterministic cores (G2); every new behavior is additive — the default invocations of `fit` / `run` / `predict` and every A-pin stay byte-identical; no SPEC / version tokens in app user-facing strings (the app gains nothing this round — the surfaces are CLI); no `runs/` or `__pycache__` accumulation (the round's own artifacts are cleaned).
+
+### 88.1 A1 — `go` finds the data when it is not named
+
+1. New leaf `autorefine/discover.py`: `discover_data(cwd)` returns a deterministic candidate list of `{path, task, reason}` — CSV files in the directory (task `csv`), then directories holding a usable media layout (task from `tasks.detect_modality`; `mixed` / empty are dropped), ordered by (kind rank, mtime descending, name ascending); `pick_data(cwd)` is the first candidate or `None`; `summarize_csv(path)` reads `(n_rows, n_label_values)` with the stdlib csv reader; `label_column(header)` is the first of `label` / `target` / `y` / `class` (case-insensitive), else the last column when there are at least two.
+2. `go` without `--data` takes `pick_data(Path.cwd())` and continues the existing path, printing `found : <name> (<reason>) - using it`; an empty / unusable directory is rc 1 naming the two ways out (`--data`, or run inside the data's folder).
+3. An explicit `--data` is untouched (the A77 `go` contract holds, 87.3).
+
+### 88.2 A2 — the sentence may carry the path
+
+1. `goal.extract_data_path(text)` — the first whitespace-delimited token that is a data path: a drive path (`C:\...` / `C:/...`) or a name ending in a known data extension (`.csv .png .jpg .jpeg .mp3 .wav .txt`); else `None`. No other heuristics (deterministic, 87.1.3).
+2. `resolve_goal` uses it when `data_path` is absent; `ask_command` then embeds the real path (no `<your data>` placeholder).
+3. `ask` prints a one-line `note :` when the resolved path does not exist on this machine yet (the command stays a valid plan, rc 0).
+
+### 88.3 A3 — `predict --latest`
+
+1. `predict` accepts `--latest`: the most recent registry entry (`timestamp`, then `run_id`) resolves the run dir; `predict` gains `--runs-dir` (default `runs`). An explicit `--run` wins when both are given.
+2. Neither `--run` nor `--latest` → rc 1 (one of the two is required); an empty registry → rc 1 naming the runs dir.
+3. The `using :` line names the run (id, task, final score) before the predictions; the scoring path is 42.1's, byte-identical.
+
+### 88.4 B4 — a fair bar when none was set
+
+1. `goal.auto_target(majority_frac)` — `min(99.5, max(95.0, majority*100 + 5))` (the bar sits 5 above the majority-class ceiling, floored at the 95 default, capped at 99.5; a fraction outside `[0.5, 1.0]` is a fail-loud `ValueError`); `goal.fair_bar_line(majority_frac, target)` is the one plain line explaining it.
+2. `go --auto-target` (classification only — a task without `class_values` keeps the current bar and says so) derives the majority fraction from the task's own dataset (the same deterministic probe `fit` builds, 22.1) and gates on it; a `target :` line is printed.
+3. Without the flag, the 95 default and the output are unchanged.
+
+### 88.5 B5 — budget in minutes, not experiments
+
+1. `goal.measured_per_exp(registry_entries, task)` — the mean `wall_seconds / experiments_run` over that task's entries with both positive, else `None`; `goal.experiments_for_time(seconds, per_exp)` — `max(1, min(200, round(seconds / per_exp)))` (non-positive inputs fall back to 1).
+2. `go --time SECONDS` (only while `--experiments` is absent) derives the budget from the measured rate and prints the `budget :` line (estimate + source); no measured rate falls back to the data-size default with a `note :` line.
+3. `--experiments` still wins (explicit); the default budget path is unchanged.
+
+### 88.6 C6 — the prior run is offered, and one flag takes it
+
+1. `fit` and `go` gain `--continue`: the most recent registry entry of the same task becomes the 86 search prior (`prior_run`), printed as a `continue :` line; no such entry → a `continue :` line saying the run starts from scratch (not an error).
+2. `go` (the new surface only — `fit`'s legacy output is untouched) prints an `earlier :` line offering `--continue` when a same-task prior run exists and `--continue` was not passed.
+3. The prior plumbing is 86's (`fit --prior-run`), byte-identical; `--continue` is its one-flag alias over the registry.
+
+### 88.7 C7 — one command leaves the whole hand-off
+
+After the verdict, `go` writes into the run dir (graceful: a missing optional writer degrades to a `note :` line, never an error): `report.md` + `report.txt` (the 63.1 renderers over the 62 doc), `model_card.txt` + `model_card.md` (87.8), `report.pdf` when reportlab is present (63.1.3), and the deterministic share bundle `<run>-share.zip` (47.4) — then the `handoff :` line listing the take-away files. `fit` is untouched (the A-pins hold); the bundle is byte-identical for a byte-identical run dir (G2).
+
+### 88.8 D8 — the same command scores a second file
+
+`go --score CSV` after the gate scores every row of the file with the run's best model (the 42.1 path: `csv_rows_to_features` + `standardize` + `predict_features`), prints the `scored :` block (per-row predictions in the 42.1 format), and — when the file carries a resolvable label column (88.1.1) and the task has `class_values` — the `agreement :` line (the fraction of rows whose prediction equals the file's label). A bad file is a fail-loud rc 1 (the run already finished; its artifacts stand).
+
+### 88.9 D9 — the verdict says why this model
+
+`briefing.why_this_model(baseline_spec, best_spec, baseline_score, best_score)`: no differing field → "the starter model was already the best - no change beat it"; otherwise the first differing field (sorted field order, deterministic) with both values and the score delta when both scores are known. `go` prints it as the `why :` line under the verdict (plain, the 87.4 vocabulary).
+
+### 88.10 D10 — the headline can carry its spread
+
+1. `go --seeds N` (N >= 2): after the base run, the additional seeds `seed+1 .. seed+N-1` run the same budget through the 29.1 `seed_sweep` machinery with the base run's core knobs; the `seeds :` line lists the per-seed finals and the `spread :` line renders `mean +/- (max-min)/2` across N (the 64.2 band, ASCII for the console); the verdict line appends the band.
+2. Without the flag, `go` prints the one-line `note :` nudge (one seed was run; `--seeds 3` adds the spread estimate). The base run's gate / verdict / hand-off are unchanged (the A77 `in` assertions hold).
+3. `--seeds` is a measurement (29.1): the gate and the exit code follow the base run.
+
+### 88.11 Acceptance (A78)
+
+1. **Discovery (88.1)**: `discover_data` ranks a CSV above a media dir and an empty dir to `[]`; `pick_data` picks the first; `summarize_csv` counts rows + label values; `go` with no `--data` in a data folder runs end-to-end (rc 0, the `found :` line, a finished run dir); in an empty folder rc 1 names `--data`.
+2. **Path in the sentence (88.2)**: `extract_data_path` picks a Windows drive path, a POSIX path, and an extensioned name, and rejects bare words; `resolve_goal` carries it; `ask`'s command embeds it; a missing path earns the `note :` line (rc stays 0).
+3. **`predict --latest` (88.3)**: after a real `go` run, `predict --latest --csv NEW` scores the new rows (rc 0, the `using :` line + a prediction per row); neither flag is rc 1; an empty runs dir is rc 1.
+4. **Auto-target (88.4)**: `auto_target` follows the formula (0.5 → 95, 0.9 → 95, 0.95 → 99.5) and fails loud outside `[0.5, 1.0]`; `go --auto-target` on a 90/10 table prints the `target :` line and gates on it; without the flag the 95 default holds.
+5. **Time budget (88.5)**: `experiments_for_time` / `measured_per_exp` follow their definitions; `go --time 10` after a measured run prints the `budget :` line with the estimate.
+6. **Continue (88.6)**: `go --continue` after a prior run prints the `continue :` line and seeds the prior; with no prior run it says "from scratch" (rc 0); `go` offers the `earlier :` line when a same-task run exists and the flag is absent.
+7. **Hand-off (88.7)**: a `go` run leaves `report.md`, `report.txt`, `model_card.txt`, `model_card.md`, and a valid `<run>-share.zip` (containing `summary.json`), and prints the `handoff :` line.
+8. **Score (88.8)**: `go --score NEW.csv` prints the `scored :` block (one row per line) + the `agreement :` fraction for a labelled file; a missing file is rc 1.
+9. **Why (88.9)**: `why_this_model`'s two forms (no-diff / diff + delta); `go`'s output carries the `why :` line.
+10. **Seeds (88.10)**: the default `note :` nudge is present; `go --seeds 2` lists two finals and the `spread :` band; the gate exit code follows the base run.
+11. **Ceremony**: the version steps to `0.74.0` in both sources (33.1); the A-index advances (`defined == set(range(1, 79))`, 74 acceptance rows, M77 resolving to `tests/test_mininput_v074.py`); the new exports land in `autorefine.__all__`; the app-language scan stays green (no app strings change).
+
+All in `tests/test_mininput_v074.py`.
+
+### 88.12 Milestone (M77)
+
+**M77** — v0.74 "Minimum input, maximum return": the distance between the user's fewest words and the run's fullest output closes — `go` finds the data in the current folder (88.1), the goal sentence may carry the path itself (88.2), `predict --latest` reaches the most recent run without remembering its directory (88.3); the bar can be derived from the data's own class structure (`--auto-target`, 88.4) and the budget from measured minutes (`--time`, 88.5); a previous run's search prior is offered on the surface and taken with one flag (`--continue`, 88.6); one command leaves the whole hand-off behind — reports, model card, share bundle (88.7) — and can score a second file with the result in the same breath (`--score`, 88.8); the verdict says why this model won (88.9) and can carry its seed spread (88.10); all thin, additive, opt-in surfaces over existing machinery (29.1/38/42.1/47.4/62/63.1/86/87), pure and deterministic (G2), no new dependency, defaults byte-identical (the A-pins and every legacy output stay green); the A-index advances to A78/M77 with `tests/test_mininput_v074.py` (88.11).

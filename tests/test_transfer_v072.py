@@ -384,10 +384,10 @@ class TestCeremony:
 
     def test_version_steps_to_v072(self):
         py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-        assert py["project"]["version"] == autorefine.__version__ == "0.73.0"
+        assert py["project"]["version"] == autorefine.__version__ == "0.74.0"
         init = (REPO / "src" / "autorefine" / "__init__.py").read_text(
             encoding="utf-8")
-        assert '"0.73.0"' in init
+        assert '"0.74.0"' in init
 
     def test_spec_section_and_index_row(self):
         text = SPEC.read_text(encoding="utf-8")

@@ -208,9 +208,14 @@ from .transfer import (  # SPEC.md 86 (v0.72): transfer to similar tasks
     SearchPrior,
     read_search_prior,
 )
-from .goal import (  # SPEC.md 87.1 (v0.73, A1): the plain-language goal entry
+from .goal import (  # SPEC.md 87.1 (v0.73, A1) + 88.2-88.5 (v0.74, A2/B4/B5)
     ask_command,
+    auto_target,
+    experiments_for_time,
+    extract_data_path,
+    fair_bar_line,
     go_budget,
+    measured_per_exp,
     resolve_goal,
 )
 from .vocab import (  # SPEC.md 87.4 (v0.73, B1): the plain-language table
@@ -218,10 +223,11 @@ from .vocab import (  # SPEC.md 87.4 (v0.73, B1): the plain-language table
     plain,
     plain_free,
 )
-from .briefing import (  # SPEC.md 87.5/87.6 (v0.73, B2/B3): the "So what?" card
+from .briefing import (  # SPEC.md 87.5/87.6 (v0.73, B2/B3) + 88.9 (v0.74, D9)
     confidence_tier,
     plain_verdict,
     so_what,
+    why_this_model,
     when_to_distrust,
 )
 from .modelcard import (  # SPEC.md 87.8 (v0.73, C2): the model-card one-pager
@@ -229,11 +235,17 @@ from .modelcard import (  # SPEC.md 87.8 (v0.73, C2): the model-card one-pager
     render_model_card,
     render_model_card_md,
 )
+from .discover import (  # SPEC.md 88.1 (v0.74, A1): the path-less go
+    discover_data,
+    label_column,
+    pick_data,
+    summarize_csv,
+)
 
 # SPEC.md 33.1 (C1): single version source — must equal pyproject.toml's
 # [project].version (enforced by the A23 test); one step per feature round
-# (v0.73 ⇒ 0.73.0, M76, SPEC.md 87)
-__version__ = "0.73.0"
+# (v0.74 ⇒ 0.74.0, M77, SPEC.md 88)
+__version__ = "0.74.0"
 
 __all__ = [
     "AutoRefineEnv",
@@ -380,5 +392,10 @@ __all__ = [
     "PLAIN", "plain", "plain_free",
     "so_what", "confidence_tier", "when_to_distrust", "plain_verdict",
     "model_card", "render_model_card", "render_model_card_md",
+    # v0.74: minimum input, maximum return (SPEC.md 88, A78)
+    "discover_data", "label_column", "pick_data", "summarize_csv",
+    "extract_data_path", "auto_target", "fair_bar_line",
+    "measured_per_exp", "experiments_for_time",
+    "why_this_model",
     "__version__",
 ]
