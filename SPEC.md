@@ -95,6 +95,7 @@ numbers and carry none.)
 | M75 | v0.72   | 86     | A76 | tests/test_transfer_v072.py |
 | M76 | v0.73   | 87     | A77 | tests/test_reach_v073.py |
 | M77 | v0.74   | 88     | A78 | tests/test_mininput_v074.py |
+| M78 | v0.75   | 89     | A79 | tests/test_ingest_v075.py |
 
 ---
 
@@ -7727,3 +7728,237 @@ All in `tests/test_mininput_v074.py`.
 ### 88.12 Milestone (M77)
 
 **M77** — v0.74 "Minimum input, maximum return": the distance between the user's fewest words and the run's fullest output closes — `go` finds the data in the current folder (88.1), the goal sentence may carry the path itself (88.2), `predict --latest` reaches the most recent run without remembering its directory (88.3); the bar can be derived from the data's own class structure (`--auto-target`, 88.4) and the budget from measured minutes (`--time`, 88.5); a previous run's search prior is offered on the surface and taken with one flag (`--continue`, 88.6); one command leaves the whole hand-off behind — reports, model card, share bundle (88.7) — and can score a second file with the result in the same breath (`--score`, 88.8); the verdict says why this model won (88.9) and can carry its seed spread (88.10); all thin, additive, opt-in surfaces over existing machinery (29.1/38/42.1/47.4/62/63.1/86/87), pure and deterministic (G2), no new dependency, defaults byte-identical (the A-pins and every legacy output stay green); the A-index advances to A78/M77 with `tests/test_mininput_v074.py` (88.11).
+
+---
+
+## 89. v0.75 — Time-based and on-demand data ingestion (A79)
+
+The system's data model so far is "a frozen file: snapshot → train → gate".
+This round makes the *arrival of data* first-class: the champion is re-scored
+as rows land (89.1), a drift gate judges it (89.2), a challenger can replace
+it (89.3), every ingestion is a versioned snapshot (89.4); runs can be driven
+by a wall clock (89.5) or by a drop folder (89.6); training can be restricted
+to a recency window (89.7); the results grow a time axis (89.8–89.10); the
+gate gains a serving-speed objective (89.11); and several feeds share one
+budget (89.12). All surfaces are additive and opt-in (defaults byte-identical,
+G2), stdlib + numpy only, and reuse existing machinery (the 42.1 scoring
+leaf, the 22.1 loop via `DashboardRunner`, the 38 registry, the 62 audience
+reports, the 46.3 portfolio pattern).
+
+### 89.1 A1 — data watcher / on-demand ingest (`autorefine feed`)
+
+1. `ingest.poll(path, state)`: one deterministic change check —
+   `(int(mtime), size)` fingerprint vs the persisted `feed_state.json`
+   (in the runs dir); the first poll always counts as changed.
+2. `autorefine feed --data P [--max N] [--poll SEC] [--champion RUN | --latest]
+   [--drift-bar PTS] [--chart OUT.svg]`: each poll that detects new data
+   takes a snapshot (89.4), re-scores the champion on the file's rows with the
+   42.1 leaf (`csv_rows_to_features` + `standardize` + `predict_features`,
+   accuracy against the label column), and prints one line:
+   `feed : poll i: N rows, champion X.X (drift stable|alert) [ds-id]`;
+   unchanged polls print `feed : poll i: no change (skipped)`.
+3. Every scored poll appends one event to `runs/data_events.jsonl`
+   (`poll`, `epoch`, `iso`, `rows`, `champion_score`, `drift`, `ds_id`).
+   `--chart` renders the events as the 89.8 SVG. Sleeps `--poll` seconds
+   between polls only (a `--poll 0` run is instant; tests use it).
+4. rc 0 on success; rc 1 when the data file, the champion run, or the label
+   column is missing (fail-loud, stderr).
+
+### 89.2 A2 — the drift gate
+
+`ingest.drift_verdict(fresh, ref, bar=2.0)`: the champion's score on the
+fresh rows (`fresh`) is judged against its reference score on its own data
+(`ref`, the run's `final_best_score`) — **alert** iff
+`ref − fresh > bar`, else **stable**; returns `(status, margin)` with
+`margin = ref − fresh`. Pure, deterministic (G2); the bar is in score points
+(default 2.0, `--drift-bar`). An alert is a *signal* (the `drift :` line and
+the event's `drift` field), never a silent retrain.
+
+### 89.3 A3 — champion/challenger refresh (`autorefine refresh`)
+
+1. `autorefine refresh --data NEW.csv [--champion RUN | --latest]
+   [--experiments N] [--target T] [--seed S] [--margin PTS] [--runs-dir D]`:
+   the champion is the named run's (or the registry's latest) best model,
+   scored on NEW.csv exactly as 89.1; the challenger is a fresh 22.1 loop
+   (the 23.1 `DashboardRunner`, bandit, `search_quality=v04`) over NEW.csv.
+2. Verdict `ingest.refresh_verdict(champion, challenger, margin)`:
+   **PROMOTE** iff `challenger >= champion + margin`, else **KEEP** — printed
+   as `refresh : PROMOTE/KEEP - <side> X.X vs <side> Y.Y (margin M)`.
+   PROMOTE needs no bookkeeping: the challenger's run is newer in the 38
+   registry, so `predict --latest` (88.3) already follows it.
+3. rc 0 for either verdict (it is a measured decision, not a failure); rc 1
+   on a missing champion run / unusable data.
+
+### 89.4 A4 — dataset snapshots (`autorefine datasets`, `fit --dataset`)
+
+1. `datasets.snapshot_dataset(path, runs_dir)`: one deterministic entry —
+   `ds_id = "ds-" + sha256[:12]`, `path`, full `sha256`, `n_rows`, `n_cols`,
+   the 88.1.1 `label_column`, `class_balance` (sorted value → count),
+   `mtime`, `created` (GMT ISO) — appended to `runs/datasets.jsonl`.
+2. `autorefine datasets [--runs-dir D]` lists the registry (one line per
+   snapshot: id, rows, cols, label, balance, created); an empty registry
+   prints the empty message and stays rc 0.
+3. `fit --dataset ID`: resolves the snapshot (exact `ds_id` or a unique
+   prefix), **verifies the file's sha256 still matches** (a changed file is
+   rc 1 — "re-snapshot before fitting"), prints `dataset : <id> verified
+   (N rows)`, and after the run writes the snapshot to the run dir as
+   `dataset.json` (provenance; `verify`/62 chain-of-custody reads it).
+   Omitted (the default) → the exact pre-v0.75 fit path.
+
+### 89.5 B1 — scheduled rounds (`autorefine schedule`)
+
+`autorefine schedule --data P [--rounds N] [--every SEC] [--experiments N]
+[--target T] [--seed S] [--runs-dir D]`: N sequential 22.1 loops (the 23.1
+runner); round k > 1 passes round k−1's run dir as its 86 search prior
+(`prior_run`), so the schedule *compounds*. One line per round
+(`schedule : round k/N done - final X.X (target T, PASS|MISS)`), a sleep of
+`--every` seconds between rounds only, and the closing line
+`schedule : N rounds finished - best X.X (round k)`. rc = the last round's
+gate rc (0 PASS / 2 MISS); a resolve failure is rc 1.
+
+### 89.6 B2 — drop-folder ingest (`autorefine ingest`)
+
+1. `autorefine ingest DROP_DIR [--out FILE] [--runs-dir D]`: scans the
+   directory's `*.csv` in name order; a file whose sha256 is already in the
+   drop dir's `drop_state.json` is reported as already ingested and skipped;
+   the first file's header wins, later files with a different header set are
+   skipped with a `note :` line (never a silent column shift).
+2. Rows are concatenated and **exact-duplicate rows are dropped**
+   (normalized cell tuple); the result is written to `--out`
+   (default `DROP_DIR/merged.csv`), snapshotted (89.4), and the state
+   updated. Lines: `ingest : K new file(s) in <dir> (J already ingested)`,
+   `ingest : merged N rows (D duplicate row(s) skipped) -> <out>`,
+   `ingest : snapshot <ds-id> (N rows, label 'L')`.
+3. rc 0; rc 1 when there is nothing new (or no CSVs at all) — the "poll
+   again later" signal for cron.
+
+### 89.7 B3 — windowed training (`fit --window`)
+
+1. `datasets.parse_window(text)`: `7d` / `24h` / `90m` / `30s` → seconds
+   (any bad form is a `ValueError` at parse time); `find_date_col(header)`
+   picks the first of `date/time/timestamp/ts/day/when/created_at`
+   (case-insensitive), else `None`; `window_rows(...)` keeps the rows with
+   `date >= max_date − window` (dates: ISO 8601 or epoch seconds).
+2. `fit --window 7d [--window-col COL]`: the CSV is pre-filtered, the slice
+   is written to `<runs-dir>/windows/window-<sha12>.csv`, the line
+   `window : kept K/N rows (lo .. hi, col 'c')` is printed, and the loop runs
+   on the slice. No date column (or `--window` with all rows kept) is rc 1
+   with the column named. Omitted (default) → byte-identical fit.
+
+### 89.8 C1 — champion quality over data time (89.1 events → chart)
+
+`plotting.svg_quality_over_time(events)`: the 89.1 event log as a line
+chart — x = data time (epoch), y = `champion_score`, one dot per poll
+(titled with rows + drift), alert polls marked; empty log → `""`. Pure
+render of JSON (G2); the `feed --chart` line and the tests drive it.
+
+### 89.9 C2 — backtest replay (`report --backtest`)
+
+`report --backtest --data FILE [--windows K] [--budget N] [--seed S]
+[--target T] [--runs-dir D]`: K **expanding** row windows (window i = the
+first `ceil(n·i/K)` rows — the "if we had started with less data" axis),
+each run as a fresh 23.1 loop with the same seed (deterministic); one line
+per window: `backtest : window i/K (rows 1-cut): baseline B -> final F
+(budget e)`. The slices are written under `<runs-dir>/backtest/`. rc 0;
+rc 1 on an unusable file. Zero legacy surface touched.
+
+### 89.10 C3 — freshness in audience reports
+
+`reporting.freshness_view(summary, events, now=None)` + `render_freshness`:
+the "how current is this?" block — `data as of` (last event's `iso`, else
+the run's timestamp), `model age` (hours from the run's timestamp to `now`,
+wall clock by default — tests pass a fixed `now`), `rows seen` (sum of the
+event rows), `last drift verdict`. `report --audience exec|domain|regulator`
+prints it after the view when the run dir's runs dir has
+`data_events.jsonl` or the summary carries a timestamp. Pure given its
+inputs (G2).
+
+### 89.11 D1 — latency as a gate objective
+
+1. `gate.measure_ms_per_row(model, x, reps=3)`: median wall time of a full
+   forward over `x` divided by its rows — the `latency` actual
+   (informational precision: it is a measurement, reported to 2 decimals).
+2. `gate.latency_line(actual_ms, budget_ms)`: `(ok, line)` — within budget
+   → `latency : A ms/row (budget B) - within budget`; over →
+   `... - OVER budget`.
+3. `fit --latency-ms B` and `go --latency-ms B`: after the score gate,
+   measure on the task's dataset rows (≤ 200) and print the line; **over
+   budget makes the command MISS (rc 2)** — the verdict becomes "target met
+   and fast enough to serve" only when both hold. Omitted (default) →
+   byte-identical output.
+
+### 89.12 D2 — feed portfolio (`go --feeds`)
+
+`go --feeds A.csv,B.csv` (mutually exclusive with `--data`): the 46.3
+portfolio pattern at `go`'s level — one shared budget split evenly
+(`max(1, ceil(total/N))` per feed; `go`'s data-sized default when no total
+was given), the feeds run sequentially in the given order (each through the
+full 88 go core, quiet), and the closing verdict
+`portfolio : N feed(s), k/N met the bar (target T)` — rc 0 iff every feed
+PASSes (2 if any MISS, 1 on a resolve failure).
+
+### 89.13 Acceptance (A79)
+
+1. **Watcher (89.1)**: `poll` detects a first touch and a later size change
+   and skips an unchanged file; `feed --data --max 2 --poll 0` runs
+   end-to-end (rc 0, the `feed :` lines, the `data_events.jsonl` events, the
+   snapshot entry); appending rows between polls is picked up on poll 2.
+2. **Drift (89.2)**: `drift_verdict` is stable inside the bar, alert just
+   beyond it, and reports the margin; a feed poll whose champion score
+   degrades prints the `drift :` alert line.
+3. **Refresh (89.3)**: `refresh_verdict` PROMOTEs at/above the margin and
+   KEEPs below; `refresh --data` runs end-to-end (rc 0, the champion /
+   challenger / `refresh :` lines, a new run dir in the registry).
+4. **Snapshots (89.4)**: `snapshot_dataset` is deterministic (same file →
+   same `ds_id`/hash); `find_snapshot` resolves a prefix; `datasets` lists
+   the registry; `fit --dataset` verifies a matching hash (rc 0 +
+   `dataset.json` in the run dir) and rejects a changed file (rc 1).
+5. **Schedule (89.5)**: `schedule --rounds 2 --every 0` runs two rounds
+   (round 2 seeded by round 1's run dir), prints both round lines + the
+   closing best line, rc = the last round's gate.
+6. **Drop-folder (89.6)**: `merge_tables` dedupes exact rows and skips a
+   mismatched header with a note; `ingest DROP_DIR` writes the merged CSV +
+   snapshot (rc 0, the three lines); a second call is rc 1 (nothing new).
+7. **Window (89.7)**: `parse_window` unit math + bad forms raise;
+   `window_rows` keeps exactly the recency slice; `fit --window 7d` on a
+   dated CSV prints the `window :` line and finishes (rc 0 with a reachable
+   target), and a CSV without a date column is rc 1 naming the need.
+8. **Chart (89.8)**: `svg_quality_over_time` renders one titled dot per
+   event with the score text, marks alerts, and returns `""` for no events.
+9. **Backtest (89.9)**: the expanding-window cuts are `ceil(n·i/K)`;
+   `report --backtest --windows 2 --budget 2` prints both window lines
+   (rc 0).
+10. **Freshness (89.10)**: `freshness_view`/`render_freshness` carry
+    as-of / age / rows / drift; `report --audience exec` on a run with
+    events prints the block.
+11. **Latency (89.11)**: `latency_line` within/over the budget; `fit
+    --latency-ms 10000` prints the within-budget line (rc 0); an
+    artificially tiny budget flips the command to MISS (rc 2).
+12. **Feeds (89.12)**: `go --feeds a.csv,b.csv` runs both feeds (one line
+    each + the `portfolio :` verdict), rc 0 when both PASS (2 when one
+    MISSes); `--feeds` + `--data` together is rc 1.
+13. **Ceremony**: the version steps to `0.75.0` in both sources (33.1); the
+    A-index advances (`defined == set(range(1, 80))`, 75 acceptance rows,
+    M78 resolving to `tests/test_ingest_v075.py`); the new exports land in
+    `autorefine.__all__`; the app-language scan stays green (no app strings
+    change).
+
+All in `tests/test_ingest_v075.py`.
+
+### 89.14 Milestone (M78)
+
+**M78** — v0.75 "Time-based and on-demand data ingestion": the frozen-file
+assumption is retired one opt-in surface at a time — the champion is
+re-scored as rows land (`feed`, 89.1) and judged by a drift gate (89.2); a
+challenger can replace it on the new data (`refresh`, 89.3); every
+ingestion is a hash-pinned snapshot (`datasets` / `fit --dataset`, 89.4);
+the loop is driven by a wall clock (`schedule`, 89.5) or a drop folder
+(`ingest`, 89.6); training can be restricted to a recency window
+(`fit --window`, 89.7); the results grow a time axis — quality over data
+time (89.8), backtest replay (89.9), freshness in every audience report
+(89.10); the gate gains a serving-speed objective (`--latency-ms`, 89.11);
+and several feeds share one budget (`go --feeds`, 89.12) — all thin,
+additive, opt-in surfaces over the existing 22.1/23.1/38/42.1/46.3/62
+machinery, pure and deterministic (G2), no new dependency, defaults
+byte-identical (the A-pins and every legacy output stay green); the A-index
+advances to A79/M78 with `tests/test_ingest_v075.py` (89.13).

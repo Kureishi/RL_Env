@@ -5198,3 +5198,71 @@ def _svg_nonlinearity(profile, width: int) -> str:
                  f'· strongly 5 points or more</text>')
     parts.append("</svg>")
     return "\n".join(parts)
+
+
+# --- 89.8 (v0.75, C1): champion quality over data time ----------------------
+
+def svg_quality_over_time(events, width: int = 640, height: int = 360) -> str:
+    """SPEC.md 89.8 (v0.75, C1): the 89.1 event log as a line chart —
+    x = data time (epoch), y = ``champion_score``, one dot per poll
+    (titled with rows + drift + iso), alert polls marked (red fill).
+    An empty log (or one without a usable score) renders ``""`` — pure
+    render of JSON, deterministic (G2)."""
+    evs = [e for e in (events or []) if isinstance(e, dict)]
+    if not evs:
+        return ""
+    evs = sorted(evs, key=lambda e: (e.get("epoch") or 0,
+                                     e.get("poll") or 0))
+    scores = [float(e["champion_score"]) for e in evs
+              if isinstance(e.get("champion_score"), (int, float))
+              and not isinstance(e.get("champion_score"), bool)
+              and math.isfinite(e.get("champion_score"))]
+    if not scores:
+        return ""
+    L, T = 64.0, 32.0
+    pw, ph = width - L - 24.0, height - T - 56.0
+    y_lo, y_hi = min(scores), max(scores)
+    if y_hi - y_lo < 1e-9:
+        y_hi, y_lo = y_lo + 1.0, max(0.0, y_lo - 0.5)
+    xs = []
+    for i, e in enumerate(evs):
+        x = e.get("epoch")
+        xs.append(float(x) if isinstance(x, (int, float))
+                  and not isinstance(x, bool) else float(e.get("poll") or i))
+    if xs[-1] - xs[0] < 1e-9:
+        xs = [float(i) for i in range(len(evs))]
+    x_lo, x_hi = xs[0], xs[-1]
+
+    def px(x): return L + (x - x_lo) / (x_hi - x_lo) * pw
+
+    def py(y): return T + (y_hi - y) / (y_hi - y_lo) * ph
+
+    parts = _svg_header(width, height, "Champion quality over data time")
+    parts.extend(_svg_axes(L, T, pw, ph, y_lo, y_hi, x_lo, x_hi,
+                           "data time (epoch seconds)"))
+    pts = []
+    for e, x in zip(evs, xs):
+        s = e.get("champion_score")
+        ok = (isinstance(s, (int, float)) and not isinstance(s, bool)
+              and math.isfinite(s))
+        if ok:
+            pts.append((px(x), py(float(s))))
+    if pts:
+        poly = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+        parts.append(f'<polyline fill="none" stroke="{_LINE}" stroke-width="2" '
+                     f'points="{poly}"/>')
+    for e, x in zip(evs, xs):
+        s = e.get("champion_score")
+        if not (isinstance(s, (int, float)) and not isinstance(s, bool)
+                and math.isfinite(s)):
+            continue
+        alert = str(e.get("drift") or "") == "alert"
+        fill = "#d33333" if alert else _LINE
+        title = (f"poll {e.get('poll')}: {e.get('rows')} rows, champion "
+                 f"{float(s):.1f} (drift {e.get('drift') or '-'})")
+        if e.get("iso"):
+            title += f" @ {e['iso']}"
+        parts.append(f'<circle cx="{px(x):.1f}" cy="{py(float(s)):.1f}" r="4" '
+                     f'fill="{fill}"><title>{html.escape(title)}</title></circle>')
+    parts.append("</svg>")
+    return "\n".join(parts)

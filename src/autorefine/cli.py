@@ -8,9 +8,12 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import hashlib
 import importlib
 import importlib.metadata
 import importlib.util
+import io
 import json
 import math
 import subprocess
@@ -18,6 +21,7 @@ import sys
 import tempfile
 import time
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np  # core dependency (used by the 62.3 domain ECE path)
@@ -28,6 +32,8 @@ from .gate import (
     actuals_from_run,
     default_objectives,
     evaluate,
+    latency_line,
+    measure_ms_per_row,
     parse_objective,
 )
 from .runconfig import (
@@ -80,6 +86,7 @@ from .plotting import (
     svg_ladder_curve,
     svg_pareto,
     svg_per_class_bars,
+    svg_quality_over_time,  # 89.8 (v0.75, C1)
     svg_score_curve,
 )
 from .predict import (  # 42.1 (v0.28): the predict leaf
@@ -113,9 +120,11 @@ from .reporting import (  # 63 (v0.49, B2/B3/B4) + 64.1 (v0.50, B5)
     benchmark_view,
     build_report_doc,
     decision_view,
+    freshness_view,  # 89.10 (v0.75, C3)
     render_benchmark,
     render_benchmark_md,
     render_decision,
+    render_freshness,  # 89.10 (v0.75, C3)
     render_report,
     render_report_pdf,
     render_user_guide,
@@ -135,6 +144,29 @@ from .goal import (  # 87.1/87.3 (v0.73, A1/A3) + 88.2-88.5 (v0.74, A2/B4/B5)
 from .vocab import plain_free  # 87.4 (v0.73, B1): the jargon guard
 from .briefing import plain_verdict, so_what, why_this_model  # 87.5-87.6 (v0.73) + 88.9 (v0.74, D9)
 from .discover import label_column, pick_data  # 88.1 (v0.74, A1): the path-less go
+from .datasets import (  # 89.4/89.7 (v0.75, A4/B3): snapshots + windows
+    DATE_COL_NAMES,
+    find_date_col,
+    find_snapshot,
+    hash_file,
+    load_snapshots,
+    parse_window,
+    snapshot_dataset,
+    window_rows,
+)
+from .ingest import (  # 89.1/89.2/89.3/89.6 (v0.75, A1/A2/A3/B2)
+    append_event,
+    drift_verdict,
+    hash_csv,
+    load_drop_state,
+    load_events,
+    load_state,
+    merge_tables,
+    poll,
+    refresh_verdict,
+    save_drop_state,
+    save_state,
+)
 from .modelcard import (  # 87.8 (v0.73, C2)
     model_card,
     render_model_card,
@@ -697,6 +729,9 @@ def _cmd_go(args: argparse.Namespace) -> int:
     Exit codes are `fit`'s: 0 PASS / 2 MISS / 1 error (a bad `--score`
     file is rc 1 — the run already finished, its artifacts stand, 88.8).
     """
+    # 89.12 (D2): --feeds is a different verb sharing the go core
+    if getattr(args, "feeds", None) is not None:
+        return _cmd_go_feeds(args)
     # 88.1 (A1): the data is found when it is not named
     if args.data is None:
         cand = pick_data(Path.cwd())
@@ -810,6 +845,10 @@ def _cmd_go(args: argparse.Namespace) -> int:
         return 1
     _drive(args, env)
     rc = _fit_gate(args, env, bar, metric)
+    # 89.11 (D1): the latency budget — a MISS (rc 2) when OVER it
+    lrc = _latency_objective(args, env)
+    if lrc is not None:
+        return lrc
     if not getattr(args, "quiet", False):  # 47.3.2: the diagnostics block
         _print_fit_diagnostics(env)
     summary = env.memory.load_summary() if env.memory else {}
@@ -855,6 +894,543 @@ def _cmd_go(args: argparse.Namespace) -> int:
         if not _go_score(args, env):
             return 1
     return rc
+
+
+# --- v0.75 (SPEC.md 89): time-based and on-demand data ingestion -----------
+
+def _cell_is_num(s: str) -> bool:
+    """89.1 (v0.75): the 42.1 header-detection cell test (finite number?)."""
+    try:
+        float(s)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _read_csv_cells(path) -> tuple[list[str], list[list[str]], bool]:
+    """89.1/89.6 (v0.75): a CSV as stripped cells — the SAME header rule as
+    the 42.1 leaf (first row with a non-numeric cell = header; blank rows
+    skipped), so this read's data rows align one-for-one with
+    `csv_rows_to_features`. Returns ``(header, data_rows, has_header)``."""
+    p = Path(path)
+    with p.open(newline="", encoding="utf-8-sig") as fh:
+        rows = [[(c or "").strip() for c in raw] for raw in csv.reader(fh)
+                if any((c or "").strip() for c in raw)]
+    if not rows:
+        return [], [], False
+    first = rows[0]
+    if any(not _cell_is_num(c) for c in first):
+        return first, rows[1:], True
+    return [], rows, False
+
+
+def _score_csv_champion(task, model, csv_path) -> tuple[float, int]:
+    """89.1.2 (v0.75, A1): the champion's accuracy (0-100) on the rows of a
+    CSV, via the 42.1 leaf (`csv_rows_to_features` + `standardize` +
+    `predict_features`) against the file's label column — the task's
+    `label_name` when it names one, else the 88.1.1 rule (a named
+    label/target/y/class, else the last column). Raises ``ValueError`` when
+    the file or its label is unusable (the caller exits rc 1)."""
+    header, rows, has_header = _read_csv_cells(csv_path)
+    if not rows:
+        raise ValueError(f"{csv_path} has no rows")
+    idx = None
+    names = [str(h).strip().lower() for h in header] if has_header else []
+    lbl_name = getattr(task, "label_name", None)
+    if has_header and lbl_name:
+        want = str(lbl_name).strip().lower()
+        if want in names:
+            idx = names.index(want)
+    if idx is None:
+        idx = label_column(header) if has_header else None
+    if idx is None:
+        raise ValueError(
+            f"{csv_path} has no label column (the 88.1.1 rule found none) "
+            f"- the champion cannot be scored on it")
+    raws = csv_rows_to_features(csv_path, task)
+    if len(raws) != len(rows):
+        raise ValueError(f"{csv_path}: {len(raws)} feature rows vs "
+                         f"{len(rows)} label rows")
+    correct = 0
+    for raw, row in zip(raws, rows):
+        x = standardize(task, raw)
+        res = predict_features(task, model, x)
+        lab = row[idx].strip() if len(row) > idx else ""
+        if _pred_str(res["prediction"]) == lab:  # the 42.1.4 label rule
+            correct += 1
+    return 100.0 * correct / len(raws), len(raws)
+
+
+def _resolve_champion_run(args, cmd: str) -> Path | None:
+    """89.1/89.3 (v0.75): the champion run — `--champion RUN` (explicit
+    wins) or the registry's latest (the 88.3 pattern: timestamp, then
+    run_id). A failure prints one fail-loud line and returns ``None``
+    (the caller exits rc 1, 89.1.4)."""
+    if getattr(args, "champion", None) is not None:
+        return Path(args.champion)
+    if getattr(args, "latest", False):
+        try:
+            entries = load_registry(args.runs_dir)
+        except Exception:
+            entries = []
+        if not entries:
+            print(f"{cmd}: no finished runs in {args.runs_dir} - run "
+                  f"autorefine fit or go first (SPEC.md 89.1.4)",
+                  file=sys.stderr)
+            return None
+        best = max(entries, key=lambda e: (str(e.get("timestamp") or ""),
+                                          str(e.get("run_id") or "")))
+        run_dir = Path(args.runs_dir) / str(best.get("run_id", "?"))
+        if not (run_dir / "summary.json").is_file():
+            print(f"{cmd}: the champion run {run_dir} has no summary.json - "
+                  f"finish it first (SPEC.md 89.1.4)", file=sys.stderr)
+            return None
+        return run_dir
+    print(f"{cmd} needs --champion RUN or --latest (SPEC.md 89.1.4)",
+          file=sys.stderr)
+    return None
+
+
+def _cmd_feed(args: argparse.Namespace) -> int:
+    """SPEC.md 89.1/89.2 (v0.75, A1/A2): `autorefine feed --data P` — the
+    data watcher. Each poll that detects new data snapshots the file
+    (89.4), re-scores the champion on its rows with the 42.1 leaf, judges
+    the drift (89.2), and appends one event to `data_events.jsonl` (89.1.3).
+    Sleeps `--poll` seconds BETWEEN polls only. `--chart` renders the event
+    log as the 89.8 SVG. rc 0 on success; rc 1 on a missing data file /
+    champion run / label column (fail-loud, stderr)."""
+    data = Path(args.data)
+    if not data.is_file():
+        print(f"feed: no such data file: {data} (SPEC.md 89.1.4)",
+              file=sys.stderr)
+        return 1
+    run_dir = _resolve_champion_run(args, "feed")
+    if run_dir is None:
+        return 1
+    try:
+        summary, task, model = _run_task_and_model(run_dir)
+    except (ValueError, FileNotFoundError) as exc:
+        print(f"feed: {exc} (SPEC.md 89.1.4)", file=sys.stderr)
+        return 1
+    ref = summary.get("final_best_score")
+    if not isinstance(ref, (int, float)) or isinstance(ref, bool):
+        print("feed: the champion run has no final_best_score "
+              "(SPEC.md 89.2.1)", file=sys.stderr)
+        return 1
+    state = load_state(args.runs_dir)
+    key = str(data)
+    mine = state.get(key) if isinstance(state, dict) else None
+    n_polls = max(1, int(args.max))
+    for i in range(1, n_polls + 1):
+        res = poll(data, mine)
+        if not res["changed"]:
+            print(f"feed : poll {i}: no change (skipped)")
+        else:
+            mine = {"fingerprint": res["fingerprint"]}
+            state[key] = mine
+            save_state(args.runs_dir, state)
+            try:
+                snap = snapshot_dataset(data, args.runs_dir)
+                acc, n = _score_csv_champion(task, model, data)
+            except (ValueError, OSError) as exc:
+                print(f"feed : poll {i}: {exc} (SPEC.md 89.1.4)",
+                      file=sys.stderr)
+                return 1
+            status, _margin = drift_verdict(acc, float(ref),
+                                            bar=args.drift_bar)
+            print(f"feed : poll {i}: {n} rows, champion {acc:.1f} "
+                  f"(drift {status}) [{snap['ds_id']}]")
+            if status == "alert":
+                print(f"drift : fresh {acc:.1f} vs reference {float(ref):.1f} "
+                      f"(bar {args.drift_bar:g}) - champion degraded on new "
+                      f"data (SPEC.md 89.2)")
+            now = datetime.now(timezone.utc)
+            append_event(args.runs_dir, {
+                "poll": i,
+                "epoch": int(now.timestamp()),
+                "iso": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "rows": n,
+                "champion_score": acc,
+                "drift": status,
+                "ds_id": snap["ds_id"],
+            })
+        if i < n_polls and args.poll > 0:
+            time.sleep(args.poll)
+    if getattr(args, "chart", None):
+        svg = svg_quality_over_time(load_events(args.runs_dir))
+        if svg:
+            out = Path(args.chart)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(svg, encoding="utf-8")
+            print(f"chart : wrote {out}")
+        else:
+            print("chart : no scored events to render (SPEC.md 89.8)")
+    return 0
+
+
+def _cmd_refresh(args: argparse.Namespace) -> int:
+    """SPEC.md 89.3 (v0.75, A3): `autorefine refresh --data NEW.csv` —
+    champion/challenger: the champion is the named run's (or the registry's
+    latest) best model scored on NEW.csv (89.1); the challenger is a fresh
+    22.1 loop (the 23.1 runner, bandit, `search_quality=v04`) over NEW.csv.
+    `refresh_verdict` PROMOTEs at/above `--margin`, else KEEPs. rc 0 for
+    either verdict (a measured decision, not a failure); rc 1 on a missing
+    champion run / unusable data."""
+    data = Path(args.data)
+    if not data.is_file():
+        print(f"refresh: no such data file: {data} (SPEC.md 89.3.3)",
+              file=sys.stderr)
+        return 1
+    run_dir = _resolve_champion_run(args, "refresh")
+    if run_dir is None:
+        return 1
+    try:
+        summary, task, model = _run_task_and_model(run_dir)
+        acc, n = _score_csv_champion(task, model, data)
+    except (ValueError, FileNotFoundError, OSError) as exc:
+        print(f"refresh: {exc} (SPEC.md 89.3.3)", file=sys.stderr)
+        return 1
+    print(f"champion : {run_dir.name} scores {acc:.1f} on the new data "
+          f"({n} rows) (SPEC.md 89.3.1)")
+    from .dashboard import DashboardRunner
+    runner = DashboardRunner(
+        csv_path=str(data), target=args.target, policy="bandit",
+        seed=args.seed, experiments=args.experiments,
+        runs_dir=args.runs_dir, search_quality="v04")
+    runner.start()
+    while not runner.done:
+        runner.next()
+    res = runner.finish()
+    final = float(res["final_best_score"])
+    challenger_run = (str(runner.env.run_dir) if runner.env is not None
+                      else "?")
+    print(f"challenger : final {final:.1f} after {args.experiments} "
+          f"experiment(s) (run {challenger_run}) (SPEC.md 89.3.1)")
+    verdict, line = refresh_verdict(acc, final, margin=args.margin)
+    print(f"refresh : {line} (SPEC.md 89.3.2)")
+    return 0
+
+
+def _cmd_datasets(args: argparse.Namespace) -> int:
+    """SPEC.md 89.4.2 (v0.75, A4): `autorefine datasets [--runs-dir D]` —
+    list the snapshot registry (one line per snapshot: id, rows, cols,
+    label, balance, created); an empty registry prints the empty message
+    and stays rc 0."""
+    snaps = load_snapshots(args.runs_dir)
+    if not snaps:
+        print("datasets : (none yet - feed, ingest, or fit --dataset "
+              "snapshots land here; SPEC.md 89.4.2)")
+        return 0
+    for s in snaps:
+        bal = (s.get("class_balance") or {})
+        bal_s = ", ".join(f"{k}:{v}" for k, v in bal.items())
+        lbl = s.get("label_column")
+        lbl_n = s.get("label_name")
+        lbl_s = (f"label {lbl_n} (col {lbl})" if lbl is not None and lbl_n
+                 else (f"label col {lbl}" if lbl is not None else "no label"))
+        print(f"{s.get('ds_id')}  rows {s.get('n_rows')}  cols "
+              f"{s.get('n_cols')}  {lbl_s}  balance [{bal_s}]  "
+              f"created {s.get('created')}")
+    return 0
+
+
+def _cmd_schedule(args: argparse.Namespace) -> int:
+    """SPEC.md 89.5 (v0.75, B1): `autorefine schedule --data P` — N
+    sequential 22.1 loops (the 23.1 runner); round k > 1 passes round
+    k-1's run dir as its 86 search prior (`prior_run`), so the schedule
+    COMPOUNDS. One line per round, a sleep of `--every` seconds between
+    rounds only, and the closing best line. rc = the last round's gate rc
+    (0 PASS / 2 MISS); a resolve failure is rc 1."""
+    from .dashboard import DashboardRunner
+    data = Path(args.data)
+    if not data.exists():
+        print(f"schedule: no such data path: {data} (SPEC.md 89.5.4)",
+              file=sys.stderr)
+        return 1
+    rounds = int(args.rounds)
+    if rounds < 1:
+        print("schedule: --rounds must be >= 1 (SPEC.md 89.5.1)",
+              file=sys.stderr)
+        return 1
+    try:
+        _resolve_fit_task(data, getattr(args, "task", "auto") or "auto")
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    prior: str | None = None
+    best: float | None = None
+    best_round = 0
+    last_rc = 0
+    for k in range(1, rounds + 1):
+        runner = DashboardRunner(
+            csv_path=str(data), target=args.target, policy="bandit",
+            seed=args.seed, experiments=args.experiments,
+            runs_dir=args.runs_dir, search_quality="v04",
+            prior_run=prior)
+        runner.start()
+        while not runner.done:
+            runner.next()
+        res = runner.finish()
+        final = float(res["final_best_score"])
+        passed = final >= float(args.target)
+        last_rc = 0 if passed else 2
+        tag = "PASS" if passed else "MISS"
+        print(f"schedule : round {k}/{rounds} done - final {final:.1f} "
+              f"(target {args.target:g}, {tag}) (SPEC.md 89.5.2)")
+        if best is None or final > best:
+            best, best_round = final, k
+        if runner.env is not None:
+            prior = str(runner.env.run_dir)
+        if k < rounds and args.every > 0:
+            time.sleep(args.every)
+    print(f"schedule : {rounds} rounds finished - best {best:.1f} "
+          f"(round {best_round}) (SPEC.md 89.5.3)")
+    return last_rc
+
+
+def _cmd_ingest(args: argparse.Namespace) -> int:
+    """SPEC.md 89.6 (v0.75, B2): `autorefine ingest DROP_DIR` — the
+    drop-folder merge. The directory's `*.csv` (name order, the output
+    file itself excluded) whose sha256 is not yet in the drop dir's
+    `drop_state.json` are merged: the FIRST file's header wins, a later
+    file with a different header set is skipped with a `note :` line (never
+    a silent column shift), exact-duplicate rows are dropped. The result
+    is written to `--out` (default `DROP_DIR/merged.csv`), snapshotted
+    (89.4), and the state updated (a changed file re-arrives under its new
+    sha). rc 0; rc 1 when there is nothing new (the "poll again later"
+    signal for cron)."""
+    drop = Path(args.drop_dir)
+    if not drop.is_dir():
+        print(f"ingest: no such directory: {drop} (SPEC.md 89.6.1)",
+              file=sys.stderr)
+        return 1
+    out = Path(args.out) if args.out else drop / "merged.csv"
+    state = load_drop_state(drop)
+    seen = state["seen"]
+    csvs = sorted(drop.glob("*.csv"), key=lambda p: p.name)
+    new: list[tuple[Path, str]] = []
+    already = 0
+    for p in csvs:
+        if p == out or p == out.resolve():
+            continue
+        sha = hash_csv(p)
+        if seen.get(p.name) == sha:
+            already += 1
+            continue
+        new.append((p, sha))
+    if not new:
+        print(f"ingest : no new files in {drop} (SPEC.md 89.6.3)")
+        return 1
+    header, rows, merged, mismatched, dupes = merge_tables(
+        [p for p, _ in new])
+    for m in mismatched:
+        print(f"note : {m} has a different header set - skipped "
+              f"(never a silent column shift; SPEC.md 89.6.1)")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(header)
+    w.writerows(rows)
+    out.write_text(buf.getvalue(), encoding="utf-8")
+    for p, sha in new:  # 89.6.1: seen = seen (merged OR mismatched)
+        seen[p.name] = sha
+    save_drop_state(drop, state)
+    snap = snapshot_dataset(out, args.runs_dir)
+    lbl = snap.get("label_column")
+    lbl_name = (header[lbl] if lbl is not None and lbl < len(header)
+                else "-")
+    print(f"ingest : {len(new)} new file(s) in {drop} ({already} already "
+          f"ingested) (SPEC.md 89.6.2)")
+    print(f"ingest : merged {len(rows)} rows ({dupes} duplicate row(s) "
+          f"skipped) -> {out} (SPEC.md 89.6.2)")
+    print(f"ingest : snapshot {snap['ds_id']} ({snap['n_rows']} rows, "
+          f"label '{lbl_name}') (SPEC.md 89.6.2)")
+    return 0
+
+
+def _fit_window_slice(args, window_s: float) -> str | None:
+    """SPEC.md 89.7.2 (v0.75, B3): `fit --window` — pre-filter the CSV to
+    the recency slice (89.7.1), write it to
+    `<runs-dir>/windows/window-<sha12>.csv`, print the `window :` line,
+    and return the slice path (the caller swaps `args.data`). ``None``
+    (with a fail-loud line) when there is no date column, no parseable
+    dates, or the window keeps every row."""
+    path = Path(args.data)
+    if not path.is_file():
+        print(f"window : {path} is not a file (--window needs a CSV; "
+              f"SPEC.md 89.7.2)", file=sys.stderr)
+        return None
+    header, rows, has_header = _read_csv_cells(path)
+    col = find_date_col(header) if has_header else None
+    if col is None and getattr(args, "window_col", None) is not None:
+        names = [str(h).strip().lower() for h in header]
+        want = str(args.window_col).strip().lower()
+        if want in names:
+            col = names.index(want)
+    if col is None:
+        print(f"window : no date column in {header} - expected one of "
+              f"{list(DATE_COL_NAMES)} (or name it with --window-col; "
+              f"SPEC.md 89.7.1)", file=sys.stderr)
+        return None
+    kept, total, lo, hi = window_rows(header, rows, window_s, col)
+    if lo is None:
+        print(f"window : no parseable dates in column {header[col]!r} - "
+              f"expected ISO 8601 or epoch seconds (SPEC.md 89.7.1)",
+              file=sys.stderr)
+        return None
+    if len(kept) == total:
+        print(f"window : all {total} rows are inside the window ({lo} .. "
+              f"{hi}) - nothing to cut (check the column or the window; "
+              f"SPEC.md 89.7.2)", file=sys.stderr)
+        return None
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    if has_header:
+        w.writerow(header)
+    w.writerows(kept)
+    content = buf.getvalue()
+    sha = hashlib.sha256(content.encode("utf-8")).hexdigest()[:12]
+    wdir = Path(args.runs_dir) / "windows"
+    wdir.mkdir(parents=True, exist_ok=True)
+    out = wdir / f"window-{sha}.csv"
+    out.write_text(content, encoding="utf-8")
+    print(f"window : kept {len(kept)}/{total} rows ({lo} .. {hi}, col "
+          f"'{header[col]}') (SPEC.md 89.7.2)")
+    return str(out)
+
+
+def _fit_dataset_verify(args) -> dict | None:
+    """SPEC.md 89.4.3 (v0.75, A4): `fit --dataset` — resolve the snapshot
+    (exact ds_id or a unique prefix), verify the file's sha256 still
+    matches (a changed file is fail-loud; the caller exits rc 1), and
+    return the entry (the caller swaps `args.data` and, after the gate,
+    writes it to the run dir as `dataset.json`)."""
+    snap = find_snapshot(args.runs_dir, args.dataset)
+    if snap is None:
+        print(f"dataset : no snapshot {args.dataset!r} in {args.runs_dir} "
+              f"(autorefine datasets lists them; SPEC.md 89.4.3)",
+              file=sys.stderr)
+        return None
+    if hash_file(snap["path"]) != snap["sha256"]:
+        print(f"dataset : {snap['ds_id']} no longer matches its sha256 - "
+              f"re-snapshot before fitting (SPEC.md 89.4.3)",
+              file=sys.stderr)
+        return None
+    print(f"dataset : {snap['ds_id']} verified ({snap['n_rows']} rows) "
+          f"(SPEC.md 89.4.3)")
+    return snap
+
+
+def _latency_objective(args, env) -> int | None:
+    """SPEC.md 89.11 (v0.75, D1): `--latency-ms` — after the score gate,
+    the median ms/row of the best model's forward over the task's dataset
+    rows (<= 200) and the budget line; OVER budget makes the command MISS
+    (rc 2). Returns the rc to apply (2 when over budget), ``None`` when
+    the flag is unset, 1 when the measurement itself fails."""
+    if getattr(args, "latency_ms", None) is None:
+        return None
+    try:
+        x, _y = env.task.make_dataset()
+        x = np.asarray(x)[:min(200, int(np.asarray(x).shape[0]))]
+        if x.size == 0:
+            raise ValueError("the task's dataset is empty")
+        ms = measure_ms_per_row(env.best_model, x)
+    except Exception as exc:  # a measurement failure is a plain error
+        print(f"latency : could not measure ({exc}; SPEC.md 89.11.1)",
+              file=sys.stderr)
+        return 1
+    ok, line = latency_line(ms, float(args.latency_ms))
+    print(line)
+    if not ok:
+        return 2
+    return None
+
+
+def _cmd_go_feeds(args) -> int:
+    """SPEC.md 89.12 (v0.75, D2): `go --feeds A.csv,B.csv` — the 46.3
+    portfolio pattern at `go`'s level: one shared budget split evenly
+    (`max(1, ceil(total/N))` per feed; `go`'s data-sized default when no
+    total was given), the feeds run sequentially in the given order (each
+    through the full 88 go core, quiet), and the closing
+    `portfolio :` verdict. rc 0 iff every feed PASSes (2 if any MISS,
+    1 on a resolve failure)."""
+    if args.data is not None:
+        print("--feeds is mutually exclusive with --data (SPEC.md 89.12.1)",
+              file=sys.stderr)
+        return 1
+    feeds = [p.strip() for p in str(args.feeds).split(",") if p.strip()]
+    if len(feeds) < 2:
+        print("--feeds needs at least 2 CSV paths (SPEC.md 89.12.1)",
+              file=sys.stderr)
+        return 1
+    total = args.experiments
+    per = (max(1, math.ceil(total / len(feeds)))
+           if total is not None else None)
+    orig = (args.data, args.experiments, args.quiet, args.feeds)
+    args.feeds = None  # the per-feed core must not re-dispatch to --feeds
+    results: list[int] = []
+    for f in feeds:
+        args.data, args.experiments, args.quiet = f, per, True
+        results.append(_cmd_go(args))
+    args.data, args.experiments, args.quiet, args.feeds = orig
+    n = len(results)
+    ok = sum(1 for r in results if r == 0)
+    print(f"portfolio : {n} feed(s), {ok}/{n} met the bar "
+          f"(target {args.target:g}) (SPEC.md 89.12.2)")
+    if all(r == 0 for r in results):
+        return 0
+    if any(r == 1 for r in results):
+        return 1
+    return 2
+
+
+def _cmd_report_backtest(args) -> int:
+    """SPEC.md 89.9 (v0.75, C2): `report --backtest --data FILE` — the
+    expanding-window replay: window i = the first `ceil(n*i/K)` rows (the
+    "if we had started with less data" axis), each a fresh 23.1 loop with
+    the same seed (deterministic). One line per window; the slices land
+    under `<runs-dir>/backtest/`. rc 0; rc 1 on an unusable file.
+    Zero legacy surface touched."""
+    from .dashboard import DashboardRunner
+    data = Path(args.data)
+    if not data.is_file():
+        print(f"backtest : no such CSV file: {data} (SPEC.md 89.9.1)",
+              file=sys.stderr)
+        return 1
+    header, rows, has_header = _read_csv_cells(data)
+    n = len(rows)
+    if n < 2:
+        print(f"backtest : {data} has {n} row(s) - need at least 2 for "
+              f"expanding windows (SPEC.md 89.9.1)", file=sys.stderr)
+        return 1
+    k = max(1, int(args.windows))
+    budget = max(1, int(args.budget))
+    bdir = Path(args.runs_dir) / "backtest"
+    bdir.mkdir(parents=True, exist_ok=True)
+    for i in range(1, k + 1):
+        cut = max(1, min(n, math.ceil(n * i / k)))
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        if has_header:
+            w.writerow(header)
+        w.writerows(rows[:cut])
+        content = buf.getvalue()
+        sha = hashlib.sha256(content.encode("utf-8")).hexdigest()[:12]
+        slice_path = bdir / f"window_{i}-{sha}.csv"
+        slice_path.write_text(content, encoding="utf-8")
+        runner = DashboardRunner(
+            csv_path=str(slice_path), target=args.target, policy="bandit",
+            seed=args.seed, experiments=budget, runs_dir=args.runs_dir,
+            search_quality="v04")
+        runner.start()
+        while not runner.done:
+            runner.next()
+        res = runner.finish()
+        print(f"backtest : window {i}/{k} (rows 1-{cut}): baseline "
+              f"{float(res['baseline_score']):.2f} -> final "
+              f"{float(res['final_best_score']):.2f} (budget {budget}) "
+              f"(SPEC.md 89.9.2)")
+    return 0
 
 
 def _cmd_card(args: argparse.Namespace) -> int:
@@ -965,6 +1541,29 @@ def _cmd_fit(args: argparse.Namespace) -> int:
     exclusive with both single-file modes.
     """
     from .tasks import TASKS  # noqa: F401 (registry; the helpers use it)
+    # 89.7/89.4 (v0.75, B3/A4): the recency window and the dataset
+    # snapshot are single-file data modes — exclusive with the re-run and
+    # portfolio modes below
+    if getattr(args, "window", None) is not None or getattr(
+            args, "dataset", None) is not None:
+        if args.from_run is not None:
+            print("--window/--dataset and --from-run are mutually "
+                  "exclusive (SPEC.md 89.7/89.4)", file=sys.stderr)
+            return 1
+        if getattr(args, "tasks", None) is not None:
+            print("--window/--dataset and --tasks are mutually "
+                  "exclusive (SPEC.md 89.7/89.4)", file=sys.stderr)
+            return 1
+        if getattr(args, "dry_run", False):
+            print("--window/--dataset and --dry-run are mutually "
+                  "exclusive (SPEC.md 89.7/89.4)", file=sys.stderr)
+            return 1
+        if getattr(args, "window", None) is not None and getattr(
+                args, "dataset", None) is not None:
+            # the window cuts the --data file; a snapshot is already a file
+            print("--window and --dataset are mutually exclusive "
+                  "(SPEC.md 89.7/89.4)", file=sys.stderr)
+            return 1
     # SPEC.md 46.3 (v0.32): portfolio mode — first, because it is mutually
     # exclusive with the --data / --from-run checks below
     if getattr(args, "tasks", None) is not None:
@@ -1010,15 +1609,16 @@ def _cmd_fit(args: argparse.Namespace) -> int:
             return 1
     if getattr(args, "dry_run", False):
         return _fit_dry_run(args)  # 40.1 (v0.26): plan only, no training
+    snap = None  # 89.4.3 (A4): the fitted dataset entry (or the re-run's None)
     if args.from_run is not None:
         env, bar = _fit_from_run(args)
         if env is None:
             return 1
         metric = getattr(env.task, "metric", None) or "score"
     else:
-        if args.data is None:
-            print("one of --data or --from-run is required (SPEC.md 37.1.4)",
-                  file=sys.stderr)
+        if args.data is None and getattr(args, "dataset", None) is None:
+            print("one of --data, --dataset, or --from-run is required "
+                  "(SPEC.md 37.1.4/89.4.3)", file=sys.stderr)
             return 1
         # 88.6 (v0.74, C6): --continue — the most recent same-task run is
         # the search prior (the 86 plumbing; an explicit --prior-run wins)
@@ -1042,11 +1642,37 @@ def _cmd_fit(args: argparse.Namespace) -> int:
                     s = f"{score:.1f}" if score is not None else "?"
                     print(f"continue : starting from {Path(prior_dir).name} "
                           f"(final {s}) - its best spec seeds the search prior")
+        # 89.7.2 (B3): --window pre-filters the CSV to the recency slice
+        if getattr(args, "window", None) is not None:
+            try:
+                window_s = parse_window(args.window)
+            except ValueError as exc:
+                print(f"window : {exc} (SPEC.md 89.7.1)", file=sys.stderr)
+                return 1
+            slice_path = _fit_window_slice(args, window_s)
+            if slice_path is None:
+                return 1
+            args.data = slice_path
+        # 89.4.3 (A4): --dataset verifies the snapshot sha256 before fit
+        snap = None
+        if getattr(args, "dataset", None) is not None:
+            snap = _fit_dataset_verify(args)
+            if snap is None:
+                return 1
+            args.data = snap["path"]
         env, bar, metric = _fit_data(args)
     if env is None:
         return 1
     _drive(args, env)
     rc = _fit_gate(args, env, bar, metric)  # kept under --quiet (47.3.2)
+    # 89.4.3 (A4): the fitted dataset lands in the run dir as dataset.json
+    if snap is not None:
+        (Path(env.run_dir) / "dataset.json").write_text(
+            json.dumps(snap, indent=2, sort_keys=True), encoding="utf-8")
+    # 89.11 (D1): the latency budget — a MISS (rc 2) when OVER it
+    lrc = _latency_objective(args, env)
+    if lrc is not None:
+        return lrc
     # C2/C3 (SPEC.md 28.2/28.3): after the gate line, per-class accuracy +
     # weakest-class hint (and the media error gallery)
     if not getattr(args, "quiet", False):  # 47.3.2: the diagnostics block
@@ -1844,6 +2470,11 @@ def _cmd_report_audience(args, audience: str, summary: dict, entries, run_dir):
                       extras=extras, provenance=provenance, trace=trace,
                       data=data, seed_spread=seed_spread)
     print(render_view(view, audience))
+    # 89.10 (v0.75, C3): the freshness block — how old is the model relative
+    # to the data (feed events when present, else the run's own timestamp)
+    evs = load_events(run_dir.parent)
+    if evs or summary.get("timestamp"):
+        print(render_freshness(freshness_view(summary, evs)))
     if getattr(args, "html", False):
         out = run_dir / f"report_{audience}.html"
         out.write_text(html_view(audience, view), encoding="utf-8")
@@ -2118,6 +2749,26 @@ def _cmd_report_nonlinearity(args, summary: dict, entries,
 
 
 def _cmd_report(args: argparse.Namespace) -> int:
+    # 89.9 (v0.75, C2): --backtest replays the loop over expanding windows
+    # of the given CSV — exclusive with every run-level view below
+    if getattr(args, "backtest", False):
+        for flag, why in (
+                ("run", "--run"), ("history", "--history"),
+                ("benchmark", "--benchmark"), ("json", "--json"),
+                ("what_if", "--what-if"), ("project", "--project"),
+                ("trace", "--trace"), ("importance", "--importance"),
+                ("certificate", "--certificate"), ("fmt", "--format"),
+                ("user", "--user"), ("decision", "--decision"),
+                ("nonlinearity", "--nonlinearity")):
+            if getattr(args, flag, None) not in (None, False, []):
+                print(f"--backtest and {why} are mutually exclusive "
+                      f"(SPEC.md 89.9)", file=sys.stderr)
+                return 1
+        if getattr(args, "audience", "technical") not in (None, "technical"):
+            print("--backtest and --audience are mutually exclusive "
+                  "(SPEC.md 89.9)", file=sys.stderr)
+            return 1
+        return _cmd_report_backtest(args)
     # SPEC.md 64.1 (v0.50, B5): --benchmark is a runs-dir-level view (like
     # --history): mutually exclusive with --run, --history, and every
     # single-run human view (64.3.1 — the guard table is symmetric); it
@@ -3592,6 +4243,25 @@ def build_parser() -> argparse.ArgumentParser:
                             "--runs-dir (like --history); --json for the "
                             "machine form; mutually exclusive with --run, "
                             "--history, and the single-run views")
+    # v0.75 (SPEC.md 89.9, C2): the expanding-window backtest replay
+    p_rep.add_argument("--backtest", action="store_true",
+                       help="v0.75 (SPEC.md 89.9): replay the loop over "
+                            "expanding windows of --data (window i = the "
+                            "first ceil(n*i/--windows) rows; the 'if we had "
+                            "started with less data' axis); one line per "
+                            "window; mutually exclusive with the run-level "
+                            "views")
+    p_rep.add_argument("--data", default=None, metavar="CSV",
+                       help="v0.75 (SPEC.md 89.9): the CSV for --backtest")
+    p_rep.add_argument("--seed", type=int, default=7,
+                       help="v0.75 (SPEC.md 89.9): the backtest loops' seed "
+                            "(default 7 - deterministic)")
+    p_rep.add_argument("--windows", type=int, default=3,
+                       help="v0.75 (SPEC.md 89.9): K backtest windows "
+                            "(default 3)")
+    p_rep.add_argument("--budget", type=int, default=3,
+                       help="v0.75 (SPEC.md 89.9): each backtest window's "
+                            "experiment budget (default 3)")
     _add_config_flag(p_rep)  # 47.1.2
     p_rep.set_defaults(func=_cmd_report)
 
@@ -3740,6 +4410,26 @@ def build_parser() -> argparse.ArgumentParser:
                        help="v0.45 (SPEC.md 59.2): reject candidates outside an "
                             "allowed value set (invalid_spec); e.g. "
                             "--constrain train_steps=200,400 (repeatable)")
+    # v0.75 (SPEC.md 89): time-based and on-demand data ingestion
+    p_fit.add_argument("--window", default=None, metavar="7d",
+                       help="v0.75 (SPEC.md 89.7): train on the recency slice "
+                            "only - keep rows whose date column is within "
+                            "7d/24h/90m/30s of the file's newest date "
+                            "(CSV with a date column; --data mode only)")
+    p_fit.add_argument("--window-col", default=None,
+                       help="v0.75 (SPEC.md 89.7): name the date column "
+                            "explicitly (default: auto-detect the usual "
+                            "date names, then any parseable first match)")
+    p_fit.add_argument("--dataset", default=None, metavar="ID",
+                       help="v0.75 (SPEC.md 89.4): fit a snapshot by its "
+                            "dataset id (or unique prefix) instead of --data "
+                            "- the sha256 is verified before the loop and the "
+                            "entry lands in the run dir as dataset.json")
+    p_fit.add_argument("--latency-ms", type=float, default=None,
+                       metavar="MS",
+                       help="v0.75 (SPEC.md 89.11): also gate on the best "
+                            "model's measured median ms/row - OVER the budget "
+                            "is a MISS (rc 2), like the score bar")
     _add_config_flag(p_fit)  # 47.1.2
     p_fit.set_defaults(func=_cmd_fit)
 
@@ -3822,6 +4512,16 @@ def build_parser() -> argparse.ArgumentParser:
                       help="suppress the per-experiment loop output and the "
                            "per-class diagnostics (keep the gate verdict, "
                            "the summary block, and the verdict line)")
+    p_go.add_argument("--latency-ms", type=float, default=None,
+                      metavar="MS",
+                      help="v0.75 (SPEC.md 89.11): also gate on the best "
+                           "model's measured median ms/row - OVER the budget "
+                           "is a MISS (rc 2), like the score bar")
+    p_go.add_argument("--feeds", default=None, metavar="A.csv,B.csv",
+                      help="v0.75 (SPEC.md 89.12): a portfolio of feed CSVs - "
+                           "one shared budget split evenly across them, run "
+                           "sequentially; rc 0 iff every feed PASSes "
+                           "(mutually exclusive with --data)")
     # 87.3.4: the shared driver / gate / budget read these — the fit
     # defaults, materialized once (the `go` surface keeps its own flag set)
     p_go.set_defaults(
@@ -3829,9 +4529,105 @@ def build_parser() -> argparse.ArgumentParser:
         search_quality="v04", ensemble_final=False, stall_patience=None,
         screen_frac=1.0, kfold=0, from_model=None, prior_run=None,
         gate=[], max_seconds=900.0, max_train_seconds=30.0,
-        tasks=None, dry_run=False, from_run=None)
+        tasks=None, dry_run=False, from_run=None, dataset=None,
+        window=None, window_col=None)
     _add_config_flag(p_go)  # 47.1.2
     p_go.set_defaults(func=_cmd_go)
+
+    # v0.75 (SPEC.md 89): time-based and on-demand data ingestion
+    p_feed = sub.add_parser(
+        "feed", help="v0.75 (SPEC.md 89.1): watch a data file - each poll that "
+                     "detects new data snapshots it, re-scores the champion on "
+                     "it, and judges the drift (the on-call loop)")
+    p_feed.add_argument("--data", required=True, help="the CSV file to watch")
+    p_feed.add_argument("--runs-dir", default="runs")
+    p_feed.add_argument("--max", type=int, default=1, metavar="N",
+                        help="number of polls (default 1 - one watch cycle; "
+                             "the state survives between calls)")
+    p_feed.add_argument("--poll", type=float, default=0.5,
+                        help="seconds to sleep BETWEEN polls (default 0.5; "
+                             "no sleep after the last poll)")
+    p_feed.add_argument("--champion", default=None, metavar="RUN",
+                        help="the champion run dir (default with --latest: "
+                             "the registry's latest run)")
+    p_feed.add_argument("--latest", action="store_true",
+                        help="the champion is the registry's latest finished "
+                             "run (timestamp, then run id)")
+    p_feed.add_argument("--drift-bar", type=float, default=2.0, metavar="PTS",
+                        help="drift alert when the champion's fresh score "
+                             "falls more than this below its reference "
+                             "(default 2.0)")
+    p_feed.add_argument("--chart", default=None, metavar="OUT.svg",
+                        help="render the scored-event log as the quality-over-"
+                        "time SVG to OUT.svg (the 89.8 view)")
+    p_feed.add_argument("--label", default=None, help="label column hint")
+    _add_config_flag(p_feed)  # 47.1.2
+    p_feed.set_defaults(func=_cmd_feed)
+
+    p_refresh = sub.add_parser(
+        "refresh", help="v0.75 (SPEC.md 89.3): champion/challenger - score the "
+                        "champion's model on NEW data, run a fresh challenger "
+                        "loop on it, and decide PROMOTE / KEEP")
+    p_refresh.add_argument("--data", required=True,
+                           help="the NEW data CSV")
+    p_refresh.add_argument("--champion", default=None, metavar="RUN",
+                           help="the champion run dir (default with --latest: "
+                                "the registry's latest run)")
+    p_refresh.add_argument("--latest", action="store_true",
+                           help="the champion is the registry's latest "
+                                "finished run")
+    p_refresh.add_argument("--experiments", type=int, default=5,
+                           help="the challenger loop's budget (default 5)")
+    p_refresh.add_argument("--target", type=float, default=95.0,
+                           help="the challenger loop's gate bar (default 95.0)")
+    p_refresh.add_argument("--seed", type=int, default=7)
+    p_refresh.add_argument("--margin", type=float, default=0.0,
+                           help="PROMOTE when the challenger beats the "
+                                "champion by at least this (default 0.0 - "
+                                "a tie PROMOTEs)")
+    p_refresh.add_argument("--runs-dir", default="runs")
+    _add_config_flag(p_refresh)  # 47.1.2
+    p_refresh.set_defaults(func=_cmd_refresh)
+
+    p_datasets = sub.add_parser(
+        "datasets", help="v0.75 (SPEC.md 89.4): list the dataset snapshot "
+                         "registry (id, rows, cols, label, balance, created)")
+    p_datasets.add_argument("--runs-dir", default="runs")
+    _add_config_flag(p_datasets)  # 47.1.2
+    p_datasets.set_defaults(func=_cmd_datasets)
+
+    p_sched = sub.add_parser(
+        "schedule", help="v0.75 (SPEC.md 89.5): N sequential training rounds "
+                         "that compound - each round starts from the previous "
+                         "round's search knowledge")
+    p_sched.add_argument("--data", required=True,
+                         help="the CSV file (or a labelled media directory)")
+    p_sched.add_argument("--rounds", type=int, default=3,
+                         help="number of sequential rounds (default 3)")
+    p_sched.add_argument("--every", type=float, default=0.0,
+                         help="seconds to sleep BETWEEN rounds (default 0; "
+                              "no sleep after the last round)")
+    p_sched.add_argument("--experiments", type=int, default=3,
+                         help="each round's budget (default 3)")
+    p_sched.add_argument("--target", type=float, default=95.0,
+                         help="each round's gate bar (default 95.0)")
+    p_sched.add_argument("--seed", type=int, default=7)
+    p_sched.add_argument("--runs-dir", default="runs")
+    p_sched.add_argument("--label", default=None, help="label column hint")
+    _add_config_flag(p_sched)  # 47.1.2
+    p_sched.set_defaults(func=_cmd_schedule)
+
+    p_ingest = sub.add_parser(
+        "ingest", help="v0.75 (SPEC.md 89.6): merge the new CSVs dropped in a "
+                       "folder (deduped rows, header-checked), snapshot the "
+                       "result; rc 1 when nothing is new (poll again later)")
+    p_ingest.add_argument("drop_dir", help="the drop folder holding *.csv")
+    p_ingest.add_argument("--out", default=None, metavar="CSV",
+                          help="the merged output (default <drop_dir>/"
+                               "merged.csv; excluded from the merge)")
+    p_ingest.add_argument("--runs-dir", default="runs")
+    _add_config_flag(p_ingest)  # 47.1.2
+    p_ingest.set_defaults(func=_cmd_ingest)
 
     # v0.73 (SPEC.md 87.8, C2): the model-card one-pager
     p_card = sub.add_parser(

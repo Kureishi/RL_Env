@@ -466,16 +466,16 @@ def test_env_run_on_sequence_task(tmp_path):
 # --- 83.5.7 version + spec (A73) -------------------------------------------------
 
 def test_version_and_spec_cite_a73():
-    """A73 (83.5.7): the version steps to 0.74.0 in both sources (33.1);
+    """A73 (83.5.7): the version steps to 0.75.0 in both sources (33.1);
     SPEC.md carries the section 83 + the A-index row resolving to this
     file (the coherency index test in tests/test_coherency_v021.py does
     the cross-check)."""
     py = tomllib.loads(
         (REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.74.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.75.0"
     init = (REPO / "src" / "autorefine" / "__init__.py").read_text(
         encoding="utf-8")
-    assert '"0.74.0"' in init
+    assert '"0.75.0"' in init
     spec = SPEC.read_text(encoding="utf-8")
     assert "## 83." in spec and "Acceptance (A73)" in spec
     assert "| M72 | v0.69" in spec

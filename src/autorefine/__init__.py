@@ -241,11 +241,47 @@ from .discover import (  # SPEC.md 88.1 (v0.74, A1): the path-less go
     pick_data,
     summarize_csv,
 )
+from .datasets import (  # SPEC.md 89.4/89.7 (v0.75, A4/B3): snapshots + windows
+    find_date_col,
+    find_snapshot,
+    hash_file,
+    latest_snapshot,
+    load_snapshots,
+    parse_window,
+    snapshot_dataset,
+    append_snapshot,
+    window_rows,
+)
+from .ingest import (  # SPEC.md 89.1-89.3/89.6 (v0.75, A1-A3/B2)
+    append_event,
+    drift_verdict,
+    file_fingerprint,
+    hash_csv,
+    load_drop_state,
+    load_events,
+    load_state,
+    merge_tables,
+    poll,
+    refresh_verdict,
+    save_drop_state,
+    save_state,
+)
+from .gate import (  # SPEC.md 89.11 (v0.75, D1): the latency objective
+    latency_line,
+    measure_ms_per_row,
+)
+from .plotting import (  # SPEC.md 89.8 (v0.75, C1): the quality-over-time view
+    svg_quality_over_time,
+)
+from .reporting import (  # SPEC.md 89.10 (v0.75, C3): the freshness block
+    freshness_view,
+    render_freshness,
+)
 
 # SPEC.md 33.1 (C1): single version source — must equal pyproject.toml's
 # [project].version (enforced by the A23 test); one step per feature round
-# (v0.74 ⇒ 0.74.0, M77, SPEC.md 88)
-__version__ = "0.74.0"
+# (v0.75 ⇒ 0.75.0, M78, SPEC.md 89)
+__version__ = "0.75.0"
 
 __all__ = [
     "AutoRefineEnv",
@@ -397,5 +433,15 @@ __all__ = [
     "extract_data_path", "auto_target", "fair_bar_line",
     "measured_per_exp", "experiments_for_time",
     "why_this_model",
+    # v0.75: time-based and on-demand data ingestion (SPEC.md 89, A79)
+    "find_date_col", "find_snapshot", "hash_file", "latest_snapshot",
+    "load_snapshots", "parse_window", "snapshot_dataset", "append_snapshot",
+    "window_rows",
+    "append_event", "drift_verdict", "file_fingerprint", "hash_csv",
+    "load_drop_state", "load_events", "load_state", "merge_tables", "poll",
+    "refresh_verdict", "save_drop_state", "save_state",
+    "latency_line", "measure_ms_per_row",
+    "svg_quality_over_time",
+    "freshness_view", "render_freshness",
     "__version__",
 ]

@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import math
 import re
+import statistics
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -196,3 +198,35 @@ def actuals_from_run(env, entries: list[dict]) -> dict:
         "model": (int(model_size(env.run_dir / "best_model.npz"))
                   if env.run_dir is not None else None),
     }
+
+
+# --- 89.11 (v0.75, D1): latency as a gate objective -------------------------
+
+def measure_ms_per_row(model, x, reps: int = 3) -> float:
+    """89.11.1 (D1): the median wall time of a full `model.forward(x)` over
+    `reps` passes, divided by `x`'s rows — the `latency` actual in
+    ms/row. A measurement, not a gate (the `latency_line` budget decides);
+    `reps < 1` is a fail-loud ``ValueError``."""
+    reps = int(reps)
+    if reps < 1:
+        raise ValueError(f"reps must be >= 1, got {reps}")
+    n = int(np.asarray(x).shape[0])
+    if n < 1:
+        raise ValueError(f"x has {n} rows; need at least 1")
+    times: list[float] = []
+    for _ in range(reps):
+        t0 = time.perf_counter()
+        model.forward(x)
+        times.append(time.perf_counter() - t0)
+    return (statistics.median(times) / n) * 1000.0
+
+
+def latency_line(actual_ms: float, budget_ms: float) -> tuple[bool, str]:
+    """89.11.2 (D1): the human line — within budget →
+    `latency : A ms/row (budget B) - within budget`; over →
+    `... - OVER budget`. ``A`` is the 2-decimal measurement; the budget is
+    rendered with %g (1000, not 1000.0). Returns ``(ok, line)``."""
+    a, b = float(actual_ms), float(budget_ms)
+    ok = a <= b
+    tail = "within budget" if ok else "OVER budget"
+    return ok, f"latency : {a:.2f} ms/row (budget {b:g}) - {tail}"

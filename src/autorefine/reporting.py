@@ -39,6 +39,7 @@ import hashlib
 import json
 import math
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -1045,6 +1046,78 @@ def render_report(fmt: str, doc) -> str:
                      f"{REPORT_FORMATS}")
 
 
+# --- 89.10 (v0.75, C3): freshness in audience reports ------------------------
+
+def _parse_dt(value) -> datetime | None:
+    """89.10 (C3): ISO 8601 text (a trailing ``Z`` is UTC; naive is read as
+    UTC) → an aware datetime; anything else is ``None``."""
+    s = str(value).strip()
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def freshness_view(summary, events, now=None) -> dict:
+    """89.10 (C3): the \u201chow current is this?\u201d block —
+
+    - ``data_as_of``: the last event's ``iso``, else the run's
+      ``timestamp`` (``None`` when neither is known);
+    - ``model_age_hours``: hours from the run's ``timestamp`` to ``now``
+      (``now`` defaults to the wall clock; a fixed ``now`` keeps this pure
+      for tests), ``None`` when the run has no parseable timestamp;
+    - ``rows_seen``: the sum of the event rows (0 when no events);
+    - ``last_drift``: the last event's drift verdict (``None`` when absent).
+
+    Pure given its inputs (G2)."""
+    evs = [e for e in (events or []) if isinstance(e, dict)]
+    last = evs[-1] if evs else None
+    data_as_of = None
+    if last is not None and last.get("iso"):
+        data_as_of = str(last["iso"])
+    elif summary.get("timestamp"):
+        data_as_of = str(summary["timestamp"])
+    age_hours = None
+    t0 = _parse_dt(summary.get("timestamp"))
+    if t0 is not None:
+        t1 = now if isinstance(now, datetime) else _parse_dt(now) if now is not None else datetime.now(timezone.utc)
+        if t1 is not None and t1.tzinfo is None:
+            t1 = t1.replace(tzinfo=timezone.utc)
+        if t1 is not None:
+            age_hours = (t1 - t0).total_seconds() / 3600.0
+    rows_seen = sum(int(e["rows"]) for e in evs
+                    if isinstance(e.get("rows"), (int, float))
+                    and not isinstance(e.get("rows"), bool))
+    last_drift = str(last["drift"]) if last is not None and last.get("drift") else None
+    return {
+        "data_as_of": data_as_of,
+        "model_age_hours": age_hours,
+        "rows_seen": rows_seen,
+        "last_drift": last_drift,
+    }
+
+
+def render_freshness(view) -> str:
+    """89.10 (C3): the stable text rendering of a freshness view (G2 — a
+    re-render of the same view is byte-identical)."""
+    v = view if isinstance(view, dict) else {}
+    a = v.get("data_as_of")
+    h = v.get("model_age_hours")
+    age = (f"{float(h):.1f} hours" if isinstance(h, (int, float))
+           and not isinstance(h, bool) else "-")
+    lines = [
+        "=== freshness ===",
+        f"data as of : {a if a else '-'}",
+        f"model age  : {age}",
+        f"rows seen  : {int(v.get('rows_seen') or 0)}",
+        f"last drift : {v.get('last_drift') or '-'}",
+    ]
+    return "\n".join(lines)
+
+
 __all__ = [
     "spec_fingerprint",
     "benchmark_view",
@@ -1060,4 +1133,6 @@ __all__ = [
     "render_user_guide",
     "decision_view",
     "render_decision",
+    "freshness_view",  # 89.10 (v0.75, C3)
+    "render_freshness",
 ]

@@ -32,7 +32,7 @@ over existing machinery (62/63.1/63.2/64.2/66.1), pure and deterministic
     downloads + the existing share bundle / run_config keys);
   * 87.10 — the "View data" companion expander (the table equivalent of
     the hover tooltips);
-  * 87.11 — acceptance: the version steps to ``0.74.0`` in both
+  * 87.11 — acceptance: the version steps to ``0.75.0`` in both
     sources, the index row M76 resolves to this file, and the new
     exports land in ``autorefine.__all__``.
 
@@ -451,10 +451,10 @@ class TestCeremony:
     def test_version_steps_in_both_sources(self):
         init = (REPO / "src" / "autorefine" / "__init__.py").read_text(
             encoding="utf-8")
-        assert '__version__ = "0.74.0"' in init
-        assert 'version = "0.74.0"' in (
+        assert '__version__ = "0.75.0"' in init
+        assert 'version = "0.75.0"' in (
             REPO / "pyproject.toml").read_text(encoding="utf-8")
-        assert autorefine.__version__ == "0.74.0"
+        assert autorefine.__version__ == "0.75.0"
 
     def test_spec_section_and_index_row(self):
         spec = SPEC.read_text(encoding="utf-8")

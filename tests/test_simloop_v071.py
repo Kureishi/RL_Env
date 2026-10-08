@@ -161,11 +161,11 @@ class TestImprovement:
 
 class TestCeremony:
     def test_version_round_v071(self):
-        """A75.4 (SPEC.md 85.2): the version stepped to `0.74.0` in both
+        """A75.4 (SPEC.md 85.2): the version stepped to `0.75.0` in both
         sources (33.1)."""
         py = tomllib.loads(
             (REPO / "pyproject.toml").read_text(encoding="utf-8"))
-        assert py["project"]["version"] == autorefine.__version__ == "0.74.0"
+        assert py["project"]["version"] == autorefine.__version__ == "0.75.0"
 
     def test_spec_section_85_present(self):
         """A75.4: SPEC.md carries the §85 heading and the A75

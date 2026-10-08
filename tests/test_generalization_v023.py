@@ -312,7 +312,9 @@ def test_fit_from_run_reruns_exactly_and_exclusivity(tmp_path, capsys):
     capsys.readouterr()
     rc = cli_main(["fit", "--runs-dir", str(tmp_path / "runs3")])
     err = capsys.readouterr().err
-    assert rc == 1 and "one of --data or --from-run" in err
+    # 89.4.3 (v0.75): --dataset is now a third valid source alongside
+    # --data / --from-run, so the guard names all three
+    assert rc == 1 and "one of --data, --dataset, or --from-run" in err
 
 
 def test_fit_from_run_rejects_builtin_runs(tmp_path, capsys):
@@ -606,4 +608,4 @@ def test_version_round_v023():
     """A27 (SPEC.md 37, 33.1): the round assertion advanced in place with
     each round (v0.23 ⇒ `0.23.0`; now v0.39 ⇒ `0.39.0`, M42, SPEC.md 53)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.74.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.75.0"
