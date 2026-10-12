@@ -385,17 +385,17 @@ def _setup_app(at, tmp_path: Path, experiments: int = 2) -> None:
     assert not at.exception
 
 
-def test_app_five_tabs_render(tmp_path):
-    """A41 (SPEC.md 51.1.1): the app renders its content as the five
-    `st.tabs` — Setup / Run / Results / Compare / Experiments (the
-    sidebar + the idle screen unchanged)."""
+def test_app_tabs_render(tmp_path):
+    """A41 (SPEC.md 51.1.1): the app renders its content as the six
+    `st.tabs` — Setup / Run / Results / Compare / Experiments / Adapt (the
+    sidebar + the idle screen unchanged; Adapt is the v0.76 90 tab)."""
     pytest.importorskip("streamlit", reason="dashboard app is optional")
     from streamlit.testing.v1 import AppTest
 
     at = AppTest.from_file(str(APP), default_timeout=300)
     _setup_app(at, tmp_path)
     assert _tab_labels(at) == ["Setup", "Run", "Results", "Compare",
-                               "Experiments"]
+                               "Experiments", "Adapt"]
 
 
 def test_app_run_end_to_end_reason_column(tmp_path):
@@ -501,7 +501,7 @@ def test_version_round_v037():
     """A41 (SPEC.md 51.5, 33.1): the version stepped to `0.39.0` in
     both sources (v0.39 ⇒ `0.39.0`, M42, SPEC.md 53)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.75.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.76.0"
 
 
 def test_spec_cites_a41_and_round():

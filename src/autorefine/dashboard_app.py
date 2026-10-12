@@ -137,6 +137,7 @@ from autorefine.plotting import (
     svg_run_curves,  # N-run overlay (SPEC.md 50.1.3, v0.36)
     svg_live_sparkline,  # 55.1 (v0.41) the pulsing live sparkline
     svg_reference_curve,  # 55.3 (v0.41) the reference-run overlay
+    svg_quality_over_time,  # 90.5 (v0.76, A80) champion quality over data time
     svg_score_gap_scatter,
     svg_score_strip,
     svg_time_strip,  # B2 (SPEC.md 54.2) the wall-time cost strip
@@ -180,6 +181,16 @@ from autorefine.research import (
     nonlinearity_profile,  # 82.2.1 (v0.68) the nonlinearity measurement
 )
 from autorefine.tasks import CsvTask
+# SPEC.md 90 (v0.76, A80): the on-demand "Adapt" surface — the app is a
+# thin renderer over these pure cores (23.1): champion drift (89.2), the
+# quality-over-time log (89.1.3), and the champion/challenger refresh (89.3).
+from autorefine.ondemand import (
+    latest_champion,
+    csv_preflight,
+    quality_events,
+    refresh_model,
+    score_fresh,
+)
 
 
 def _render_past_runs(runs_dir: str) -> None:
@@ -2426,6 +2437,137 @@ def _render_quickstart(seed: int, runs_dir: str) -> None:
             "classes → accuracy, otherwise R².")
 
 
+def _render_adapt(runs_dir: str, session_csv: str | None) -> None:
+    """SPEC.md 90 (v0.76, A80): the "Adapt" tab — on-demand data upload +
+    model adaptation, rendered as a thin layer over the pure cores (23.1):
+
+    - the champion (the latest finished run, the 88.3.1 tie-break);
+    - a fresh CSV's usability preflight (90.4) + the champion's drift score
+      on it (90.2, the 89.2 gate);
+    - the champion's quality over data time (90.5, the 89.1.3 event log);
+    - a recency-window challenger with the PROMOTE/KEEP verdict
+      (90.3, the 89.3 decision).
+
+    Empty state (no finished run yet): a friendly hint (the 56.4 pattern).
+    """
+    runs = runs_dir.strip() or "runs"
+    champ = latest_champion(runs)
+    if champ is None:
+        st.info(
+            "No finished run yet — finish a run first (the Run tab), then "
+            "come back here to score new data against your champion model "
+            "and decide whether a freshly-trained challenger should "
+            "replace it.")
+        evs = quality_events(runs)
+        if evs:
+            _svg_block("Champion quality over data time",
+                       svg_quality_over_time(evs))
+        return
+
+    st.subheader("Adapt the model to new data")
+    st.caption(
+        f"Champion: **{champ.name}** — its best model is compared against "
+        "new data below (the drift gate), and a freshly-trained challenger "
+        "can be asked to replace it.")
+
+    col_l, col_r = st.columns(2)
+    fresh_path: str | None = None
+    with col_l:
+        up = st.file_uploader(
+            "Upload new data — a CSV with the same columns as your champion's",
+            type=["csv"], key="adapt_upload",
+            help="A fresh CSV (e.g. a newer export of the same table). It "
+                 "is scored by the champion and (below) used to train a "
+                 "challenger.")
+        if up is not None:
+            dest = Path(tempfile.gettempdir()) / "autorefine_dashboard"
+            dest.mkdir(parents=True, exist_ok=True)
+            fresh_path = str(dest / (Path(up.name).name or "new_data.csv"))
+            Path(fresh_path).write_bytes(up.getvalue())
+        elif session_csv:
+            # fall back to the data already loaded in the sidebar
+            fresh_path = session_csv
+        if fresh_path:
+            try:
+                pf = csv_preflight(fresh_path)
+            except (FileNotFoundError, OSError) as exc:
+                st.warning(f"could not read that file: {exc}")
+            else:
+                bal = ", ".join(f"{k}: {v}" for k, v in
+                                pf["class_balance"].items()) or "-"
+                st.caption(
+                    f"New data: **{pf['n_rows']} rows** × "
+                    f"{pf['n_cols']} cols · label **{pf['label_name']}** · "
+                    f"balance {bal}"
+                    + ("" if pf["usable"]
+                       else " — no label column found"))
+    with col_r:
+        st.caption("The champion's score on the new data (the drift gate):")
+        if fresh_path:
+            try:
+                res = score_fresh(champ, fresh_path, bar=2.0)
+            except (ValueError, FileNotFoundError, OSError) as exc:
+                st.warning(
+                    f"the champion could not be scored on this file: {exc}")
+            else:
+                ok = res["status"] == "stable"
+                (st.success if ok else st.error)(
+                    f"Champion scores **{res['fresh']:.1f}** on the new "
+                    f"data ({res['n']} rows) vs its reference "
+                    f"{res['ref']:.1f} — **{res['status']}** "
+                    f"(margin {res['margin']:.1f}).")
+
+    evs = quality_events(runs)
+    if evs:
+        _svg_block("Champion quality over data time",
+                   svg_quality_over_time(evs))
+
+    st.subheader("Refresh the model on the new data")
+    if fresh_path is None:
+        st.caption("Upload new data (above) to run the challenger.")
+        return
+    c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
+    with c1:
+        n_exp = st.number_input("Experiments", min_value=1, max_value=200,
+                                value=8, key="adapt_exp")
+    with c2:
+        tgt = st.number_input("Target (0–100)", min_value=0.0, max_value=100.0,
+                              value=95.0, step=0.5, key="adapt_target")
+    with c3:
+        win = st.text_input("Recency window (optional)", value="",
+                            key="adapt_window",
+                            help="e.g. 7d, 24h, 90m — train the challenger "
+                                 "on only the most recent rows (the CSV "
+                                 "needs a date / time / timestamp column). "
+                                 "Blank = every row.")
+    with c4:
+        go = st.button("Train challenger & compare", key="adapt_refresh",
+                       type="primary")
+    if go:
+        st.spinner("Training the challenger on the new data …")
+        try:
+            r = refresh_model(
+                fresh_path, runs, champ, experiments=int(n_exp),
+                target=float(tgt), margin=0.0,
+                window=(win.strip() or None))
+        except (ValueError, FileNotFoundError, OSError) as exc:
+            st.error(f"the refresh could not run: {exc}")
+        else:
+            promote = r["verdict"] == "PROMOTE"
+            (st.success if promote else st.warning)(
+                f"**{r['verdict']}** — challenger "
+                f"**{r['challenger_score']:.1f}** vs champion "
+                f"**{r['champion_score']:.1f}** ({r['n']} rows).")
+            st.caption(f"`{r['line']}` · challenger run: `{r['run_dir']}`")
+            if r.get("window"):
+                w = r["window"]
+                st.caption(
+                    f"Recency window {w['window']}: trained on "
+                    f"{w['kept']}/{w['total']} rows"
+                    + (f" ({w['lo']} → {w['hi']})" if w.get("lo")
+                       else f" — {w.get('note', '')}"))
+
+
 def main() -> None:
     st.set_page_config(page_title="AutoRefine dashboard", page_icon=":gear:",
                        layout="wide")
@@ -2675,11 +2817,13 @@ def main() -> None:
         _render_quickstart(int(seed), runs_dir.strip() or "runs")
         st.stop()
 
-    # SPEC.md 51.1.1 (v0.37): the five-tab structure — the same functions in
-    # the same order per interaction as the pre-v0.37 scroll (51.1.2); every
+    # SPEC.md 51.1.1 (v0.37): the tab structure — the same functions in the
+    # same order per interaction as the pre-v0.37 scroll (51.1.2); every
     # widget keeps its exact `key=` (the app tests are key-based).
-    t_setup, t_run, t_results, t_compare, t_exps = st.tabs(
-        ["Setup", "Run", "Results", "Compare", "Experiments"])
+    # SPEC.md 90 (v0.76, A80): the sixth tab (Adapt) is appended last —
+    # the first five render exactly as before.
+    t_setup, t_run, t_results, t_compare, t_exps, t_adapt = st.tabs(
+        ["Setup", "Run", "Results", "Compare", "Experiments", "Adapt"])
 
     with t_setup:  # 51.1.1: the data preview, the settings summary, 51.4.4
         if path is not None:
@@ -2943,6 +3087,14 @@ def main() -> None:
             st.caption("Finish a run first — the per-candidate table (with "
                        "the reason column) and the best-score curve appear "
                        "here.")
+
+    with t_adapt:  # 90 (v0.76, A80): on-demand upload + model adaptation
+        # the sidebar's resolved data path is the "new data" fallback (so a
+        # loaded CSV can be adapted without re-uploading it here); a media
+        # directory is not offered (this tab is the CSV drift/refresh path)
+        _adapt_csv = (path if (isinstance(path, str) and Path(path).is_file())
+                      else None)
+        _render_adapt(runs_dir.strip() or "runs", _adapt_csv)
 
     # 77.2 (v0.63, A67): the workflow-strip settle. The strip rendered at
     # the top of this frame, before the Run tab's drain executed; if the

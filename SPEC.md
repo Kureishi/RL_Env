@@ -96,6 +96,7 @@ numbers and carry none.)
 | M76 | v0.73   | 87     | A77 | tests/test_reach_v073.py |
 | M77 | v0.74   | 88     | A78 | tests/test_mininput_v074.py |
 | M78 | v0.75   | 89     | A79 | tests/test_ingest_v075.py |
+| M79 | v0.76   | 90     | A80 | tests/test_ondemand_ui_v076.py |
 
 ---
 
@@ -7962,3 +7963,145 @@ additive, opt-in surfaces over the existing 22.1/23.1/38/42.1/46.3/62
 machinery, pure and deterministic (G2), no new dependency, defaults
 byte-identical (the A-pins and every legacy output stay green); the A-index
 advances to A79/M78 with `tests/test_ingest_v075.py` (89.13).
+
+---
+
+## 90. v0.76 — On-demand UI: upload fresh data, adapt the model (A80)
+
+The v0.75 ingestion machinery (89) is a set of **CLI** verbs (`feed`,
+`refresh`, `datasets`, `fit --window`). v0.76 surfaces the same machinery
+in the **dashboard** as a sixth tab — **Adapt** — so a user can, without
+leaving the app: upload a fresh CSV, see the champion's drift score on it,
+watch the champion's quality over data time, and ask a freshly-trained
+challenger to replace the champion (or keep it). The tab is a **thin
+renderer** (23.1) over new pure cores in `autorefine.ondemand`; every
+function is deterministic given its inputs (G2), reuses the 89 verdicts
+(89.2/89.3) and the 89.7 recency window, and reuses the 42.1 scoring leaf
+and the champion reconstruction that already live in the CLI (imported
+lazily, the `advanced` local-import pattern — the CLI imports many core
+modules and must not be imported back by them).
+
+The five pre-existing tabs render **exactly as before** (the new tab is
+appended last; every widget keeps its exact `key=`). No new dependency,
+no change to any legacy surface, the A-pins stay green.
+
+### 90.1 A80.1 — the champion (`latest_champion`)
+
+`ondemand.latest_champion(runs_dir)` → `Path | None`: the registry's
+latest finished run (the 88.3.1 tie-break — timestamp, then run_id) that
+has a `summary.json`; `None` when the registry is empty, unreadable, or the
+newest entry is not a finished run. Pure (a read only). The tab shows
+**which** run is the champion (its dir name) so the user knows what they
+are comparing against.
+
+### 90.2 A80.2 — score the champion on fresh data (`score_fresh`)
+
+`ondemand.score_fresh(run_dir, csv_path, bar=2.0)` → `{fresh, ref, status,
+margin, n}`: the champion's accuracy (0–100) on the rows of a **fresh**
+CSV, via the 42.1 leaf (`csv_rows_to_features` + `standardize` +
+`predict_features`) against the file's label column, judged by the 89.2
+drift gate against the champion's own reference score (its finished run's
+`final_best_score`). `status` is `stable` / `alert`, `margin = ref − fresh`
+(a negative margin = the fresh data is easier). The tab renders the
+champion's score vs its reference with the verdict and the margin.
+
+### 90.3 A80.3 — champion vs challenger (`refresh_model`)
+
+`ondemand.refresh_model(csv_path, runs_dir, champion_run, experiments=8,
+target=95.0, seed=7, margin=0.0, window=None, max_train_seconds=30.0)` →
+`{champion_score, challenger_score, n, verdict, line, run_dir}` (+
+`window` when a window was asked): the 89.3 decision, UI-facing —
+
+- champion: the named run's best model scored on the fresh rows (89.1);
+- challenger: a fresh `DashboardRunner` (23.1, bandit, `search_quality=v04`)
+  loop over the fresh rows (optionally restricted to a **recency window**,
+  89.7 — a CSV with a date/time/timestamp column is sliced to the most
+  recent rows and written to the session temp dir; a CSV without one keeps
+  every row, the 89.7 keep-all rule);
+- verdict: `refresh_verdict` (89.3.2) — **PROMOTE** iff the challenger is
+  at/above the champion + margin, else **KEEP**.
+
+The champion is judged on the **same rows** the challenger trains on (an
+apples-to-apples comparison). The challenger loop writes its own artifacts
+under `runs_dir` (23.1) and lands a registry entry, so the new champion is
+immediately available to the next round. A broken champion run or an
+unusable CSV is a `ValueError`/`FileNotFoundError` (the tab shows a
+friendly error).
+
+### 90.4 A80.4 — a pure preflight (`csv_preflight`)
+
+`ondemand.csv_preflight(csv_path)` → `{path, n_rows, n_cols, header,
+label_column, label_name, class_balance, usable}`: a pure usability check
+for a fresh CSV — the row/col counts, the label column (the 88.1.1 rule),
+the class balance (value → count, sorted), and a `usable` flag. Unlike
+`datasets.snapshot_dataset` (89.4) it **writes nothing** — a UI hover must
+not append a snapshot. `FileNotFoundError` on a missing file.
+
+### 90.5 A80.5 — the quality-over-time log (`quality_events`)
+
+`ondemand.quality_events(runs_dir)` → `list[dict]`: the scored-poll events
+(`data_events.jsonl`, 89.1.3) in file order — the data
+`plotting.svg_quality_over_time` (89.8) renders as the champion's quality
+over data time. A missing log is `[]`. The tab shows the chart when the
+log is non-empty (even before a champion exists, so the feed history is
+never lost).
+
+### 90.6 A80.6 — the Adapt tab
+
+The sixth tab (`st.tabs` gains `Adapt`, appended last) renders, over the
+cores above: the champion line (90.1); a fresh-CSV upload (reusing the
+sidebar's temp-file materialization) with the preflight (90.4) and the
+drift score (90.2) side by side; the quality-over-time chart (90.5); and
+the refresh controls (experiments / target / optional recency window) with
+the **Train challenger & compare** button (90.3) and the PROMOTE/KEEP
+verdict. **Empty state** (no finished run yet): a friendly hint (the 56.4
+pattern) instead of the champion surface. The sidebar's resolved data path
+is the "new data" fallback (a loaded CSV can be adapted without
+re-uploading it); a media directory is not offered (the tab is the CSV
+drift/refresh path). All new user-facing strings are clean (the A25
+app-language scan stays green).
+
+### 90.7 Acceptance (A80)
+
+1. **Champion (90.1)**: `latest_champion` resolves the latest finished run
+   (a `summary.json` present) and returns `None` for an empty / missing
+   registry.
+2. **Preflight (90.4)**: `csv_preflight` reports the row/col counts, the
+   label column (`churn`, index 2), the class balance, and `usable`; a
+   missing file is a clear `FileNotFoundError`.
+3. **Score fresh (90.2)**: `score_fresh` returns `n`, `status`, and
+   `margin = ref − fresh`; same-distribution data is stable, drifted data
+   (labels flipped in a region) is an alert with `margin > bar`; a broken
+   champion run or a missing fresh file raises.
+4. **Refresh (90.3)**: `refresh_model` returns a PROMOTE/KEEP verdict, the
+   champion's score on the fresh rows (`n`), a challenger run dir, and a
+   verdict line; a large margin forces KEEP; a window with no date column
+   keeps every row (the keep-all note), a window on a dated CSV slices to
+   the recent rows.
+5. **Quality log (90.5)**: `quality_events` returns `[]` for a missing log
+   and round-trips a written event, which `svg_quality_over_time` renders.
+6. **Adapt tab (90.6)**: the app renders the empty state ("No finished run
+   yet") before a run, and — with a finished run and a data path — the
+   "Adapt the model to new data" surface with the champion line and the
+   drift score; the first five tabs are untouched.
+7. **Ceremony (90.8)**: the version steps to `0.76.0` in both sources
+   (33.1); the A-index advances (`defined == set(range(1, 81))`, 76
+   acceptance rows, M79 resolving to this file); the new exports land in
+   `autorefine.__all__`; the app-language scan stays green (no app strings
+   change).
+
+All in `tests/test_ondemand_ui_v076.py`.
+
+### 90.8 Milestone (M79)
+
+**M79** — v0.76 "On-demand UI": the v0.75 CLI ingestion surfaces (89) are
+brought into the dashboard as the **Adapt** tab — a user uploads a fresh
+CSV and, without leaving the app, sees the champion's drift score on it
+(90.2), the champion's quality over data time (90.5), and a
+champion-vs-challenger verdict (90.3) that can PROMOTE a freshly-trained
+model or KEEP the incumbent (89.3.2), with an optional recency-window
+challenger (89.7). The tab is a thin renderer (23.1) over the new pure
+cores in `autorefine.ondemand` (90.1–90.5), reuses the 89 verdicts and the
+42.1 scoring leaf, keeps the five existing tabs byte-identical, adds no
+dependency, and leaves every legacy output green; the A-index advances to
+A80/M79 with `tests/test_ondemand_ui_v076.py` (90.7).

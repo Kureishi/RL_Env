@@ -277,11 +277,18 @@ from .reporting import (  # SPEC.md 89.10 (v0.75, C3): the freshness block
     freshness_view,
     render_freshness,
 )
+from .ondemand import (  # SPEC.md 90 (v0.76, A80): the on-demand Adapt cores
+    latest_champion,
+    csv_preflight,
+    quality_events,
+    refresh_model,
+    score_fresh,
+)
 
 # SPEC.md 33.1 (C1): single version source — must equal pyproject.toml's
 # [project].version (enforced by the A23 test); one step per feature round
-# (v0.75 ⇒ 0.75.0, M78, SPEC.md 89)
-__version__ = "0.75.0"
+# (v0.76 ⇒ 0.76.0, M79, SPEC.md 90)
+__version__ = "0.76.0"
 
 __all__ = [
     "AutoRefineEnv",
@@ -443,5 +450,8 @@ __all__ = [
     "latency_line", "measure_ms_per_row",
     "svg_quality_over_time",
     "freshness_view", "render_freshness",
+    # SPEC.md 90 (v0.76, A80): the on-demand Adapt cores
+    "latest_champion", "csv_preflight", "quality_events",
+    "refresh_model", "score_fresh",
     "__version__",
 ]

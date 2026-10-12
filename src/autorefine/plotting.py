@@ -5232,6 +5232,8 @@ def svg_quality_over_time(events, width: int = 640, height: int = 360) -> str:
     if xs[-1] - xs[0] < 1e-9:
         xs = [float(i) for i in range(len(evs))]
     x_lo, x_hi = xs[0], xs[-1]
+    if x_hi - x_lo < 1e-9:
+        x_hi, x_lo = x_lo + 1.0, max(0.0, x_lo - 0.5)
 
     def px(x): return L + (x - x_lo) / (x_hi - x_lo) * pw
 
