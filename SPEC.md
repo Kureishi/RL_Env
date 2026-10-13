@@ -97,6 +97,7 @@ numbers and carry none.)
 | M77 | v0.74   | 88     | A78 | tests/test_mininput_v074.py |
 | M78 | v0.75   | 89     | A79 | tests/test_ingest_v075.py |
 | M79 | v0.76   | 90     | A80 | tests/test_ondemand_ui_v076.py |
+| M80 | v0.77   | 91     | A81 | tests/test_accel_v077.py |
 
 ---
 
@@ -8105,3 +8106,166 @@ cores in `autorefine.ondemand` (90.1–90.5), reuses the 89 verdicts and the
 42.1 scoring leaf, keeps the five existing tabs byte-identical, adds no
 dependency, and leaves every legacy output green; the A-index advances to
 A80/M79 with `tests/test_ondemand_ui_v076.py` (90.7).
+
+## 91. v0.77 — Dense parallel + the optional GPU backend (A81)
+
+The legacy loop is single-threaded by construction, and the host's BLAS is
+single-threaded (mkl-sdl): every dense op is truly serial, so the wall-time
+of a search is the sum of its experiments. v0.77 adds **dense parallelism**
+where the work is genuinely independent — the bagged trees of the tree
+family, and the seeds of a variance sweep (which already had `--workers`,
+31.2) — and an **optional GPU backend** for the dense leaves. Two
+invariants govern the design:
+
+* **G2 stays green.** The default path (`parallel=1`, `backend="cpu"`) is
+  the exact pre-v0.77 code path — same RNG stream, same float order, same
+  bit-identical pins (the A-pins never change).
+* **No new hard dependency.** GPU libraries (cupy / torch) are NEVER
+  imported at module load; they are discovered with
+  `importlib.util.find_spec` and imported only when explicitly selected, and
+  a missing library degrades to CPU with a friendly note (91.3).
+
+The new core is `autorefine.accel` (stdlib + numpy only). All additions are
+opt-in knobs with legacy defaults; the A-pins stay green.
+
+### 91.1 A81.1 — backend discovery + report
+
+`accel.available_gpus()` → the importable GPU backends in preference order
+(`("cupy", "torch")`); `find_spec` only — no import, no side effects, no
+GPU work at discovery time. `accel.detect_backend(prefer)` resolves a
+preference: `"cpu"` → `"cpu"`; `"auto"` → the first importable GPU backend
+else `"cpu"`; `"gpu"`/`"cupy"`/`"torch"` → that backend or
+`accel.BackendUnavailable`; anything else a `ValueError`.
+`accel.load_backend(name)` imports a GPU backend by name (`"cpu"` raises —
+it has no module; unimportable → `BackendUnavailable`).
+`accel.backend_info()` → the JSON-safe report: `auto` (the pick),
+`libraries` (cupy/torch version or None — a broken install reads as
+absent, never a crash), `numpy`, `cpu_count`, `gpu_available`.
+
+### 91.2 A81.2 — `parallel_map` + the parallel tree fit (G2-safe)
+
+`accel.parallel_map(n, fn, workers=1)` runs `fn(i)` for `i in 0..n-1` and
+returns the results **in input order**. `workers == 1` (the default) is the
+exact serial loop — bit-identical (G2). `workers > 1` runs the independent
+units on a `ThreadPoolExecutor` (numpy releases the GIL inside its array /
+BLAS work); `pool.map` preserves order, so the aggregation is the fixed
+legacy order regardless of scheduling. Units must be side-effect-free and
+share no mutable state — the bagged-tree fit is (each unit is one tree on
+its own bag).
+
+`TreeEnsemble.fit(X, y, input_noise=0.0, parallel=1)` (91.2): the
+bootstrap bags are still drawn **sequentially from the single seeded rng**
+(the same bit-identical stream), the independent trees are then built via
+`parallel_map`, and the fixed-order assembly is unchanged — so
+`parallel=1` and every `parallel > 1` produce **bit-identical trees and
+predictions**. `trainer.train(..., parallel=1)` validates (`int >= 1`,
+`bool` rejected) and passes the value to the tree fit (other families are
+unaffected). `AutoRefineEnv(..., parallel=1)` is a registry knob (cli:
+`run`, `fit`, `variance`) whose validator rejects bad values; all six
+`train(` call sites in the env pass it through. `DashboardRunner(...,
+parallel=1)` forwards it to the env and into the seed-sweep params, so a
+variance sweep parallelizes its per-seed tree bags too. The
+`BoostingEnsemble` is documented as **not** parallelizable — its rounds are
+sequentially dependent — and gains no flag.
+
+### 91.3 A81.3 — the GPU opt-in + graceful fallback
+
+`accel.resolve_backend(requested)` → `(actual, warning|None)`, the
+graceful-degradation contract: `"cpu"` → `("cpu", None)`; a GPU request
+with no importable backend → `("cpu", note)` (a friendly install hint — the
+CLI/app print it, the run proceeds); a GPU request with a backend present →
+that backend, no warning. `AutoRefineEnv(..., backend="cpu")` is a
+registry knob (cli: `run`, `fit`; choices `auto/cpu/gpu/cupy/torch`) with
+the same validator; `"cpu"` (the default) is the native numpy path and
+bit-identical to the legacy code. The CLI prints the fallback note to
+stderr before driving when a GPU was requested but is absent — a missing
+GPU is a warning, not a failure. The GPU **foundations** land now:
+`accel.to_device` / `accel.to_host` (device leaves — numpy in, numpy out,
+so a caller never sees a device type) and `accel.gpu_matmul` (the dense
+op; `"cpu"` is always the native `a @ b`; a named GPU backend is strict,
+`auto`/`gpu` degrade gracefully). Documented caveat: a GPU result is
+**bit-different** from CPU (different device, different float reduction
+order) — allowed because it is strictly opt-in; the G2 bit-exact pins are
+CPU-path pins by contract. `pyproject.toml` gains the optional
+`gpu = ["cupy-cuda12x>=13.0"]` extra (metadata only — the core stays
+GPU-free).
+
+### 91.4 A81.4 — RunConfig fields
+
+`RunConfig` gains `parallel: int = 1` (91.2) and `backend: str = "cpu"`
+(91.3), both in `_OPTIONAL_FIELDS` so a pre-v0.77 `run_config.json` loads
+with the legacy defaults, and both validator-checked (`parallel` an
+`int >= 1`; `backend` one of the five names). `RunConfig.from_env` reads
+them off the env (with the same defaults); `fit_recipe` and
+`runconfig_to_flags` emit `--parallel` / `--backend` only when non-default
+(the omission rule, 37.1.4).
+
+### 91.5 A81.5 — the `autorefine backend` verb
+
+`autorefine backend` reports the compute backends — which of cupy/torch
+this interpreter can import, which one `auto` picks, the numpy version, the
+CPU count, and a one-line note that `--parallel` parallelizes independent
+dense units with bit-identical results. `--json` prints the pure-JSON
+`backend_info()` dict (21.2 style). Exit 0. A support-triage command (the
+`doctor` family) and the answer to "can I use a GPU here?".
+
+### 91.6 A81.6 — documented follow-up
+
+Per-family **GPU training** (routing the dense layers of the MLP / conv
+families through `to_device` / `to_host` / `gpu_matmul`) is the natural
+next step: the foundations of 91.3 make it a family-local change, and the
+tree family already runs dense-parallel via 91.2. It is documented, not
+implemented in v0.77.
+
+### 91.7 Acceptance (A81)
+
+1. **`parallel_map` (91.2)**: `workers=1` equals the serial result and
+   `workers>1` returns the same values in input order; bad `workers` and
+   negative `n` raise `ValueError`.
+2. **Bit-identical tree fit (91.2)**: `TreeEnsemble.fit(parallel=1)` and
+   `fit(parallel=4)` produce bit-identical trees (structure + leaves) and
+   `forward` outputs on the same seeded data — the G2 win; and
+   `trainer.train(..., parallel=N)` gives the identical final loss for a
+   tree spec.
+3. **Knobs (91.2/91.3)**: the `parallel` and `backend` validators reject
+   bad values (`bool`, `< 1`, unknown backend names); the env exposes
+   `parallel` / `backend` attributes with the legacy defaults; the KNOBS
+   registry rows carry the right cli tuples (`run/fit/variance` and
+   `run/fit` respectively).
+4. **CLI (91.3/91.5)**: `--parallel` appears on exactly `run`/`fit`/
+   `variance` and `--backend` on exactly `run`/`fit` (parser default ==
+   registry default); the `backend` subcommand exists and exits 0.
+5. **Backends on this host (91.1/91.3)**: `resolve_backend("gpu")`
+   degrades to `("cpu", note)`; `detect_backend("cpu") == "cpu"` and
+   `detect_backend("auto") == "cpu"` (no GPU library installed);
+   `gpu_matmul` on the CPU path equals `a @ b`; `load_backend("cupy")`
+   raises `BackendUnavailable`; `backend_info()` carries the documented
+   keys.
+6. **RunConfig (91.4)**: `to_dict` carries `parallel` / `backend`; a
+   pre-v0.77 dict (fields absent) loads with the legacy defaults; the
+   validators reject bad values; `fit_recipe` / `runconfig_to_flags`
+   emit the flags only when non-default.
+7. **Ceremony**: the version steps to `0.77.0` in both sources (33.1);
+   the A-index advances (`defined == set(range(1, 82))`, 77 acceptance
+   rows, M80 resolving to this file); the new exports land in
+   `autorefine.__all__`; the app-language scan stays green (no app
+   strings change).
+
+All in `tests/test_accel_v077.py`.
+
+### 91.8 Milestone (M80)
+
+**M80** — v0.77 "Dense parallel + the optional GPU backend": the single-
+threaded dense workloads (bagged trees, the per-seed sweep units) become
+parallel via the fixed-order, G2-safe `accel.parallel_map` (91.2) — the
+bags are drawn from the same seeded rng, the trees build on
+`ThreadPoolExecutor` workers, and the results are bit-identical at every
+`parallel` value; the optional GPU backend (91.3) is discovered without
+side effects, degrades to CPU with a friendly note when absent, and lands
+the device leaves (`to_device` / `to_host` / `gpu_matmul`) that the
+documented per-family follow-up (91.6) will build on; both new knobs
+(`parallel`, `backend`) are registry rows with legacy defaults, RunConfig
+fields (91.4), CLI flags on the owning subcommands, and the
+`autorefine backend` report verb (91.5). No new hard dependency, every
+legacy surface stays green, and the A-index advances to A81/M80 with
+`tests/test_accel_v077.py` (91.7).

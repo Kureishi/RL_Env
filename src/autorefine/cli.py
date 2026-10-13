@@ -323,6 +323,39 @@ def _steering_from_args(args: argparse.Namespace):
     return state
 
 
+def _backend_note(backend: str) -> str | None:
+    """SPEC.md 91.3 (v0.77): the graceful-degradation note for a GPU
+    request with no importable library (None = nothing to say). The run
+    itself proceeds on CPU — a missing GPU is a warning, not a failure."""
+    if backend == "cpu":
+        return None
+    from .accel import resolve_backend  # local: the CLI stays importable
+    return resolve_backend(backend)[1]
+
+
+def _cmd_backend(args: argparse.Namespace) -> int:
+    """SPEC.md 91.1 (v0.77): `autorefine backend` — the compute-backend
+    report. Which GPU backends this interpreter can import (cupy / torch),
+    which one `auto` would pick, the numpy version, and the CPU count.
+    `--json` prints the pure-JSON dict (SPEC.md 21.2 style). Exit 0."""
+    from .accel import backend_info  # local: no import cost at module load
+    info = backend_info()
+    if args.json:
+        print(json.dumps(info, indent=2, sort_keys=True))
+        return 0
+    print("AutoRefine compute backends (SPEC.md 91)")
+    print(f"auto picks  : {info['auto']}")
+    for name in ("cupy", "torch"):
+        ver = info["libraries"].get(name)
+        print(f"{name:<10}: {ver} (available)" if ver
+              else f"{name:<10}: not importable (the CPU path is used)")
+    print(f"numpy       : {info['numpy']} ({info['cpu_count']} CPUs visible)")
+    print(f"GPU         : {'available — use --backend gpu (or auto)' if info['gpu_available'] else 'none found — the CPU path is the default'}")
+    print("note        : --parallel N parallelizes independent dense units "
+          "(bagged trees, seeds) with bit-identical results (SPEC.md 91.2)")
+    return 0
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     # SPEC.md 87.2 (v0.73, A2): the plain-language tour — the 41.3 tiny loop
     # narrated in three beats; like --demo, the other `run` flags are ignored
@@ -371,6 +404,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         stall_patience=args.stall_patience,  # v0.17 (SPEC.md 31.1; None = off)
         screen_frac=args.screen_frac,  # v0.18 (SPEC.md 32.2; 1.0 = off)
         kfold=args.kfold,  # v0.30 (SPEC.md 44.1; 0 = off, legacy)
+        parallel=args.parallel,  # v0.77 (SPEC.md 91.2; 1 = serial, bit-identical)
+        backend=args.backend,  # v0.77 (SPEC.md 91.3; cpu = the legacy path)
         # v0.23 (SPEC.md 37.1.3): driver metadata for the canonical recipe
         policy=args.policy,
         target=None,  # `run` is ungated (SPEC.md 37.2.3)
@@ -380,6 +415,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
         prior_run=args.prior_run,  # v0.72 (SPEC.md 86; None = off)
         **quality,
     )
+    note = _backend_note(args.backend)  # v0.77 (SPEC.md 91.3)
+    if note:
+        print(note, file=sys.stderr)
     _drive(args, env)
     return 0
 
@@ -1663,6 +1701,9 @@ def _cmd_fit(args: argparse.Namespace) -> int:
         env, bar, metric = _fit_data(args)
     if env is None:
         return 1
+    note = _backend_note(args.backend)  # v0.77 (SPEC.md 91.3)
+    if note:
+        print(note, file=sys.stderr)
     _drive(args, env)
     rc = _fit_gate(args, env, bar, metric)  # kept under --quiet (47.3.2)
     # 89.4.3 (A4): the fitted dataset lands in the run dir as dataset.json
@@ -1996,6 +2037,8 @@ def _fit_data(args: argparse.Namespace) -> tuple:
         stall_patience=args.stall_patience,  # v0.17 (SPEC.md 31.1; None = off)
         screen_frac=args.screen_frac,  # v0.18 (SPEC.md 32.2; 1.0 = off)
         kfold=args.kfold,  # v0.30 (SPEC.md 44.1; 0 = off, legacy)
+        parallel=getattr(args, "parallel", 1),  # v0.77 (SPEC.md 91.2; 1 = serial, bit-identical)
+        backend=getattr(args, "backend", "cpu"),  # v0.77 (SPEC.md 91.3; cpu = the legacy path)
         # v0.23 (SPEC.md 37.1.3): driver metadata for the canonical recipe
         policy=args.policy, target=args.target,
         rl_episodes=args.rl_episodes if args.policy == "rl" else None,
@@ -2072,6 +2115,8 @@ def _fit_from_run(args: argparse.Namespace) -> tuple:
         stall_patience=config.stall_patience,  # v0.17 (SPEC.md 31.1)
         screen_frac=config.screen_frac,  # v0.18 (SPEC.md 32.2)
         kfold=config.kfold,  # v0.30 (SPEC.md 44.1): the recipe's kfold
+        parallel=config.parallel,  # v0.77 (SPEC.md 91.2): the recipe's parallel
+        backend=config.backend,  # v0.77 (SPEC.md 91.3): the recipe's backend
         policy=config.policy, target=bar, rl_episodes=config.rl_episodes,
         steering=steering,  # SPEC.md 59.4 (v0.45): the recipe's steering rules
         initial_model=config.initial_model,  # v0.66 (SPEC.md 80; None = off)
@@ -2152,6 +2197,7 @@ def _cmd_variance(args: argparse.Namespace) -> int:
         search_quality=args.search_quality, modality=args.task,
         stall_patience=args.stall_patience,  # v0.17 (SPEC.md 31.1; per-seed)
         objectives=objectives,  # v0.23 (SPEC.md 37.2)
+        parallel=args.parallel,  # v0.77 (SPEC.md 91.2; per-seed tree bags)
     )
     seeds = list(range(args.seed, args.seed + args.seeds))
     sweep = runner.seed_sweep(seeds, workers=args.workers)  # v0.17 (SPEC.md 31.2)
@@ -4083,6 +4129,17 @@ def build_parser() -> argparse.ArgumentParser:
                             "first F·n rows and full-train only strict beats of "
                             "the (screened) baseline; 0 < F < 1 to enable, "
                             "default 1.0 = off (pre-v0.18 behavior)")
+    p_run.add_argument("--parallel", type=int, default=1,
+                       help="v0.77 (SPEC.md 91.2): worker threads for the "
+                            "independent dense units (the bagged-tree fits) — "
+                            "bit-identical results at any N; default 1 = the "
+                            "exact serial path")
+    p_run.add_argument("--backend", default="cpu",
+                       choices=("auto", "cpu", "gpu", "cupy", "torch"),
+                       help="v0.77 (SPEC.md 91.3): the compute backend — "
+                            "gpu/auto use cupy or torch when installed and "
+                            "degrade to CPU with a note when not; default cpu "
+                            "(the bit-identical legacy path)")
     p_run.add_argument("--kfold", type=int, default=0,
                        help="v0.30 (SPEC.md 44.1): score each model on K "
                             "distinct held-out subsets and average (k-fold "
@@ -4373,6 +4430,17 @@ def build_parser() -> argparse.ArgumentParser:
                        help="v0.30 (SPEC.md 44.1): score each model on K "
                             "distinct held-out subsets and average (k-fold "
                             "holdout scoring; 0 = off, the legacy single split)")
+    p_fit.add_argument("--parallel", type=int, default=1,
+                       help="v0.77 (SPEC.md 91.2): worker threads for the "
+                            "independent dense units (the bagged-tree fits) — "
+                            "bit-identical results at any N; default 1 = the "
+                            "exact serial path")
+    p_fit.add_argument("--backend", default="cpu",
+                       choices=("auto", "cpu", "gpu", "cupy", "torch"),
+                       help="v0.77 (SPEC.md 91.3): the compute backend — "
+                            "gpu/auto use cupy or torch when installed and "
+                            "degrade to CPU with a note when not; default cpu "
+                            "(the bit-identical legacy path)")
     p_fit.add_argument("--from-model", default=None, metavar="NPZ",
                        help="v0.66 (SPEC.md 80): start from an uploaded "
                             "trained model (*.npz) — scored as the baseline, "
@@ -4826,6 +4894,10 @@ def build_parser() -> argparse.ArgumentParser:
                        help="v0.17 (SPEC.md 31.2): worker processes for the seed "
                             "sweep (default 1 = the exact serial path; per-seed "
                             "results bit-identical either way)")
+    p_var.add_argument("--parallel", type=int, default=1,
+                       help="v0.77 (SPEC.md 91.2): worker threads per seed for "
+                            "the independent dense units (the bagged-tree "
+                            "fits) — bit-identical results at any N")
     p_var.add_argument("--json", action="store_true",
                        help="print the sweep as pure JSON (SPEC.md 21.2)")
     p_var.add_argument("--gate", action="append", default=[],
@@ -4835,6 +4907,14 @@ def build_parser() -> argparse.ArgumentParser:
                             "(repeatable); none → the §22.1 score gate")
     _add_config_flag(p_var)  # 47.1.2
     p_var.set_defaults(func=_cmd_variance)
+
+    p_backend = sub.add_parser(
+        "backend",
+        help="v0.77 (SPEC.md 91.1): report the compute backends (CPU/GPU) "
+             "this interpreter can use")
+    p_backend.add_argument("--json", action="store_true",
+                           help="print the report as pure JSON")
+    p_backend.set_defaults(func=_cmd_backend)
 
     p_pol = sub.add_parser(
         "policy-report", help="v0.15 (SPEC.md 29.2): train the meta-RL policy and "

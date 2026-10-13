@@ -191,23 +191,42 @@ class TreeEnsemble:
         self.seed = int(seed)
         self.trees: list[_Tree] = []
 
-    def fit(self, X: np.ndarray, y: np.ndarray, input_noise: float = 0.0) -> "TreeEnsemble":
+    def fit(self, X: np.ndarray, y: np.ndarray, input_noise: float = 0.0,
+            parallel: int = 1) -> "TreeEnsemble":
+        """Fit `n_trees` bagged CART trees.
+
+        SPEC.md 91.2 (v0.77): `parallel` builds the independent trees on
+        that many workers via `accel.parallel_map`. The bootstrap bags are
+        still drawn SEQUENTIALLY from the single seeded rng (the RNG stream
+        is bit-identical) and the trees are assembled in the fixed legacy
+        order, so `parallel == 1` (default) and every `parallel` value are
+        bit-identical to the pre-v0.77 fit (G2 — the T2/A pins stay
+        green). The BoostingEnsemble cannot use this: its rounds are
+        sequentially dependent by construction (SPEC.md 91.2)."""
         X = np.asarray(X, dtype=np.float64)
         y = np.asarray(y)
         n = X.shape[0]
         min_leaf = _min_samples_leaf(n)
         rng = np.random.default_rng(self.seed)
-        self.trees = []
+        # the bag draws stay serial: one seeded rng, exact legacy stream
+        bags: list[tuple[np.ndarray, np.ndarray]] = []
         for _ in range(self.n_trees):
             idx = rng.integers(0, n, n)  # bootstrap bag
             xb = X[idx]
             if input_noise > 0.0:
                 xb = xb + rng.normal(0.0, input_noise, xb.shape)
-            yb = y[idx]
-            feat, thr, left, right, leafv = _fit_tree(
+            bags.append((xb, y[idx]))
+
+        def _build(i: int) -> tuple:
+            xb, yb = bags[i]
+            return _fit_tree(
                 xb, yb, self.max_depth, min_leaf, self.n_out, self.head,
             )
-            self.trees.append(_Tree(feat, thr, left, right, leafv))
+
+        # SPEC.md 91.2: workers == 1 is the exact serial loop (legacy path)
+        from ..accel import parallel_map  # local: models stay accel-free
+        built = parallel_map(self.n_trees, _build, workers=parallel)
+        self.trees = [_Tree(*t) for t in built]  # fixed legacy order
         return self
 
     def forward(self, x: np.ndarray) -> np.ndarray:

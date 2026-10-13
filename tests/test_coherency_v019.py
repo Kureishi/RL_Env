@@ -126,7 +126,7 @@ def _install_screen_train(monkeypatch, screen_scores: list[float],
     calls = {"s": 0, "f": 0}
 
     def fake_train(dataset, spec, seed, time_limit_seconds=0.0,
-                   n_out=1, head="mse", warm_start=None):
+                   n_out=1, head="mse", warm_start=None, parallel=1):
         n = int(dataset[0].shape[0])
         if n <= 4:  # the prefix subsample (floor(16 * 0.25) = 4 rows)
             sv = screen_scores[min(calls["s"], len(screen_scores) - 1)]
@@ -165,7 +165,7 @@ def test_version_single_source():
     # round label == package version (v0.39 ⇒ 0.39.0, M42 — the round
     # advanced per SPEC.md 33.1 with the v0.31 adapt-to-use-cases batch,
     # SPEC.md 45)
-    assert autorefine.__version__ == "0.76.0"
+    assert autorefine.__version__ == "0.77.0"
     # the app caption is `v{__version__}` — the same number, no third copy
     app_src = (REPO / "src" / "autorefine" / "dashboard_app.py"
                ).read_text(encoding="utf-8")
@@ -182,7 +182,7 @@ def test_knob_registry_defaults_match_env_signature():
     assert set(KNOBS) == {
         "ci_blocks", "z_accept", "efficiency_weight", "gen_gap_penalty",
         "block_size", "ensemble_top_k", "stall_patience", "screen_frac",
-        "kfold"}
+        "kfold", "parallel", "backend"}
     for name, knob in KNOBS.items():
         assert name in sig.parameters, name
         assert sig.parameters[name].default == knob.default, name

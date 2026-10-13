@@ -72,7 +72,8 @@ class DashboardRunner:
                  objectives: tuple | None = None,
                  steering: SteeringState | None = None,
                  initial_model: str | None = None,
-                 prior_run: str | None = None) -> None:
+                 prior_run: str | None = None,
+                 parallel: int = 1) -> None:
         if policy not in ("bandit", "search"):
             raise ValueError(f"unsupported policy {policy!r}: {_RL_HINT}")
         if search_quality not in ("v04", "legacy"):
@@ -113,6 +114,15 @@ class DashboardRunner:
         # SPEC.md 86 (v0.72): the search-prior run dir (None = a fresh
         # run, the exact pre-v0.72 path)
         self.prior_run = prior_run
+        # SPEC.md 91.2 (v0.77): dense-parallel workers for the bagged-tree
+        # fits (1 = the bit-identical serial path; G2-safe — per-unit
+        # compute unchanged, fixed-order aggregation)
+        if parallel is None or isinstance(parallel, bool) \
+                or not isinstance(parallel, int) or parallel < 1:
+            raise ValueError(
+                f"parallel must be an int >= 1 (1 = serial, bit-identical), "
+                f"got {parallel!r}")
+        self.parallel = parallel
         self.env: AutoRefineEnv | None = None
         self.policy: SearchPolicy | BanditPolicy | None = None
         self._state: dict | None = None
@@ -207,6 +217,8 @@ class DashboardRunner:
             initial_model=self.initial_model,
             # SPEC.md 86 (v0.72): the search prior (None = fresh run)
             prior_run=self.prior_run,
+            # SPEC.md 91.2 (v0.77): the bagged-tree parallelism (1 = legacy)
+            parallel=self.parallel,
         )
         # SPEC.md 59.2 (v0.45): steering pins drop their field from the
         # proposal pool (the env's force-set in step() is the backstop)
@@ -319,6 +331,7 @@ class DashboardRunner:
             steering=self.steering,  # SPEC.md 59.2 (v0.45)
             initial_model=self.initial_model,  # SPEC.md 80 (v0.66)
             prior_run=self.prior_run,  # SPEC.md 86 (v0.72)
+            parallel=self.parallel,  # v0.77 (SPEC.md 91.2; picklable int)
         )
 
     def _clone(self, seed: int) -> "DashboardRunner":

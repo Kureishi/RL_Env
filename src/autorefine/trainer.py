@@ -320,8 +320,15 @@ def train(
     head: str = "softmax",
     warm_start: Any | None = None,
     sample_weight: np.ndarray | None = None,
+    parallel: int = 1,
 ) -> TrainResult:
     """Train one spec on one dataset.
+
+    ``parallel`` (SPEC.md 91.2, v0.77; ``1`` = the exact legacy path):
+    the worker count for the bagged-tree fit's independent trees. Only the
+    ``tree`` family uses it (each bag is an independent unit — bit-
+    identical results, G2); the ``boost`` family's rounds are sequentially
+    dependent and the neural loop is step-sequential, so they ignore it.
 
     ``warm_start`` (SPEC.md 80, v0.66; ``None`` = the exact legacy path):
     a previously trained parametric model whose weights seed the new one
@@ -336,6 +343,11 @@ def train(
     define it; a non-parametric family with weights is a clean SpecError."""
     X, y = dataset
     n = X.shape[0]
+    if parallel is None or isinstance(parallel, bool) \
+            or not isinstance(parallel, int) or parallel < 1:
+        raise SpecError(
+            f"parallel must be an int >= 1 (1 = serial, bit-identical), "
+            f"got {parallel!r} (SPEC.md 91.2)")
     _PARAMETRIC = ("mlp", "convnet", "conv1d", "rnn")
     if sample_weight is not None and spec.model_family not in _PARAMETRIC:
         raise SpecError(
@@ -363,7 +375,7 @@ def train(
             return TrainResult(model, 0, float("inf"), 0.0, True)
         model = TreeEnsemble(
             n_out=n_out, n_trees=n_trees, max_depth=max_depth, head=head, seed=seed
-        ).fit(X, y, input_noise=spec.input_noise)
+        ).fit(X, y, input_noise=spec.input_noise, parallel=parallel)
         loss = _training_loss(model, X, y, head)
         elapsed = time.perf_counter() - start
         # SPEC.md 28.1 (C1): a blocking fit has no per-step loop → one record

@@ -1,5 +1,17 @@
 """AutoRefine: environment for autonomous iterative ML model improvement."""
 from .dashboard import DashboardRunner
+from .accel import (  # 91 (v0.77): dense-parallel + the optional GPU backend
+    BackendUnavailable,
+    available_gpus,
+    backend_info,
+    detect_backend,
+    gpu_matmul,
+    load_backend,
+    parallel_map,
+    resolve_backend,
+    to_device,
+    to_host,
+)
 from .config import (
     ACTIVATIONS,
     BATCH_SIZES,
@@ -287,8 +299,8 @@ from .ondemand import (  # SPEC.md 90 (v0.76, A80): the on-demand Adapt cores
 
 # SPEC.md 33.1 (C1): single version source — must equal pyproject.toml's
 # [project].version (enforced by the A23 test); one step per feature round
-# (v0.76 ⇒ 0.76.0, M79, SPEC.md 90)
-__version__ = "0.76.0"
+# (v0.77 ⇒ 0.77.0, M80, SPEC.md 91)
+__version__ = "0.77.0"
 
 __all__ = [
     "AutoRefineEnv",
@@ -453,5 +465,9 @@ __all__ = [
     # SPEC.md 90 (v0.76, A80): the on-demand Adapt cores
     "latest_champion", "csv_preflight", "quality_events",
     "refresh_model", "score_fresh",
+    # SPEC.md 91 (v0.77, A81): dense parallelism + the optional GPU backend
+    "BackendUnavailable", "available_gpus", "detect_backend", "load_backend",
+    "backend_info", "resolve_backend", "to_device", "to_host",
+    "gpu_matmul", "parallel_map",
     "__version__",
 ]

@@ -140,6 +140,24 @@ def _v_kfold(value: Any) -> int:
     return value
 
 
+def _v_parallel(value: Any) -> int:
+    if value is None or isinstance(value, bool) \
+            or not isinstance(value, int) or value < 1:
+        raise ValueError(
+            f"parallel must be an int >= 1 (1 = serial, bit-identical), "
+            f"got {value!r} (SPEC.md 91.2)")
+    return value
+
+
+def _v_backend(value: Any) -> str:
+    if not isinstance(value, str) \
+            or value not in ("auto", "cpu", "gpu", "cupy", "torch"):
+        raise ValueError(
+            f"backend must be one of auto/cpu/gpu/cupy/torch, "
+            f"got {value!r} (SPEC.md 91.3)")
+    return value
+
+
 def _v_screen_frac(value: Any) -> float:
     if value is None or isinstance(value, bool):
         raise ValueError(
@@ -184,6 +202,11 @@ KNOBS: dict[str, Knob] = {
     "screen_frac": Knob("screen_frac", 1.0, "32.2",
                         ("run", "fit"), None, _v_screen_frac),
     "kfold": Knob("kfold", 0, "44.1", ("run", "fit"), None, _v_kfold),
+    # SPEC.md 91 (v0.77): dense-parallel workers + the optional GPU backend
+    "parallel": Knob("parallel", 1, "91.2",
+                     ("run", "fit", "variance"), None, _v_parallel),
+    "backend": Knob("backend", "cpu", "91.3",
+                    ("run", "fit"), None, _v_backend),
 }
 
 
@@ -248,6 +271,8 @@ class AutoRefineEnv:
         screen_frac: float = 1.0,
         # --- v0.30 k-fold holdout scoring (SPEC.md 44.1; 0 = off, legacy)
         kfold: int = 0,
+        parallel: int = 1,
+        backend: str = "cpu",
         # --- v0.23 driver metadata (SPEC.md 37.1.3; None = env-level) ----
         # the env does not own these — the driver (cli fit / dashboard /
         # variance) supplies them so the reset-time recipe is complete
@@ -329,6 +354,8 @@ class AutoRefineEnv:
         _sp = KNOBS["stall_patience"].validate(stall_patience)
         _sf = KNOBS["screen_frac"].validate(screen_frac)
         _kf = KNOBS["kfold"].validate(kfold)
+        _pr = KNOBS["parallel"].validate(parallel)  # SPEC.md 91.2 (v0.77)
+        _bk = KNOBS["backend"].validate(backend)  # SPEC.md 91.3 (v0.77)
         task_cls = TASKS[task]
         self.task_name = task
         self.seed = int(seed)
@@ -408,6 +435,10 @@ class AutoRefineEnv:
         # SPEC.md 44.1 (v0.30): k-fold holdout scoring (0 = off, legacy
         # single split exactly — the A1–A33 pins stay green)
         self.kfold = _kf
+        # SPEC.md 91 (v0.77): dense-parallel workers (91.2) + the optional
+        # GPU backend (91.3; "cpu" default = the bit-identical legacy path)
+        self.parallel = _pr
+        self.backend = _bk
         # SPEC.md 37.1.3 (v0.23, G3): driver metadata for the canonical
         # recipe (None = env-level, not a driver choice)
         self.policy = policy
@@ -509,6 +540,7 @@ class AutoRefineEnv:
                 self.dataset, base_spec, self.seed,
                 time_limit_seconds=self.bm.train_time_limit(),
                 n_out=self.task.n_outputs, head=self.task.head,
+                parallel=self.parallel,  # SPEC.md 91.2 (v0.77)
             )
             score, std, gen, gen_gap = self._evaluate(result.model)
             eff = self._eff(score, result.train_seconds, gen_gap)
@@ -566,6 +598,7 @@ class AutoRefineEnv:
                     self._subsample(self.dataset), base_spec, self.seed,
                     time_limit_seconds=self.bm.train_time_limit(),
                     n_out=self.task.n_outputs, head=self.task.head,
+                    parallel=self.parallel,  # SPEC.md 91.2 (v0.77)
                 )
                 self._screen_champion = float(self._evaluate(sres.model)[0])
                 # SPEC.md 33.3: the summary's baseline_screen_score (32.2)
@@ -688,6 +721,7 @@ class AutoRefineEnv:
                     time_limit_seconds=self.bm.train_time_limit(),
                     n_out=self.task.n_outputs, head=self.task.head,
                     warm_start=warm,
+                    parallel=self.parallel,  # SPEC.md 91.2 (v0.77)
                 )
                 s_score, s_std, s_gen, s_gap = self._evaluate(sres.model)
                 if not s_score > self._screen_champion:
@@ -699,6 +733,7 @@ class AutoRefineEnv:
                 time_limit_seconds=self.bm.train_time_limit(),
                 n_out=self.task.n_outputs, head=self.task.head,
                 warm_start=warm,
+                parallel=self.parallel,  # SPEC.md 91.2 (v0.77)
             )
         except SpecError as exc:
             return self._reject_invalid(
@@ -799,6 +834,7 @@ class AutoRefineEnv:
             time_limit_seconds=self.bm.train_time_limit(),
             n_out=self.task.n_outputs, head=self.task.head,
             warm_start=self._warm_start_for(self.best_spec),
+            parallel=self.parallel,  # SPEC.md 91.2 (v0.77)
         )
         score, std, gen, gen_gap = self._evaluate(result.model)
         eff = self._eff(score, result.train_seconds, gen_gap)
@@ -826,6 +862,7 @@ class AutoRefineEnv:
                 self._subsample(self.dataset), self._base_spec(), self.seed,
                 time_limit_seconds=self.bm.train_time_limit(),
                 n_out=self.task.n_outputs, head=self.task.head,
+                parallel=self.parallel,  # SPEC.md 91.2 (v0.77)
             )
             self._screen_champion = float(self._evaluate(sc.model)[0])
         event = {

@@ -35,13 +35,16 @@ _FIELDS = (
     # SPEC.md 86 (v0.72): the search-prior run dir (None = a fresh run;
     # optional in `from_dict` for back-compat — pre-v0.72 configs load)
     "prior_run",
+    # SPEC.md 91 (v0.77): dense-parallel workers + the optional GPU backend
+    # (optional in `from_dict` for back-compat — pre-v0.77 configs load)
+    "parallel", "backend",
     "autorefine_version",
 )
 
 # SPEC.md 59.4 (v0.45): the v0.45 fields are optional in `from_dict`
 # (absent → the empty list) so pre-v0.45 run_config.json still loads
 _OPTIONAL_FIELDS = ("pins", "biases", "constraints", "initial_model",
-                    "prior_run")
+                    "prior_run", "parallel", "backend")
 
 _INT = lambda v: isinstance(v, int) and not isinstance(v, bool)  # noqa: E731
 _NUM = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)  # noqa: E731
@@ -77,6 +80,11 @@ _VALIDATORS: dict[str, Any] = {
     "initial_model": _OPT(lambda v: isinstance(v, str) and v),
     # SPEC.md 86 (v0.72): a run-dir path string or None (a fresh run)
     "prior_run": _OPT(lambda v: isinstance(v, str) and v),
+    # SPEC.md 91.2 (v0.77): int >= 1 (1 = serial, the bit-identical path)
+    "parallel": lambda v: _INT(v) and v >= 1,
+    # SPEC.md 91.3 (v0.77): one of the five backend names
+    "backend": lambda v: isinstance(v, str) and v in
+              ("auto", "cpu", "gpu", "cupy", "torch"),
     "autorefine_version": lambda v: isinstance(v, str) and v,
 }
 
@@ -122,6 +130,10 @@ class RunConfig:
     initial_model: str | None = None
     # SPEC.md 86 (v0.72): the search-prior run dir (None = a fresh run)
     prior_run: str | None = None
+    # SPEC.md 91.2 (v0.77): dense-parallel workers (1 = serial, bit-identical)
+    parallel: int = 1
+    # SPEC.md 91.3 (v0.77): the requested compute backend (cpu = legacy path)
+    backend: str = "cpu"
     # identity
     autorefine_version: str = "0.0.0"
 
@@ -157,8 +169,12 @@ class RunConfig:
                     # steering lists default to []; SPEC.md 80 (v0.66):
                     # the model path to None; SPEC.md 86 (v0.72): the
                     # prior-run path to None (a fresh run)
-                    kw[name] = (None if name in ("initial_model", "prior_run")
-                                else [])
+                    # the per-field legacy default: the paths are None, the
+                    # steering lists are [], and the v0.77 knobs carry their
+                    # dataclass defaults (1 / "cpu") — a pre-v0.77 config is
+                    # the bit-identical legacy run (91.2/91.3)
+                    kw[name] = {"initial_model": None, "prior_run": None,
+                                "parallel": 1, "backend": "cpu"}.get(name, [])
                     continue
                 raise ValueError(f"run_config is missing field {name!r} "
                                  f"(SPEC.md 37.1.2)")
@@ -208,6 +224,10 @@ class RunConfig:
             initial_model=getattr(env, "initial_model_path", None),
             # SPEC.md 86 (v0.72): the search-prior run path (None = fresh)
             prior_run=getattr(env, "prior_run_path", None),
+            # SPEC.md 91 (v0.77): the compute knobs (defaults keep pre-v0.77
+            # envs / test fakes on the exact legacy path)
+            parallel=int(getattr(env, "parallel", 1)),
+            backend=str(getattr(env, "backend", "cpu")),
             autorefine_version=autorefine.__version__,
         )
 
@@ -302,6 +322,10 @@ def fit_recipe(config: RunConfig) -> list[str]:
         cmd += ["--screen-frac", str(d["screen_frac"])]
     if d["kfold"] > 0:  # SPEC.md 44.1 (v0.30): non-default values only
         cmd += ["--kfold", str(d["kfold"])]
+    if d["parallel"] > 1:  # SPEC.md 91.2 (v0.77): non-default values only
+        cmd += ["--parallel", str(d["parallel"])]
+    if d["backend"] != "cpu":  # SPEC.md 91.3 (v0.77): non-default values only
+        cmd += ["--backend", d["backend"]]
     # SPEC.md 59.4 (v0.45): the steering rules — repeatable flags, one per rule
     for f, v in d["pins"]:
         cmd += ["--pin", f"{f}={_steering_value(v)}"]
@@ -398,6 +422,12 @@ def runconfig_to_flags(config: RunConfig) -> dict[str, Any]:
         flags["screen-frac"] = d["screen_frac"]
     if d["kfold"] > 0:  # v0.30 (SPEC.md 44.1)
         flags["kfold"] = d["kfold"]
+    # SPEC.md 91 (v0.77): dense-parallel workers + the optional GPU backend
+    # (both flags live on `run` and `fit`; non-default values only)
+    if d["parallel"] > 1:
+        flags["parallel"] = d["parallel"]
+    if d["backend"] != "cpu":
+        flags["backend"] = d["backend"]
     # SPEC.md 59.4 (v0.45): the steering rules — lists of "field=value" tokens
     # for the CLI's repeatable append flags (`_config_value` returns a list as-is)
     if d["pins"]:
