@@ -270,13 +270,17 @@ def test_ngram_features_shape_values_determinism():
 def test_text_registered():
     """A35 (SPEC.md 45.2.2): `"text"` is in `TASKS` with `TextTask`; the
     registry shape advanced in place (7 → 8, the v0.8/v0.10 pattern).
-    v0.69 (SPEC.md 83.1): the sequence task advances it 10 → 11."""
+    v0.69 (SPEC.md 83.1): the sequence task advances it 10 → 11;
+    v0.78 (SPEC.md 92, A82) advances it 11 → 18 with the seven new
+    modalities (signal/jsonl/midi/pointcloud/graph/video/mixed)."""
     assert "text" in TASKS
     assert TASKS["text"] is TextTask
-    assert len(TASKS) == 11  # the registry pins advanced in place (7 → 8 → 10 → 11)
+    assert len(TASKS) == 18  # registry pins advanced in place (7 → 8 → 10 → 11 → 18)
     assert set(TASKS) == {"parity-v1", "sine-v1", "cartpole-v1",
                           "gridnav-v1", "csv", "image", "audio", "text",
-                          "medical-v1", "finance-v1", "sequence-motif-v1"}
+                          "medical-v1", "finance-v1", "sequence-motif-v1",
+                          "signal", "jsonl", "midi", "pointcloud",
+                          "graph", "video", "mixed"}
 
 
 def test_text_task_softmax_protocol(tmp_path):
@@ -394,7 +398,7 @@ def test_fit_csv_on_directory_is_error(tmp_path, capsys):
                    "--runs-dir", str(tmp_path / "runs")])
     err = capsys.readouterr().err
     assert rc == 1
-    assert "CSV file" in err or "--task csv needs a CSV file" in err
+    assert "--task csv needs a data file" in err
 
 
 def test_fit_auto_detects_text(tmp_path, capsys):
@@ -442,7 +446,7 @@ def test_version_round_v031():
     """A35 (SPEC.md 45.4, 33.1): the version stepped to `0.39.0` in
     both sources (v0.39 ⇒ `0.39.0`, M42)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.77.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.78.0"
 
 
 def test_spec_cites_a35_and_round():

@@ -79,8 +79,9 @@ class DashboardRunner:
         if search_quality not in ("v04", "legacy"):
             raise ValueError(f"search_quality must be 'v04' or 'legacy', "
                              f"got {search_quality!r}")
-        if modality is not None and modality not in ("auto", "csv", "image", "audio", "text"):
-            raise ValueError(f"modality must be one of auto/csv/image/audio/text, "
+        if modality is not None and modality not in self._MODALITIES:
+            raise ValueError(f"modality must be one of "
+                             f"{('/'.join(self._MODALITIES))}, "
                              f"got {modality!r} ")
         # `csv_path` is the data path (v0.10: a CSV file or a media directory)
         self.csv_path = csv_path
@@ -132,6 +133,13 @@ class DashboardRunner:
         # — the flag the env's stop_check reads between experiments
         self._stop_requested = False
 
+    # v0.78 (SPEC.md 92.1-92.7): every directory-based data task the
+    # runner accepts (the cli `_DIR_TASKS` set, kept local — this module
+    # must not import the cli).
+    _MODALITIES = ("auto", "csv", "jsonl", "image", "audio", "text",
+                   "signal", "midi", "pointcloud", "graph", "video",
+                   "mixed")
+
     @property
     def done(self) -> bool:
         """True once the loop has hit `done` and `finish()` is valid."""
@@ -152,27 +160,28 @@ class DashboardRunner:
 
     # --- lifecycle ----------------------------------------------------------
     def _resolve_task(self, data: Path) -> str:
-        """Data path → task name (v0.10, SPEC.md 24.5): file → csv;
-        directory → detected or forced via `modality`."""
+        """Data path → task name (v0.10, SPEC.md 24.5; v0.78 92.2): file
+        → csv/jsonl; directory → detected or forced via `modality`.
+        'mixed' is a valid resolved task (the MixedTask, 92.7)."""
         mod = self.modality
         if data.is_file():
-            if mod in ("auto", "csv"):
-                return "csv"
-            raise ValueError(f"{data} is a file: modality must be 'csv' or 'auto'")
+            file_task = ("jsonl" if data.suffix.lower() in (".jsonl", ".json")
+                         else "csv")
+            if mod in ("auto", file_task):
+                return file_task
+            raise ValueError(
+                f"{data} is a {data.suffix or 'data'} file: modality must "
+                f"be '{file_task}' or 'auto'")
         if data.is_dir():
-            if mod in ("image", "audio", "text"):  # v0.31 (SPEC.md 45.2.2)
-                return mod
+            if mod in self._MODALITIES and mod not in ("auto", "csv", "jsonl"):
+                return mod  # v0.31 (45.2.2) + v0.78 (92.1-92.7)
             m = detect_modality(data)
-            if m == "mixed":
-                raise ValueError(
-                    f"{data} holds items of more than one modality: set "
-                    f"modality='image', 'audio', or 'text' ")
             if m is None:
                 raise ValueError(
-                    f"no image, audio, or text items under {data} — one "
-                    f"subfolder per class, or an index.csv ")
+                    f"no media items under {data} — one subfolder per "
+                    f"class, or an index.csv ")
             return m
-        raise ValueError(f"no such CSV file: {data}")
+        raise ValueError(f"no such data file: {data}")
 
     def start(self) -> dict:
         """Probe the data, build the env, train+score the baseline (SPEC.md 23.1).

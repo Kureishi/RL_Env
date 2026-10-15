@@ -188,15 +188,22 @@ from .tasks import (
     CartPoleV1,
     CsvTask,
     FinanceForecastTask,
+    GraphTask,
     GridNavV1,
     ImageTask,
+    JsonlTask,
     MedicalTabularTask,
+    MixedTask,
+    MidiTask,
     Parity4V1,
     ParityTask,
+    PointCloudTask,
     RobustTask,
     SequenceMotifV1,  # SPEC.md 83.1 (v0.69): the native sequence task
+    SignalTask,
     SineRegressionV1,
     TextTask,
+    VideoTask,
 )
 from .rl_dashboard import (  # 68 (v0.54, A58): the RL loop in the dashboard
     RLMultiRunner,
@@ -299,8 +306,8 @@ from .ondemand import (  # SPEC.md 90 (v0.76, A80): the on-demand Adapt cores
 
 # SPEC.md 33.1 (C1): single version source — must equal pyproject.toml's
 # [project].version (enforced by the A23 test); one step per feature round
-# (v0.77 ⇒ 0.77.0, M80, SPEC.md 91)
-__version__ = "0.77.0"
+# (v0.78 ⇒ 0.78.0, M81, SPEC.md 92)
+__version__ = "0.78.0"
 
 __all__ = [
     "AutoRefineEnv",
@@ -410,6 +417,9 @@ __all__ = [
     "SequenceMotifV1",  # SPEC.md 83.1 (v0.69): the native sequence task
     "SineRegressionV1",
     "TextTask",
+    # v0.78: the new modalities (SPEC.md 92, A82)
+    "SignalTask", "JsonlTask", "MidiTask", "PointCloudTask",
+    "GraphTask", "VideoTask", "MixedTask",
     # v0.47: more specialized scenarios (SPEC.md 61, A51)
     "per_class_f1", "ece", "coverage_width", "monotonicity_slope",
     "ensemble_ece", "compute_actuals",

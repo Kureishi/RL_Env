@@ -92,22 +92,33 @@ def discover_data(cwd) -> list[dict]:
     if not root.is_dir():
         raise FileNotFoundError(f"no such directory: {root}")
     from .tasks import detect_modality  # local: keep the leaf import-light
-    files: list[tuple[float, str]] = []
+    # SPEC.md 92.8 (v0.78, B1): the directory modalities the scan accepts
+    # — the v0.10 trio plus the v0.78 row modalities (92.1-92.7). A
+    # ``mixed`` detection is a candidate too (the mixed task, 92.7).
+    _DIR_MODALITIES = ("image", "audio", "text", "signal", "midi",
+                       "pointcloud", "graph", "video", "mixed")
+    files: list[tuple[float, str, str, str]] = []
     dirs: list[tuple[float, str, str]] = []
     for child in root.iterdir():
         try:
-            if child.is_file() and child.suffix.lower() == ".csv":
-                files.append((_mtime(child), child.name))
+            if child.is_file():
+                ext = child.suffix.lower()
+                if ext == ".csv":
+                    files.append((_mtime(child), child.name, "csv",
+                                  "a CSV table"))
+                elif ext in (".jsonl", ".json"):  # 92.8 (B1): JSONL logs
+                    files.append((_mtime(child), child.name, "jsonl",
+                                  "a JSONL/JSON log"))
             elif child.is_dir():
                 mod = detect_modality(child)
-                if mod in ("image", "audio", "text"):
+                if mod in _DIR_MODALITIES:
                     dirs.append((_mtime(child), child.name, mod))
         except OSError:
             continue  # an item that disappears mid-scan is not a candidate
     out: list[dict] = []
-    for mt, name in sorted(files, key=lambda t: (-t[0], t[1])):
-        out.append({"path": str(root / name), "task": "csv",
-                    "reason": "a CSV table"})
+    for mt, name, task, reason in sorted(files, key=lambda t: (-t[0], t[1])):
+        out.append({"path": str(root / name), "task": task,
+                    "reason": reason})
     for mt, name, mod in sorted(dirs, key=lambda t: (-t[0], t[1])):
         out.append({"path": str(root / name), "task": mod,
                     "reason": f"a folder of {mod} items"})

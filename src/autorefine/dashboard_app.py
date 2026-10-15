@@ -180,7 +180,7 @@ from autorefine.research import (
     model_comparison,  # 81.2 (v0.67) the cross-model comparison data
     nonlinearity_profile,  # 82.2.1 (v0.68) the nonlinearity measurement
 )
-from autorefine.tasks import CsvTask
+from autorefine.tasks import CsvTask, JsonlTask  # 92.2 (v0.78): the jsonl preview
 # SPEC.md 90 (v0.76, A80): the on-demand "Adapt" surface — the app is a
 # thin renderer over these pure cores (23.1): champion drift (89.2), the
 # quality-over-time log (89.1.3), and the champion/challenger refresh (89.3).
@@ -550,7 +550,10 @@ def _resolve_index_to_dir(p: Path) -> str | None:
     if p.suffix.lower() != ".csv" or not p.is_file():
         return None
     from autorefine.tasks.media import modality_from_index
-    if modality_from_index(p) in ("image", "audio", "text"):
+    # v0.78 (SPEC.md 92.1-92.7): any directory modality (mixed included)
+    if modality_from_index(p) in ("image", "audio", "text", "signal",
+                                  "midi", "pointcloud", "graph", "video",
+                                  "mixed"):
         return str(p.parent)
     return None
 
@@ -605,14 +608,16 @@ def _preview_data(csv_path: str, stamp: int, size: int) -> dict:
     if not p.is_file() and not p.is_dir():
         return {"error": f"no such file or directory: {p}"}
     if p.is_file():
-        cls = CsvTask
+        # v0.78 (SPEC.md 92.2): .jsonl/.json logs are a JsonlTask; the
+        # rest of the file space is a CSV table
+        cls = (JsonlTask if p.suffix.lower() in (".jsonl", ".json")
+               else CsvTask)
     else:
         m = detect_modality(p)
-        if m is None or m == "mixed":
-            return {"error": (f"Directory {p} holds no image/audio items "
-                             f"(or is mixed) — one subfolder per class, "
-                             f"or an index.csv")}
-        cls = TASKS[m]
+        if m is None:
+            return {"error": (f"Directory {p} holds no media items — "
+                             f"one subfolder per class, or an index.csv")}
+        cls = TASKS[m]  # v0.78 (92.7): 'mixed' is a task now (MixedTask)
     try:
         probe = cls(seed=0, path=csv_path)
     except ValueError as exc:
@@ -629,6 +634,14 @@ def _preview_data(csv_path: str, stamp: int, size: int) -> dict:
         f"(train/holdout/gen)"
     )
     if p.is_file():
+        if cls is JsonlTask:  # cls is the class object, not an instance
+            # v0.78 (92.2): a log is one JSON object per line — show the
+            # first lines verbatim
+            with p.open(encoding="utf-8", newline="") as f:
+                data = [f.readline().rstrip("\n") for _ in range(5)]
+                data = [line for line in data if line]
+            return {"kind": "jsonl", "caption": caption,
+                    "header": ["one JSON object per line"], "rows": data}
         # simple deterministic preview: header + first 5 data rows
         with p.open(encoding="utf-8", newline="") as f:
             reader = _csv.reader(f)
@@ -2648,15 +2661,18 @@ def main() -> None:
 
     side.header("Data")
     upload = side.file_uploader(
-        "Upload your data — a CSV, or a folder of labelled images, audio "
-        "or text (select all of its files, including its index.csv)",
+        "Upload your data — a CSV or JSONL table, or a folder of labelled "
+        "media (images, audio, text, signals, MIDI, point clouds, graphs, "
+        "video — select all of its files, including its index.csv)",
         type=["csv", "png", "jpg", "jpeg", "bmp", "gif", "wav", "mp3",
-              "txt"],
+              "txt", "npy", "dat", "sig", "mid", "midi", "ply", "obj",
+              "mp4", "mov", "avi", "jsonl", "json"],
         accept_multiple_files=True,
         key="csv_upload", help=KNOB_GLOSSARY["data"])
     csv_path = side.text_input(
-        "…or a local path: a CSV, a folder of labelled media, or its "
-        "index.csv", value="", key="csv_path", help=KNOB_GLOSSARY["data"])
+        "…or a local path: a CSV/JSONL table, a folder of labelled media, "
+        "or its index.csv", value="", key="csv_path",
+        help=KNOB_GLOSSARY["data"])
     label = side.text_input("Label column (blank = auto-detect)", value="",
                             key="label", help=KNOB_GLOSSARY["label"])
     target = side.number_input("Target score (0–100)", min_value=0.0, max_value=100.0,

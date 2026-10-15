@@ -28,8 +28,40 @@ import numpy as np
 _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".gif")   # SPEC.md 24.3
 _AUDIO_EXTS = (".wav", ".mp3")                            # SPEC.md 24.4
 _TEXT_EXTS = (".txt", ".text")                            # SPEC.md 45.2 (v0.31)
+# SPEC.md 92 (v0.78, A82): the new labelled-directory modalities
+_SIGNAL_EXTS = (".npy", ".dat", ".sig")                  # 92.1 (A1): 1-D signals
+_MIDI_EXTS = (".mid", ".midi")                            # 92.3 (A3): MIDI music
+_PC_EXTS = (".ply", ".obj")                               # 92.4 (A4): point clouds
+_VIDEO_EXTS = (".mp4", ".mov", ".avi")                    # 92.6 (A6): video
 _MAX_CLASSES = 50  # §22.1 rule: integer labels with more classes → regression
 _INDEX_HINTS = ("label", "target", "y", "class")
+
+# SPEC.md 92.7 (v0.78, A7): the per-row media decoders a MixedTask can call
+# (modality name -> (module attribute path) is resolved in mixed.py; this is
+# the closed set of row modalities, in fixed order for the one-hot prefix)
+ROW_MODALITIES = ("image", "audio", "text", "signal", "midi",
+                  "pointcloud", "video")
+
+
+def modality_for_ext(ext: str) -> str | None:
+    """SPEC.md 92.2 (v0.78): one file extension → its modality name, or
+    None. The single dispatch table every detector reuses (92.2)."""
+    e = ext.lower()
+    if e in _IMAGE_EXTS:
+        return "image"
+    if e in _AUDIO_EXTS:
+        return "audio"
+    if e in _TEXT_EXTS:
+        return "text"
+    if e in _SIGNAL_EXTS:
+        return "signal"
+    if e in _MIDI_EXTS:
+        return "midi"
+    if e in _PC_EXTS:
+        return "pointcloud"
+    if e in _VIDEO_EXTS:
+        return "video"
+    return None
 
 
 def modality_from_index(index: str | Path) -> str | None:
@@ -40,6 +72,11 @@ def modality_from_index(index: str | Path) -> str | None:
     all present on disk (the app's upload flow rebuilds a directory from the
     uploaded files). Deterministic, stdlib only; a missing/unreadable index
     or one without recognizable media rows → None.
+
+    SPEC.md 92.2 (v0.78): the extension dispatch goes through
+    `modality_for_ext` (one table), so the new signal/midi/pointcloud/video
+    modalities are recognized here too; two or more distinct modalities is
+    still "mixed" (the v0.10 pin, unchanged).
     """
     try:
         with open(index, newline="", encoding="utf-8-sig") as fh:
@@ -58,13 +95,9 @@ def modality_from_index(index: str | Path) -> str | None:
     for row in rows[1:]:
         if not row or path_i >= len(row):
             continue
-        ext = Path(row[path_i].strip()).suffix.lower()
-        if ext in _IMAGE_EXTS:
-            mods.add("image")
-        elif ext in _AUDIO_EXTS:
-            mods.add("audio")
-        elif ext in _TEXT_EXTS:
-            mods.add("text")
+        m = modality_for_ext(Path(row[path_i].strip()).suffix.lower())
+        if m is not None:
+            mods.add(m)
     if len(mods) >= 2:
         return "mixed"
     if len(mods) == 1:
@@ -83,15 +116,23 @@ def detect_modality(path: str | Path) -> str | None:
     modality present → its name; two or more → "mixed" (the caller must ask
     for an explicit --task); none → None. Image+audio stays "mixed" (the
     v0.10 pin, SPEC.md 45.2.4).
+
+    SPEC.md 92.2 (v0.78): the count covers the new modalities through
+    `modality_for_ext` (one table), and a `nodes.csv` + `edges.csv` pair is
+    the graph layout (92.4.2) — detected before the media scan so a graph
+    directory with stray files still resolves to "graph".
     """
     d = Path(path)
     if d.is_dir():
+        # SPEC.md 92.4.2 (v0.78, A4): the graph dataset layout wins
+        if (d / "nodes.csv").is_file() and (d / "edges.csv").is_file():
+            return "graph"
         index = d / "index.csv"
         if index.is_file():
             m = modality_from_index(index)
             if m is not None:
                 return m
-    n_img = n_aud = n_txt = 0
+    counts: dict[str, int] = {}
     if d.is_dir():
         for sub in sorted(d.iterdir()):
             if not sub.is_dir():
@@ -99,15 +140,10 @@ def detect_modality(path: str | Path) -> str | None:
             for f in sorted(sub.iterdir()):
                 if not f.is_file():
                     continue
-                ext = f.suffix.lower()
-                if ext in _IMAGE_EXTS:
-                    n_img += 1
-                elif ext in _AUDIO_EXTS:
-                    n_aud += 1
-                elif ext in _TEXT_EXTS:
-                    n_txt += 1
-    present = [m for m, c in (("image", n_img), ("audio", n_aud),
-                              ("text", n_txt)) if c]
+                m = modality_for_ext(f.suffix.lower())
+                if m is not None:
+                    counts[m] = counts.get(m, 0) + 1
+    present = [m for m in ROW_MODALITIES if counts.get(m)]
     if len(present) >= 2:
         return "mixed"  # caller must ask for an explicit --task
     if present:

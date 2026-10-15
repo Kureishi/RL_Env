@@ -59,7 +59,12 @@ from .tasks import TASKS, detect_modality
 # single RLRunner covers).
 BUILTIN_TASKS = ("parity-v1", "sine-v1", "cartpole-v1")
 
-_VALID_MODALITIES = ("auto", "csv", "image", "audio", "text")
+# v0.78 (SPEC.md 92.1-92.7): the full modality set (the cli
+# `_DIR_TASKS` list + the file tasks), so the RL runner accepts the same
+# data the fit loop does.
+_VALID_MODALITIES = ("auto", "csv", "jsonl", "image", "audio", "text",
+                     "signal", "midi", "pointcloud", "graph", "video",
+                     "mixed")
 
 
 def describe_policy(policy: MetaRLPolicy) -> dict:
@@ -175,26 +180,25 @@ class RLRunner:
     def _stop_check(self) -> bool:
         return self._stop_requested
 
-    # --- task resolution (the DashboardRunner rule, SPEC.md 24.5) -----------
+    # --- task resolution (the DashboardRunner rule, SPEC.md 24.5; v0.78 92.2)
     def _resolve_task(self, data: Path) -> str:
         mod = self.modality
         if data.is_file():
-            if mod in ("auto", "csv"):
-                return "csv"
-            raise ValueError(f"{data} is a file: modality must be 'csv' "
-                             f"or 'auto'")
+            file_task = ("jsonl" if data.suffix.lower() in (".jsonl", ".json")
+                         else "csv")
+            if mod in ("auto", file_task):
+                return file_task
+            raise ValueError(f"{data} is a {data.suffix or 'data'} file: "
+                             f"modality must be '{file_task}' or 'auto'")
         if data.is_dir():
-            if mod in ("image", "audio", "text"):
-                return mod
+            if (mod in _VALID_MODALITIES
+                    and mod not in ("auto", "csv", "jsonl")):
+                return mod  # v0.31 (45.2.2) + v0.78 (92.1-92.7)
             m = detect_modality(data)
-            if m == "mixed":
-                raise ValueError(
-                    f"{data} holds items of more than one modality: set "
-                    f"modality='image', 'audio', or 'text' ")
             if m is None:
                 raise ValueError(
-                    f"no image, audio, or text items under {data} — one "
-                    f"subfolder per class, or an index.csv ")
+                    f"no media items under {data} — one subfolder per "
+                    f"class, or an index.csv ")
             return m
         raise ValueError(f"no such data file: {data}")
 

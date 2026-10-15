@@ -22,7 +22,7 @@ and no new hard dependency is added (GPU libraries are discovered with
     dict loads with the legacy defaults; ``fit_recipe`` /
     ``runconfig_to_flags`` emit the flags only when non-default);
   * 91.5 — the ``autorefine backend`` verb (+ ``--json``);
-  * 91.7 — acceptance: the version steps to ``0.77.0`` in both sources,
+  * 91.7 — acceptance: the version steps to ``0.78.0`` in both sources,
     the A-index advances (A81, 77 acceptance rows, M80 resolving to
     this file), and the new exports land in ``autorefine.__all__``.
 
@@ -462,10 +462,10 @@ class TestCeremony:
     def test_version_steps_to_077_in_both_sources(self):
         init = (REPO / "src" / "autorefine" / "__init__.py").read_text(
             encoding="utf-8")
-        assert '__version__ = "0.77.0"' in init
-        assert 'version = "0.77.0"' in (
+        assert '__version__ = "0.78.0"' in init
+        assert 'version = "0.78.0"' in (
             REPO / "pyproject.toml").read_text(encoding="utf-8")
-        assert autorefine.__version__ == "0.77.0"
+        assert autorefine.__version__ == "0.78.0"
 
     def test_spec_section_and_index_row(self):
         spec = SPEC.read_text(encoding="utf-8")

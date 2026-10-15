@@ -352,7 +352,7 @@ def test_multi_runner_guards(tmp_path):
     with pytest.raises(ValueError, match="episodes"):
         RLRunner(csv_path="x.csv", episodes=True)
     with pytest.raises(ValueError, match="modality"):
-        RLRunner(csv_path="x.csv", modality="video")
+        RLRunner(csv_path="x.csv", modality="bogus")
 
 
 def test_multi_runner_rejects_incompatible_loaded_policies(tmp_path):
@@ -590,4 +590,4 @@ def test_exports_and_version():
     assert autorefine.policy_to_bytes is rp.policy_to_bytes
     assert autorefine.policy_from_bytes is rp.policy_from_bytes
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.77.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.78.0"

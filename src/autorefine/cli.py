@@ -16,6 +16,7 @@ import importlib.util
 import io
 import json
 import math
+import os
 import subprocess
 import sys
 import tempfile
@@ -44,6 +45,7 @@ from .runconfig import (
 )
 from .dashboard import diff_n_summaries, diff_two_summaries, field_stats  # 42.2/42.3 (v0.28) + 50.1.4 (v0.36)
 from .sharing import share_payload, write_share_zip  # 47.4/50.2 (v0.36)
+from .exporter import export_run  # 92.10 (v0.78, B3): the portable model export
 from .dossier import build_dossier  # 58.3 (v0.44): the run dossier
 from .improver.meta_env import AutoRefineEnv, search_quality_v04
 from .improver.bandit import BanditPolicy
@@ -770,6 +772,14 @@ def _cmd_go(args: argparse.Namespace) -> int:
     # 89.12 (D2): --feeds is a different verb sharing the go core
     if getattr(args, "feeds", None) is not None:
         return _cmd_go_feeds(args)
+    # 92.9 (B2, v0.78): `--data -` reads the CSV table from stdin and
+    # turns it into a real file before anything else runs
+    if args.data is not None and str(args.data) == "-":
+        try:
+            args.data = str(_stdin_csv())
+        except ValueError as e:
+            print(f"stdin : {e}", file=sys.stderr)
+            return 1
     # 88.1 (A1): the data is found when it is not named
     if args.data is None:
         cand = pick_data(Path.cwd())
@@ -1531,38 +1541,63 @@ def _print_summary(args: argparse.Namespace, env: AutoRefineEnv,
     print(f"artifacts: {env.run_dir}")
 
 
-def _resolve_fit_task(data: Path, want: str) -> str:
-    """v0.10 (SPEC.md 24.5; v0.31 45.2.2): `--data` file → csv; directory
-    → image/audio/text.
+# v0.78 (SPEC.md 92.2/92.9): file-extension → task map for file-based
+# data (jsonl/json logs); anything else is a CSV table.
+_FILE_TASK_EXTS = {".jsonl": "jsonl", ".json": "jsonl"}
+# v0.78 (SPEC.md 92.1-92.7): every directory-based data task.
+_DIR_TASKS = ("image", "audio", "text", "signal", "midi",
+              "pointcloud", "graph", "video", "mixed")
 
-    `want` is the `--task` value ('auto' | 'csv' | 'image' | 'audio' |
-    'text'); auto-detection counts modality extensions in the directory's
-    subfolders (SPEC.md 45.2.1: one modality → its name, two or more →
-    'mixed', none → None).
+
+def _resolve_fit_task(data: Path, want: str) -> str:
+    """v0.10 (SPEC.md 24.5; v0.31 45.2.2; v0.78 92.2): `--data` file →
+    csv/jsonl; directory → a directory task (auto-detectable).
+
+    `want` is the `--task` value. File data: csv (default) or jsonl
+    (.jsonl/.json files). Directory data: any of `_DIR_TASKS`; 'auto'
+    counts modality extensions in the directory's subfolders (SPEC.md
+    45.2.1: one modality → its name, two or more → 'mixed', none →
+    None → error).
     """
     from .tasks import detect_modality
     if data.is_file():
-        if want in ("auto", "csv"):
-            return "csv"
-        raise ValueError(f"--data {data} is a file: use --task csv (or auto)")
+        ext = data.suffix.lower()
+        file_task = _FILE_TASK_EXTS.get(ext, "csv")
+        if want in ("auto", file_task):
+            return file_task
+        if want in _FILE_TASK_EXTS.values() or want == "csv":
+            raise ValueError(
+                f"--data {data} is a {ext or 'data'} file: use --task "
+                f"{file_task} (or auto)")
+        raise ValueError(
+            f"--data {data} is a file, but --task {want} needs a directory")
     if data.is_dir():
         if want == "auto":
             m = detect_modality(data)
-            if m == "mixed":
-                raise ValueError(
-                    f"{data} holds items of more than one modality: pass "
-                    f"--task image, --task audio, or --task text "
-                    f"(SPEC.md 24.5)")
             if m is None:
                 raise ValueError(
-                    f"no image, audio, or text items under {data} — one "
-                    f"subfolder per class, or an index.csv (SPEC.md 24.2); "
-                    f"or pass a CSV file with --task csv")
+                    f"no media items under {data} — one subfolder per "
+                    f"class, or an index.csv (SPEC.md 24.2); or pass a "
+                    f"CSV/JSONL file with --task csv (or --task jsonl)")
             return m
-        if want in ("image", "audio", "text"):
+        if want in _DIR_TASKS:
             return want
-        raise ValueError(f"--task csv needs a CSV file, got directory {data}")
+        raise ValueError(f"--task {want} needs a data file, got directory {data}")
     raise ValueError(f"no such file or directory: {data}")
+
+
+def _stdin_csv() -> Path:
+    """v0.78 (SPEC.md 92.9, B2): materialize `--data -` (stdin) as a
+    real CSV file, so every downstream path (task resolution, dry-run
+    planning, the fit loop) sees an ordinary file."""
+    import tempfile
+    text = sys.stdin.read()
+    if not text.strip():
+        raise ValueError("--data - read an empty stdin: pipe a CSV table")
+    fd, name = tempfile.mkstemp(suffix=".csv", prefix="autorefine_stdin_")
+    with os.fdopen(fd, "w", newline="", encoding="utf-8") as fh:
+        fh.write(text)
+    return Path(name)
 
 
 def _cmd_fit(args: argparse.Namespace) -> int:
@@ -1579,6 +1614,14 @@ def _cmd_fit(args: argparse.Namespace) -> int:
     exclusive with both single-file modes.
     """
     from .tasks import TASKS  # noqa: F401 (registry; the helpers use it)
+    # 92.9 (B2, v0.78): `--data -` reads the CSV table from stdin and
+    # turns it into a real file before the mode exclusions below
+    if args.data is not None and str(args.data) == "-":
+        try:
+            args.data = str(_stdin_csv())
+        except ValueError as e:
+            print(f"stdin : {e}", file=sys.stderr)
+            return 1
     # 89.7/89.4 (v0.75, B3/A4): the recency window and the dataset
     # snapshot are single-file data modes — exclusive with the re-run and
     # portfolio modes below
@@ -3478,6 +3521,13 @@ def _cmd_predict(args: argparse.Namespace) -> int:
         print("predict: probabilities are only available for softmax-head "
               "models (SPEC.md 46.1)", file=sys.stderr)
         return 1
+    # 92.12 (B5, v0.78): --data is an alias for --csv (one verb, one input)
+    if getattr(args, "data", None) is not None:
+        if args.csv is not None:
+            print("--csv and --data are the same input: pass one "
+                  "(SPEC.md 92.12)", file=sys.stderr)
+            return 1
+        args.csv = args.data
     modes = [m for m, on in (("row", args.row is not None),
                             ("csv", args.csv is not None),
                             ("stdin", args.stdin),
@@ -3875,6 +3925,38 @@ def _cmd_share(args: argparse.Namespace) -> int:
     for name in sorted(payload):
         print(f"  {name:24s} {len(payload[name]):8d} bytes")
     print(f"share   : {out}")
+    return 0
+
+
+def _cmd_export(args: argparse.Namespace) -> int:
+    """`export` (SPEC.md 92.10, v0.78 B3): the "hand this model to anyone"
+    verb — a finished run's best model bundled into one portable,
+    numpy-only zip (best_model.npz + model_config.json + a standalone
+    predict.py + README.md) via the `exporter` core. The zip is
+    deterministic (fixed member order + 1980-01-01 timestamps, G2).
+
+    rc 0 with the entry listing and the output path; rc 1 on a broken
+    run dir or an unreconstructible task (92.10.4).
+    """
+    run_dir = Path(args.run)
+    if not (run_dir / "summary.json").is_file():
+        print(f"no summary.json in run dir {str(run_dir)!r} — finish the run "
+              f"first (SPEC.md 92.10.4)", file=sys.stderr)
+        return 1
+    out = (Path(args.out) if args.out is not None
+           else run_dir.parent / f"{run_dir.name}-model.zip")
+    try:
+        info = export_run(run_dir, out)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    import zipfile as _zf
+    with _zf.ZipFile(out) as z:
+        for i in z.infolist():
+            print(f"  {i.filename:24s} {i.file_size:8d} bytes")
+    print(f"family  : {info['family']}"
+          f"{' (portable)' if info['portable'] else ' (needs autorefine)'}")
+    print(f"export  : {out}")
     return 0
 
 
@@ -4380,9 +4462,10 @@ def build_parser() -> argparse.ArgumentParser:
                             "'score>=95', 'train<=30', 'model<=100000' "
                             "(repeatable); none → the §22.1 score gate")
     p_fit.add_argument("--task", default="auto",
-                       choices=("auto", "csv", "image", "audio", "text"),
-                       help="v0.10 (SPEC.md 24.5; v0.31 45.2.2): force the data "
-                            "task; default auto (file -> csv, directory -> detected)")
+                       choices=("auto", "csv", "jsonl") + _DIR_TASKS,
+                       help="v0.10 (SPEC.md 24.5; v0.78 92.1-92.7): force the "
+                            "data task; default auto (file -> csv/jsonl, "
+                            "directory -> detected)")
     p_fit.add_argument("--label", default=None,
                        help="label column (default: label/target/y/class, else last column)")
     p_fit.add_argument("--split", dest="split_frac", type=float, default=0.2,
@@ -4532,9 +4615,9 @@ def build_parser() -> argparse.ArgumentParser:
                       help="label column (default: label/target/y/class, else "
                            "last column)")
     p_go.add_argument("--task", default="auto",
-                      choices=("auto", "csv", "image", "audio", "text"),
-                      help="force the data task; default auto (file -> csv, "
-                           "directory -> detected)")
+                      choices=("auto", "csv", "jsonl") + _DIR_TASKS,
+                      help="force the data task; default auto (file -> "
+                           "csv/jsonl, directory -> detected)")
     p_go.add_argument("--target", type=float, default=95.0,
                       help="your acceptance bar on final_best_score "
                            "(default 95.0)")
@@ -4804,6 +4887,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="a CSV of rows — a header line is matched by "
                              "name (extra columns OK), else positional with "
                              "exactly state_dim cells")
+    p_pred.add_argument("--data", default=None, dest="data",
+                        help="v0.78 (SPEC.md 92.12): alias for --csv")
     p_pred.add_argument("--stdin", action="store_true",
                         help="rows as JSON lines on stdin (object or array "
                              "per line); zero lines is an error")
@@ -4868,9 +4953,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_var.add_argument("--data", required=True,
                        help="CSV file, or a directory of labelled images/audio/text")
     p_var.add_argument("--task", default="auto",
-                       choices=("auto", "csv", "image", "audio", "text"),
-                       help="force the data task; default auto (file -> csv, "
-                            "directory -> detected; v0.31 45.2.2)")
+                       choices=("auto", "csv", "jsonl") + _DIR_TASKS,
+                       help="force the data task; default auto (file -> "
+                            "csv/jsonl, directory -> detected; v0.78 92.1)")
     p_var.add_argument("--label", default=None,
                        help="label column (default: auto-detect)")
     p_var.add_argument("--split", dest="split_frac", type=float, default=0.2)
@@ -4950,6 +5035,22 @@ def build_parser() -> argparse.ArgumentParser:
                               "next to the run dir)")
     _add_config_flag(p_share)  # 47.1.2
     p_share.set_defaults(func=_cmd_share)
+
+    p_export = sub.add_parser(
+        "export", help="v0.78 (SPEC.md 92.10): bundle a finished run's best "
+                       "model into one portable, numpy-only zip (weights + "
+                       "config + standalone predict.py) to hand to anyone",
+        epilog="examples:\n"
+               "  autorefine export --run runs/<run_id>\n"
+               "  autorefine export --run runs/<run_id> --out model.zip",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p_export.add_argument("--run", required=True,
+                          help="path to a run directory")
+    p_export.add_argument("--out", default=None, metavar="FILE",
+                          help="output .zip path (default: <run_dir>-model.zip "
+                               "next to the run dir)")
+    _add_config_flag(p_export)  # 47.1.2
+    p_export.set_defaults(func=_cmd_export)
 
     p_dossier = sub.add_parser(
         "dossier", help="v0.44 (SPEC.md 58.3): render the run dossier — one "

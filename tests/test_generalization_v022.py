@@ -209,7 +209,7 @@ def test_every_task_is_a_task_subclass():
     modality advances the count 7 -> 8 in place. v0.47 (SPEC.md 61.2):
     the medical/finance domain packs advance it 8 -> 10. v0.69
     (SPEC.md 83.1): the native sequence task advances it 10 -> 11."""
-    assert len(TASKS) == 11
+    assert len(TASKS) == 18  # v0.78 (A82): 11 → 18, seven new modalities
     for name, cls in TASKS.items():
         assert issubclass(cls, Task), name
 
@@ -473,4 +473,4 @@ def test_version_round_v022():
     assertion advanced in place per SPEC.md 33.1)."""
     py = tomllib.loads(
         (REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.77.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.78.0"

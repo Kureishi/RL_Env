@@ -284,18 +284,16 @@ def test_fit_cli_image_dir_passes(tmp_path, capsys):
     assert cli_main(["eval", "--run", str(runs[0])]) == 0
 
 
-def test_fit_cli_mixed_dir_needs_explicit_task(tmp_path, capsys):
+def test_fit_cli_mixed_dir_auto_resolves(tmp_path):
+    """v0.78 (SPEC.md 92.7, A7): a mixed image+audio dir is a first-class
+    task — it auto-resolves to 'mixed' (no explicit --task needed)."""
     d = tmp_path / "mixed"
     (d / "low").mkdir(parents=True)
     _write_wav(d / "low" / "a.wav", 220.0)
     _make_image(d / "low" / "b.png", "ring")
-    rc = cli_main(["fit", "--data", str(d), "--experiments", "1"])
-    err = capsys.readouterr().err
-    assert rc == 1
-    # v0.31 (SPEC.md 45.2) added the text option to the message
-    assert "--task image, --task audio, or --task text" in err
-    # explicit --task resolves it (probe-level: the task builds)
     assert detect_modality(d) == "mixed"
+    from autorefine.cli import _resolve_fit_task
+    assert _resolve_fit_task(d, "auto") == "mixed"
 
 
 def test_fit_cli_missing_path_still_errors(tmp_path, capsys):

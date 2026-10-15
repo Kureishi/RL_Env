@@ -80,6 +80,137 @@ def _fixture_image_dir(base) -> "Path":
     return d
 
 
+def _sine(freq: float, n: int = 64) -> np.ndarray:
+    """A deterministic 1-D signal (fundamental + one harmonic)."""
+    t = np.linspace(0.0, 1.0, n, endpoint=False)
+    return np.sin(2 * np.pi * freq * t) + 0.2 * np.sin(2 * np.pi * 3 * freq * t)
+
+
+def _fixture_signal_dir(base) -> "Path":
+    """Two frequency classes, one subfolder each (SPEC.md 92.1, v0.78)."""
+    d = Path(base) / "signals"
+    for name, freq in (("low", 2.0), ("high", 14.0)):
+        sub = d / name
+        sub.mkdir(parents=True)
+        for i in range(3):
+            (sub / f"c{i:02d}.sig").write_text(
+                " ".join(f"{v:.6f}" for v in _sine(freq)) + "\n",
+                encoding="utf-8")
+    return d
+
+
+def _fixture_jsonl(base) -> "Path":
+    """Ten JSONL records, two classes (SPEC.md 92.2, v0.78)."""
+    import json as _json
+    p = Path(base) / "logs.jsonl"
+    lines = []
+    for i in range(10):
+        cls = i % 2
+        lines.append(_json.dumps({
+            "label": cls,
+            "a": float(cls),
+            "nested": {"b": cls * 1.5},
+            "flag": bool(cls),
+        }))
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return p
+
+
+def _fixture_midi_dir(base) -> "Path":
+    """Two pitch-class sets, one subfolder each (SPEC.md 92.3, v0.78).
+
+    Minimal format-0 MIDI files: set-tempo meta + note-on events under
+    this codebase's channel-voice convention (low nibble 0x1 = note-on,
+    velocity in byte 2) — the parser's own contract (midi.py, 92.3.1).
+    """
+    def _vlq(v: int) -> bytes:
+        out = bytes([v & 0x7F])
+        v >>= 7
+        while v:
+            out = bytes([(v & 0x7F) | 0x80]) + out
+            v >>= 7
+        return out
+    d = Path(base) / "midi"
+    for name, pitches in (("jazz", (60, 62, 67, 72, 76)),
+                          ("rock", (40, 45, 50, 55, 59))):
+        sub = d / name
+        sub.mkdir(parents=True)
+        for i in range(3):
+            trk = bytes([0x00, 0xFF, 0x51, 0x03]) + (500000).to_bytes(3, "big")
+            for delta, pitch in enumerate(pitches):
+                trk += _vlq(delta * 24) + bytes([0x91, pitch, 100])
+            trk += bytes([0x00, 0xFF, 0x2F, 0x00])  # end of track
+            header = (b"MThd" + (6).to_bytes(4, "big") + (0).to_bytes(2, "big")
+                      + (1).to_bytes(2, "big") + (960).to_bytes(2, "big"))
+            (sub / f"c{i:02d}.mid").write_bytes(
+                header + b"MTrk" + len(trk).to_bytes(4, "big") + trk)
+    return d
+
+
+def _fixture_pc_dir(base) -> "Path":
+    """Round shell vs flat disk point clouds (SPEC.md 92.4, v0.78)."""
+    d = Path(base) / "pointclouds"
+    ang = np.linspace(0.0, 2 * np.pi, 20)
+    for name, z in (("round", 0.5), ("flat", 0.02)):
+        sub = d / name
+        sub.mkdir(parents=True)
+        for i in range(3):
+            pts = [(np.cos(a), np.sin(a), z) for a in ang]
+            (sub / f"c{i:02d}.obj").write_text(
+                "\n".join(f"v {x:.4f} {y:.4f} {z2:.4f}" for x, y, z2 in pts) + "\n",
+                encoding="utf-8")
+    return d
+
+
+def _fixture_graph_dir(base) -> "Path":
+    """Two-community graph: nodes.csv + edges.csv (SPEC.md 92.5, v0.78)."""
+    d = Path(base) / "graph"
+    d.mkdir(parents=True)
+    nodes = ["id,f1,f2,label"]
+    for i in range(10):
+        cls = i % 2
+        nodes.append(f"{i},{0.1 * cls:.2f},{0.2 * cls:.2f},{cls}")
+    (d / "nodes.csv").write_text("\n".join(nodes) + "\n", encoding="utf-8")
+    edges = ["source,target"] + [f"{i},{i + 1}" for i in range(0, 9, 2)]
+    (d / "edges.csv").write_text("\n".join(edges) + "\n", encoding="utf-8")
+    return d
+
+
+def _fixture_mixed_dir(base) -> "Path":
+    """low/high rows mixing signal (.sig) and audio (.wav) (SPEC.md 92.7, v0.78)."""
+    import wave
+    d = Path(base) / "mixed"
+    for name, freq in (("low", 2.0), ("high", 14.0)):
+        sub = d / name
+        sub.mkdir(parents=True)
+        for i in range(3):
+            (sub / f"c{i:02d}.sig").write_text(
+                " ".join(f"{v:.6f}" for v in _sine(freq)) + "\n",
+                encoding="utf-8")
+            sr = 16000
+            t = np.arange(sr // 2) / sr
+            sig = 0.6 * np.sin(2 * np.pi * (220.0 if name == "low" else 880.0) * t)
+            pcm = (np.clip(sig, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+            with wave.open(str(sub / f"a{i:02d}.wav"), "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(sr)
+                w.writeframes(pcm)
+    return d
+
+
+def _fixture_video_dir(base) -> "Path":
+    """slow/fast clip folders (SPEC.md 92.6, v0.78); the bytes are dummies —
+    decoding is monkeypatched at `imageio.v3.imread` by the caller."""
+    d = Path(base) / "video"
+    for name in ("slow", "fast"):
+        sub = d / name
+        sub.mkdir(parents=True)
+        for i in range(3):
+            (sub / f"v{i:02d}.mp4").write_bytes(b"fake")
+    return d
+
+
 class _TargetModel:
     """'Model' that knows the sine target exactly: score must be ~100."""
 
@@ -87,12 +218,19 @@ class _TargetModel:
         return target_function(np.asarray(x, dtype=np.float64).reshape(-1))[:, None]
 
 
-def test_task_registry_covers_all_tasks(tmp_path):
-    # SPEC.md 22.1/24/45.2/83.1: csv/image/audio/text are data-driven (need a
-    # file/dir), the rest are seed-constructable
+def test_task_registry_covers_all_tasks(tmp_path, monkeypatch):
+    # SPEC.md 22.1/24/45.2/83.1/92: csv/image/audio/text and the v0.78
+    # signal/jsonl/midi/pointcloud/graph/video/mixed tasks are data-driven
+    # (need a file/dir), the rest are seed-constructable
     assert set(TASKS) == {"cartpole-v1", "sine-v1", "gridnav-v1", "parity-v1",
                           "csv", "image", "audio", "text",
-                          "medical-v1", "finance-v1", "sequence-motif-v1"}
+                          "medical-v1", "finance-v1", "sequence-motif-v1",
+                          "signal", "jsonl", "midi", "pointcloud",
+                          "graph", "video", "mixed"}
+    try:
+        import imageio.v3 as _iio  # optional [video] extra (SPEC.md 92.6.1)
+    except ImportError:
+        _iio = None
     for name, cls in TASKS.items():
         if name == "csv":
             task = CsvTask(seed=7, path=str(_fixture_csv(tmp_path / "csv_fixture.csv")))
@@ -102,6 +240,29 @@ def test_task_registry_covers_all_tasks(tmp_path):
             task = cls(seed=7, path=str(_fixture_image_dir(tmp_path)))
         elif name == "text":
             task = cls(seed=7, path=str(_fixture_text_dir(tmp_path)))
+        elif name == "signal":
+            task = cls(seed=7, path=str(_fixture_signal_dir(tmp_path)))
+        elif name == "jsonl":
+            task = cls(seed=7, path=str(_fixture_jsonl(tmp_path)))
+        elif name == "midi":
+            task = cls(seed=7, path=str(_fixture_midi_dir(tmp_path)))
+        elif name == "pointcloud":
+            task = cls(seed=7, path=str(_fixture_pc_dir(tmp_path)))
+        elif name == "graph":
+            task = cls(seed=7, path=str(_fixture_graph_dir(tmp_path)))
+        elif name == "mixed":
+            task = cls(seed=7, path=str(_fixture_mixed_dir(tmp_path)))
+        elif name == "video":
+            root = _fixture_video_dir(tmp_path)
+            if _iio is None:
+                # fail-loud contract (92.6.1): no imageio -> install hint
+                with pytest.raises(ValueError, match="imageio"):
+                    cls(seed=7, path=str(root))
+                continue
+            frames = np.random.default_rng(5).integers(
+                0, 256, size=(10, 48, 64, 3), dtype=np.uint8)
+            monkeypatch.setattr(_iio, "imread", lambda p: frames)
+            task = cls(seed=7, path=str(root))
         else:
             task = cls(seed=7)
         assert task.name == name

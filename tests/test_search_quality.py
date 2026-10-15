@@ -276,11 +276,142 @@ def _ci_text_dir(base: Path) -> Path:
     return d
 
 
+def _ci_sine(freq: float, n: int = 64) -> np.ndarray:
+    """A deterministic 1-D signal (fundamental + one harmonic)."""
+    t = np.linspace(0.0, 1.0, n, endpoint=False)
+    return np.sin(2 * np.pi * freq * t) + 0.2 * np.sin(2 * np.pi * 3 * freq * t)
+
+
+def _ci_signal_dir(base: Path) -> Path:
+    """Two frequency classes, one subfolder each (SPEC.md 92.1, v0.78)."""
+    d = base / "signals"
+    for name, freq in (("low", 2.0), ("high", 14.0)):
+        sub = d / name
+        sub.mkdir(parents=True)
+        for i in range(3):
+            (sub / f"c{i:02d}.sig").write_text(
+                " ".join(f"{v:.6f}" for v in _ci_sine(freq)) + "\n",
+                encoding="utf-8")
+    return d
+
+
+def _ci_jsonl(base: Path) -> Path:
+    """Ten JSONL records, two classes (SPEC.md 92.2, v0.78)."""
+    import json as _json
+    p = base / "logs.jsonl"
+    lines = []
+    for i in range(10):
+        cls = i % 2
+        lines.append(_json.dumps({
+            "label": cls,
+            "a": float(cls),
+            "nested": {"b": cls * 1.5},
+            "flag": bool(cls),
+        }))
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return p
+
+
+def _ci_midi_dir(base: Path) -> Path:
+    """Two pitch-class sets, one subfolder each (SPEC.md 92.3, v0.78).
+
+    Minimal format-0 MIDI files under this codebase's channel-voice
+    convention (low nibble 0x1 = note-on, velocity in byte 2) — the
+    parser's own contract (midi.py, 92.3.1)."""
+    def _vlq(v: int) -> bytes:
+        out = bytes([v & 0x7F])
+        v >>= 7
+        while v:
+            out = bytes([(v & 0x7F) | 0x80]) + out
+            v >>= 7
+        return out
+    d = base / "midi"
+    for name, pitches in (("jazz", (60, 62, 67, 72, 76)),
+                          ("rock", (40, 45, 50, 55, 59))):
+        sub = d / name
+        sub.mkdir(parents=True)
+        for i in range(3):
+            trk = bytes([0x00, 0xFF, 0x51, 0x03]) + (500000).to_bytes(3, "big")
+            for delta, pitch in enumerate(pitches):
+                trk += _vlq(delta * 24) + bytes([0x91, pitch, 100])
+            trk += bytes([0x00, 0xFF, 0x2F, 0x00])  # end of track
+            header = (b"MThd" + (6).to_bytes(4, "big") + (0).to_bytes(2, "big")
+                      + (1).to_bytes(2, "big") + (960).to_bytes(2, "big"))
+            (sub / f"c{i:02d}.mid").write_bytes(
+                header + b"MTrk" + len(trk).to_bytes(4, "big") + trk)
+    return d
+
+
+def _ci_pc_dir(base: Path) -> Path:
+    """Round shell vs flat disk point clouds (SPEC.md 92.4, v0.78)."""
+    d = base / "pointclouds"
+    ang = np.linspace(0.0, 2 * np.pi, 20)
+    for name, z in (("round", 0.5), ("flat", 0.02)):
+        sub = d / name
+        sub.mkdir(parents=True)
+        for i in range(3):
+            pts = [(np.cos(a), np.sin(a), z) for a in ang]
+            (sub / f"c{i:02d}.obj").write_text(
+                "\n".join(f"v {x:.4f} {y:.4f} {z2:.4f}" for x, y, z2 in pts) + "\n",
+                encoding="utf-8")
+    return d
+
+
+def _ci_graph_dir(base: Path) -> Path:
+    """Two-community graph: nodes.csv + edges.csv (SPEC.md 92.5, v0.78)."""
+    d = base / "graph"
+    d.mkdir(parents=True)
+    nodes = ["id,f1,f2,label"]
+    for i in range(10):
+        cls = i % 2
+        nodes.append(f"{i},{0.1 * cls:.2f},{0.2 * cls:.2f},{cls}")
+    (d / "nodes.csv").write_text("\n".join(nodes) + "\n", encoding="utf-8")
+    edges = ["source,target"] + [f"{i},{i + 1}" for i in range(0, 9, 2)]
+    (d / "edges.csv").write_text("\n".join(edges) + "\n", encoding="utf-8")
+    return d
+
+
+def _ci_mixed_dir(base: Path) -> Path:
+    """low/high rows mixing signal (.sig) and audio (.wav) (SPEC.md 92.7, v0.78)."""
+    import wave
+    d = base / "mixed"
+    for name, freq in (("low", 2.0), ("high", 14.0)):
+        sub = d / name
+        sub.mkdir(parents=True)
+        for i in range(3):
+            (sub / f"c{i:02d}.sig").write_text(
+                " ".join(f"{v:.6f}" for v in _ci_sine(freq)) + "\n",
+                encoding="utf-8")
+            sr = 16000
+            t = np.arange(sr // 2) / sr
+            sig = 0.6 * np.sin(2 * np.pi * (220.0 if name == "low" else 880.0) * t)
+            pcm = (np.clip(sig, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+            with wave.open(str(sub / f"a{i:02d}.wav"), "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(sr)
+                w.writeframes(pcm)
+    return d
+
+
+def _ci_video_dir(base: Path) -> Path:
+    """slow/fast clip folders (SPEC.md 92.6, v0.78); decoding is
+    monkeypatched at `imageio.v3.imread` by the caller."""
+    d = base / "video"
+    for name in ("slow", "fast"):
+        sub = d / name
+        sub.mkdir(parents=True)
+        for i in range(3):
+            (sub / f"v{i:02d}.mp4").write_bytes(b"fake")
+    return d
+
+
 @pytest.mark.parametrize("task_name", sorted(TASKS))
-def test_score_with_ci_all_tasks(task_name, tmp_path):
+def test_score_with_ci_all_tasks(task_name, tmp_path, monkeypatch):
     """SPEC.md 18.3: block CI works for every registered task with zero task
-    changes; deterministic given the seed (G2); the csv/image/audio/text
-    fixtures cover the data-driven tasks (SPEC.md 22.1/24/45.2)."""
+    changes; deterministic given the seed (G2); the csv/image/audio/text and
+    v0.78 modality fixtures cover the data-driven tasks (SPEC.md
+    22.1/24/45.2/92)."""
     if task_name == "csv":
         task = CsvTask(seed=1, path=str(_ci_csv_fixture(tmp_path / "ci_fixture.csv")))
     elif task_name == "audio":
@@ -289,6 +420,26 @@ def test_score_with_ci_all_tasks(task_name, tmp_path):
         task = TASKS[task_name](seed=1, path=str(_ci_image_dir(tmp_path)))
     elif task_name == "text":
         task = TASKS[task_name](seed=1, path=str(_ci_text_dir(tmp_path)))
+    elif task_name == "signal":
+        task = TASKS[task_name](seed=1, path=str(_ci_signal_dir(tmp_path)))
+    elif task_name == "jsonl":
+        task = TASKS[task_name](seed=1, path=str(_ci_jsonl(tmp_path)))
+    elif task_name == "midi":
+        task = TASKS[task_name](seed=1, path=str(_ci_midi_dir(tmp_path)))
+    elif task_name == "pointcloud":
+        task = TASKS[task_name](seed=1, path=str(_ci_pc_dir(tmp_path)))
+    elif task_name == "graph":
+        task = TASKS[task_name](seed=1, path=str(_ci_graph_dir(tmp_path)))
+    elif task_name == "mixed":
+        task = TASKS[task_name](seed=1, path=str(_ci_mixed_dir(tmp_path)))
+    elif task_name == "video":
+        iio = pytest.importorskip(
+            "imageio.v3",
+            reason="video decoding needs autorefine[video] (SPEC.md 92.6.1)")
+        frames = np.random.default_rng(5).integers(
+            0, 256, size=(10, 48, 64, 3), dtype=np.uint8)
+        monkeypatch.setattr(iio, "imread", lambda p: frames)
+        task = TASKS[task_name](seed=1, path=str(_ci_video_dir(tmp_path)))
     else:
         task = TASKS[task_name](seed=1)
     spec = ModelSpec.from_dict({**DEFAULT_SPEC.to_dict(), "train_steps": 200})

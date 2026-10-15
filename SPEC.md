@@ -98,6 +98,7 @@ numbers and carry none.)
 | M78 | v0.75   | 89     | A79 | tests/test_ingest_v075.py |
 | M79 | v0.76   | 90     | A80 | tests/test_ondemand_ui_v076.py |
 | M80 | v0.77   | 91     | A81 | tests/test_accel_v077.py |
+| M81 | v0.78   | 92     | A82 | tests/test_modalities_v078.py |
 
 ---
 
@@ -8269,3 +8270,265 @@ fields (91.4), CLI flags on the owning subcommands, and the
 `autorefine backend` report verb (91.5). No new hard dependency, every
 legacy surface stays green, and the A-index advances to A81/M80 with
 `tests/test_accel_v077.py` (91.7).
+
+## 92. v0.78 — Seven new data modalities + the upload→utilization flows (A82)
+
+v0.77 widened the compute space; v0.78 widens the **data space**. Four
+new directory modalities join the v0.10 trio (image/audio/text): **signal
+clips** (92.1), **MIDI music** (92.3), **3-D point clouds** (92.4), and
+**graph node datasets** (92.5); **video** (92.6) rides on one optional
+library; and a directory whose rows mix two or more modalities stops being
+an error and becomes a first-class task, **MixedTask** (92.7). A fifth
+modality is **file-based**: JSONL / nested-JSON logs (92.2). On top of
+the data, five upload→utilization flows close the last miles (B1–B5):
+`discover` finds the new modalities (92.8), `--data -` reads a table from
+stdin (92.9), `autorefine export` ships a run's best model as a portable,
+numpy-only zip (92.10), the app's upload surface accepts the new file
+types (92.11), and `predict --data` aliases `--csv` (92.12).
+
+Two invariants govern the design:
+
+* **No new hard dependency.** Every decoder is stdlib + numpy. Video is
+  the single exception and is *optional*: `imageio` is a lazy import
+  behind the `video` extra, and its absence degrades to an install hint,
+  never a crash (92.6).
+* **G2 + additive.** Every feature map is deterministic given the file
+  bytes; the new tasks are additive registry entries (`TASKS` gains seven
+  keys), the resolvers only *accept more*, and no legacy path, pin, or
+  string changes (the image+audio directory still detects as `mixed`, and
+  `mixed` is now a task instead of an error).
+
+All seven tasks speak the same flat protocol (22.1): the labelled-
+directory or file input, head inference (24.2), the seed split, train-
+only standardization, and the §22.1 score — so the bandit/search
+improver, the default spec space, the RL catalog, and every reporting
+view work on them unchanged.
+
+### 92.1 A82.A1 — SignalTask (signals.py)
+
+A directory of labelled 1-D signal clips (`.npy` float arrays, `.dat`
+raw float32, `.sig` whitespace-separated text) — the generic
+sensor/telemetry modality (ECG, accelerometer, …). `signal_features` is
+the raw **38-d** feature of one clip: resample to 128 points, detrend to
+unit standard deviation, then 6 shape statistics (crest factor, peak-to-
+peak, zero-crossing rate, skewness, excess kurtosis, mean absolute
+value) + 16 normalized autocorrelation lags + 16 log1p rfft magnitude
+bins over the positive-frequency axis. A constant or non-finite clip is
+an error — the task has no silent fallback. `TASKS["signal"]`.
+
+### 92.2 A82.A2 — JsonlTask (jsonl.py)
+
+A `.jsonl` file (or a JSON array of objects) as a fitting task — the
+semi-structured-log modality, the file-based sibling of `CsvTask`.
+92.2.1 defines the **flattening** of one record into columns: numeric
+leaves keep their dotted key path; string leaves become a hashed bucket
+column `s<zlib.crc32(utf8) % 8>` (the text 45.2.1 rule); list leaves
+become the mean of their numeric leaves (the length when they have
+none); null and bare-dict leaves are skipped (dicts recurse). The label
+is the `label` argument if given (top-level key, then flattened path),
+else the first of `label`/`target`/`y`/`class`; missing feature values
+are 0.0 (the train-only standardization absorbs the shift). `TASKS[
+"jsonl"]`.
+
+Resolver rules (92.2/92.12): a `.jsonl`/`.json` **file** resolves to the
+`jsonl` task under `--task auto` or `--task jsonl`; asking `--task csv`
+for one (or `--task jsonl` for a CSV file) is a clear error; every other
+file stays `csv`.
+
+### 92.3 A82.A3 — MidiTask (midi.py)
+
+A directory of labelled MIDI files (`.mid`/`.midi`). 92.3.1 is the
+parser: a pure-Python MThd/MTrk byte scan (zero new dependencies) that
+extracts note-on events (beat, pitch) and set-tempo meta events. 92.3.2
+is the fixed **35-d** feature: 3 duration/density scalars + a 12-bin
+pitch-class histogram + a 16-bin onset-time histogram + 4 inter-onset /
+note-length statistics. `TASKS["midi"]`.
+
+### 92.4 A82.A4 — PointCloudTask (pointcloud.py)
+
+A directory of labelled 3-D point-cloud files (`.ply`/`.obj`). 92.4.1
+is the ASCII parser (PLY `element vertex` blocks, OBJ `v` lines —
+stdlib only). 92.4.2 is the fixed **83-d** feature: 19 shape scalars
+(centroid statistics, bounding-box measures, and the three principal-
+axis variances from the symmetric 3×3 covariance eigendecomposition)
+plus a 4×4×4 voxel-occupancy histogram (64 log1p counts over a
+unit-normalized grid). `TASKS["pointcloud"]`.
+
+### 92.5 A82.A5 — GraphTask (graph.py)
+
+A graph dataset as a fitting task: one directory with `nodes.csv` (one
+row per node; a label column — `label`/`target`/`y`/`class`, else the
+last — and numeric feature columns; an optional `id` column names the
+nodes) and `edges.csv` (two node-reference columns: row indices, or ids
+when `nodes.csv` carries an id column). 92.5.1: the feature of a node is
+its own features **mean-aggregated over its 1-hop neighborhood** (itself
+plus its neighbours — pure NumPy, deterministic given the files). The
+rows are the nodes; 92.5.2: there is no `holdout_errors` — a node is not
+a displayable media file. `TASKS["graph"]`; `detect_modality` reports
+`"graph"` for a directory holding both files (checked before the media
+scan).
+
+### 92.6 A82.A6 — VideoTask (video.py)
+
+A directory of labelled video clips (`.mp4`/`.mov`/`.avi`), the only
+modality with an optional dependency: the `video = ["imageio>=2.31"]`
+pyproject extra (metadata only — the core stays import-free). 92.6.1:
+`load_video_frames(p, n_frames=8, grid=32)` lazy-imports `imageio.v3`
+(a friendly install hint when absent — never a crash at import time),
+reads exactly `n_frames` frames sampled evenly (so the feature width is
+constant for every clip), and turns each into a `grid`×`grid`
+grayscale plane (BT.601, `/255` when the range is 0–255) via
+deterministic block-average pooling — no PIL. 92.6.2:
+`video_features` is the fixed **8199-d** vector (`VIDEO_FEATURE_DIM`)
+— 8·32·32 grayscale values + 7 inter-frame motion deltas
+(`mean |f[i+1] − f[i]|`). `TASKS["video"]`.
+
+### 92.7 A82.A7 — MixedTask (mixed.py)
+
+A labelled directory whose rows span **two or more** of the seven row
+modalities (`ROW_MODALITIES`: image, audio, text, signal, midi,
+pointcloud, video) — the modality the v0.10 resolvers used to *refuse*.
+92.7.1: each row is decoded by **its own modality's own decoder**
+(`ImageTask._decode`, `AudioTask._load_signal` + `log_mel_features`,
+`TextTask` n-grams, `SignalTask`, `MidiTask`, `PointCloudTask`, and
+`VideoTask` at a smaller 4×16×16 sampling kept under the row budget),
+with optional-decoder rules propagating (no imageio → the video row
+fails with the install hint). 92.7.2: the row feature is the fixed
+**1031-d** vector (`MIXED_FEATURE_DIM`) — a 7-dim modality one-hot (in
+`ROW_MODALITIES` order, so the model can branch on the modality)
+followed by the row's own modality feature zero-padded/truncated to
+1024. A directory with fewer than two distinct modalities fails loudly
+and names the single-modality task that fits. `TASKS["mixed"]`.
+
+Resolver rule change: a directory detected as `mixed` now resolves to
+the `mixed` task under `--task auto` (and is accepted under `--task
+mixed`); the old "pass `--task image/audio/text`" error is gone. The
+legacy image+audio detection stays `"mixed"` — only its *consequence*
+changed.
+
+### 92.8 B1 — `discover` finds the new modalities
+
+`pick_data`'s directory allowlist extends to the nine directory
+modalities (image, audio, text, signal, midi, pointcloud, graph, video,
+mixed — a `mixed` detection is a candidate too), and `.jsonl`/`.json`
+files are candidates (task `jsonl`, "a JSONL/JSON log"). The candidate
+contract (`path`/`task`/`reason`) and the ordering (kind rank, mtime
+desc, name asc) are unchanged — `go`'s path-less data discovery (88.1)
+now simply sees more data.
+
+### 92.9 B2 — `--data -` (stdin)
+
+`fit` and `go` accept `--data -`: `cli._stdin_csv()` reads the CSV table
+from stdin into a session temp file **before** any mode-exclusion or
+data-discovery logic runs, so every downstream path sees an ordinary
+file. Empty stdin is a clear error (rc 1). Piped tables (the
+`curl | autorefine fit --data -` case) need no landing disk file of the
+user's choosing.
+
+### 92.10 B3 — `autorefine export` (exporter.py)
+
+The "hand this model to anyone" verb. `exporter.export_run(run_dir,
+out_path)` bundles a finished run into one deterministic zip (fixed
+member order, fixed 1980-01-01 timestamps — G2):
+
+* `best_model.npz` — the champion weights, copied byte-for-byte;
+* `model_config.json` — family, head, state dim, feature names, the
+  task's train-only standardization stats, and the class values (the
+  42.1.3 preprocessing rule, frozen at export time);
+* `predict.py` — a standalone **pure-numpy** predictor for the four
+  plain-array families (mlp / knn / tree / boost), re-implementing each
+  family's `forward` (incl. the 78.2.1 Fourier expansion) on the saved
+  npz — no autorefine import, no other dependency;
+* `README.md` — contents, usage, and (for the non-portable families —
+  convnet/gp/gam) the note that those checkpoints still load through
+  autorefine's `predict`/`eval` verbs.
+
+`autorefine export --run DIR [--out FILE]` (default `<run_dir>-
+model.zip`): rc 0 with the entry listing + the family/portability line;
+rc 1 on a broken run dir (92.10.4) or a portable-family run whose task
+is not reconstructible (its preprocessing stats are unrecoverable).
+Cycle-free: `exporter` imports only the task registry — never the cli.
+
+### 92.11 B4 — the app's upload surface
+
+The dashboard uploader's accepted type list extends with `npy`, `dat`,
+`sig`, `mid`, `midi`, `ply`, `obj`, `mp4`, `mov`, `avi`, `jsonl`,
+`json`; its label names the full modality family. `_resolve_index_to_
+dir` accepts a `index.csv` pointing at **any** directory modality
+(mixed included); `_preview_data` treats `mixed` as a valid task
+(`MixedTask`) and previews `.jsonl`/`.json` files as `JsonlTask` (first
+lines verbatim). The upload → preview → run → results path is therefore
+one code path across all ten modalities.
+
+### 92.12 B5 — `predict --data`
+
+`predict` gains `--data` as a pure alias for `--csv` (one verb, one
+input — the `fit`/`go`/`predict` vocabulary finally agrees on the
+"data" word). `--csv` and `--data` together are rc 1 (the same input
+given twice). No new input mode: the 42.1.1 exactly-one-mode rule is
+unchanged.
+
+### 92.13 Acceptance (A82)
+
+1. **A1–A7 tasks (92.1–92.7)**: each new task constructs from a tiny
+   fixture directory/file (`.sig`/`.npy` signals, a `.jsonl` log, a
+   synthetic `.mid`, `.obj` point clouds, `nodes.csv`+`edges.csv`, a
+   mixed `index.csv` spanning ≥ 2 modalities, and — when imageio is
+   importable — a clip), exposes the protocol attributes (`state_dim`,
+   `head`, `make_dataset`, `score`, the train/holdout/gen split, the
+   train-only stats), and round-trips a tiny trained model; the feature
+   dimensions are the documented constants (38 / 35 / 83 / 8199 /
+   1031); `MixedTask` on a single-modality directory fails loudly.
+2. **Resolvers (92.2/92.7)**: `.jsonl` file → `jsonl` (auto and explicit);
+   `--task csv` on a `.jsonl` file and `--task jsonl` on a CSV file are
+   clear errors; a mixed directory resolves to `mixed` under auto (no
+   longer an error); the legacy image+audio → `"mixed"` detection is
+   unchanged.
+3. **B1 (92.8)**: `discover_data` picks a new-modality directory and a
+   `.jsonl` file with the documented task/reason; the candidate contract
+   and ordering are unchanged.
+4. **B2 (92.9)**: `fit --data -` (and `go --data -`) on a piped CSV
+   table trains the same csv task as the file path (the materialized
+   temp CSV is a real file); empty stdin is a clean rc 1.
+5. **B3 (92.10)**: `export` on a synthetic run dir (each portable
+   family) produces a zip whose `best_model.npz` is byte-identical to
+   the run's, whose `model_config.json` carries the task's stats, and
+   whose standalone `predict.py` (run in a clean directory) returns the
+   same predictions as the library `predict` on the same new rows; a
+   non-portable family's zip omits `predict.py` and says so in the
+   README; a broken run dir is rc 1; two exports of the same run are
+   byte-identical.
+6. **B4 (92.11)**: the uploader's accepted type list contains the new
+   extensions; `_resolve_index_to_dir` resolves an index for a
+   mixed-modality directory; `_preview_data` accepts a `mixed`
+   directory and a `.jsonl` file.
+7. **B5 (92.12)**: `predict --data FILE` equals `predict --csv FILE`;
+   `--csv` + `--data` together are rc 1.
+8. **Ceremony**: the version steps to `0.78.0` in both sources (33.1);
+   the A-index advances (`defined == set(range(1, 83))`, 78 acceptance
+   rows, M81 resolving to this file); the seven task classes and their
+   feature functions land in `autorefine.__all__` and the `TASKS`
+   registry gains the seven new keys; the app-language scan stays green
+   (the new app strings carry no spec tokens).
+
+All in `tests/test_modalities_v078.py`.
+
+### 92.14 Milestone (M81)
+
+**M81** — v0.78 "Seven new data modalities + the upload→utilization
+flows": the data space widens from CSV + image/audio/text to ten
+modalities — signal clips (92.1), JSONL logs (92.2), MIDI (92.3), point
+clouds (92.4), graph node datasets (92.5), video on one optional
+library (92.6), and mixed-modality directories as a first-class task
+instead of an error (92.7) — all on the shared flat protocol (22.1) so
+the improver, the RL catalog, and every reporting view work on them
+unchanged; and the five flows (B1–B5) close the last miles: `discover`
+finds the new data (92.8), `--data -` reads piped tables (92.9),
+`autorefine export` ships a run's champion as a portable numpy-only zip
+with a standalone predictor (92.10), the app's upload surface accepts
+all of it (92.11), and `predict --data` agrees with the `fit`/`go`
+vocabulary (92.12). No new hard dependency (video's imageio is an
+optional extra with a graceful hint), every legacy surface stays green
+(the image+audio `mixed` detection is unchanged, only its consequence
+changed), and the A-index advances to A82/M81 with
+`tests/test_modalities_v078.py` (92.13).
