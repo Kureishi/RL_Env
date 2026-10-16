@@ -140,7 +140,7 @@ def test_spec_acceptance_numbers_cited_by_tests():
     defined.update(int(n) for n in re.findall(r"\*\*A(\d+)\.\*\*", spec))
     defined.update(int(n) for n in
                    re.findall(r"\(A(\d+)\)\s*$", spec, re.MULTILINE))
-    assert defined == set(range(1, 83)), sorted(defined)  # A1..A82 (this round)
+    assert defined == set(range(1, 84)), sorted(defined)  # A1..A83 (this round)
     cited: set[int] = set()
     for p in _test_files():
         cited.update(int(n) for n in _A_NUM.findall(p.read_text(encoding="utf-8")))
@@ -160,7 +160,7 @@ def test_index_table_rows_resolve():
     """A25 (SPEC.md 35.2): each row of the acceptance index table
     lists test file(s) that exist under `tests/` and cite that row's
     A#; the M0–M3 scaffold rows carry no acceptance number and are
-    skipped. (78 acceptance rows: M4–M81.)"""
+    skipped. (79 acceptance rows: M4–M82.)"""
     spec = (REPO / "SPEC.md").read_text(encoding="utf-8")
     lines = spec.splitlines()
     try:
@@ -188,7 +188,7 @@ def test_index_table_rows_resolve():
                        if not re.search(rf"\bA{n}\b", text)]
             assert not missing, \
                 f"index row {cells[0]}: {fname} does not cite {missing}"
-    assert rows == 78, f"expected 78 acceptance rows (M4–M81), got {rows}"
+    assert rows == 79, f"expected 79 acceptance rows (M4–M82), got {rows}"
 
 
 # --- 35.3 regression (A25) ------------------------------------------------------
@@ -196,6 +196,6 @@ def test_index_table_rows_resolve():
 def test_version_round_v021():
     """A25 (SPEC.md 35.3): the version stepped with the round (33.1) —
     the round assertion advanced in place with each round (v0.21 ⇒
-    `0.21.0`; now v0.78 ⇒ `0.78.0`, M81, SPEC.md 92)."""
+    `0.21.0`; now v0.79 ⇒ `0.79.0`, M82, SPEC.md 93)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.78.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.79.0"

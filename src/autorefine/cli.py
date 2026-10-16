@@ -46,6 +46,14 @@ from .runconfig import (
 from .dashboard import diff_n_summaries, diff_two_summaries, field_stats  # 42.2/42.3 (v0.28) + 50.1.4 (v0.36)
 from .sharing import share_payload, write_share_zip  # 47.4/50.2 (v0.36)
 from .exporter import export_run  # 92.10 (v0.78, B3): the portable model export
+from .adapt import adapt_model, plan_adapt, render_adapt_text  # 93.3 (v0.79, A83)
+from .conformal import (  # 93.1/93.2 (v0.79, A83): calibration + OOD
+    conformal_interval,
+    conformal_prediction_set,
+    familiarity,
+    fit_calibration,
+    is_ood,
+)
 from .dossier import build_dossier  # 58.3 (v0.44): the run dossier
 from .improver.meta_env import AutoRefineEnv, search_quality_v04
 from .improver.bandit import BanditPolicy
@@ -3521,6 +3529,18 @@ def _cmd_predict(args: argparse.Namespace) -> int:
         print("predict: probabilities are only available for softmax-head "
               "models (SPEC.md 46.1)", file=sys.stderr)
         return 1
+    # 93.1/93.2 (v0.79, A83): conformal + OOD — opt-in flags only; with no
+    # flag `cal` stays None and every output below is byte-identical to the
+    # pre-v0.79 surface (the A32/A82 predict pins).
+    cal = None
+    if args.cal or args.ood:
+        try:
+            cal = fit_calibration(task, model, alpha=float(args.alpha),
+                                  beta=float(args.beta),
+                                  with_ood=bool(args.ood))
+        except (ValueError, TypeError) as exc:
+            print(f"predict: calibration failed: {exc}", file=sys.stderr)
+            return 1
     # 92.12 (B5, v0.78): --data is an alias for --csv (one verb, one input)
     if getattr(args, "data", None) is not None:
         if args.csv is not None:
@@ -3560,6 +3580,7 @@ def _cmd_predict(args: argparse.Namespace) -> int:
         print(f"predict: {exc}", file=sys.stderr)
         return 1
     results = []
+    extras = []
     for i, raw in enumerate(raws):
         try:
             feat = standardize(task, raw)
@@ -3567,13 +3588,32 @@ def _cmd_predict(args: argparse.Namespace) -> int:
         except (ValueError, TypeError) as exc:
             print(f"predict: row {i}: {exc}", file=sys.stderr)
             return 1
-        results.append({"row": i,
-                        "prediction": r["prediction"],
-                        "probabilities": r["probabilities"]})
+        entry = {"row": i,
+                 "prediction": r["prediction"],
+                 "probabilities": r["probabilities"]}
+        extra: dict = {}
+        if cal is not None:
+            try:
+                if args.cal:
+                    if cal.head == "softmax":  # 93.1.1: the prediction SET
+                        extra["prediction_set"] = list(
+                            conformal_prediction_set(task, model, feat, cal))
+                    else:  # 93.1.1: the regression INTERVAL
+                        lo, hi = conformal_interval(float(r["prediction"]), cal)
+                        extra["interval"] = [lo, hi]
+                if args.ood:  # 93.2.2: the OOD flag + familiarity
+                    extra["familiarity"] = familiarity(feat, cal)
+                    extra["ood"] = is_ood(feat, cal)
+            except (ValueError, TypeError) as exc:
+                print(f"predict: row {i}: {exc}", file=sys.stderr)
+                return 1
+            entry.update(extra)
+        results.append(entry)
+        extras.append(extra)
     if args.json:
         print(json.dumps(results, sort_keys=True))
     else:
-        for r in results:
+        for r, ex in zip(results, extras):
             if args.prob:  # SPEC.md 46.1 (v0.32): the calibrated probabilities
                 classes = list(task.class_values)
                 for ci, cls in enumerate(classes):
@@ -3581,6 +3621,87 @@ def _cmd_predict(args: argparse.Namespace) -> int:
                           f"p={r['probabilities'][ci]:.4f}")
             else:
                 print(f"{r['row']}\t{_pred_str(r['prediction'])}")
+            if "prediction_set" in ex:
+                print(f"{r['row']}\tprediction_set: ["
+                      f"{', '.join(_pred_str(v) for v in ex['prediction_set'])}]")
+            if "interval" in ex:
+                print(f"{r['row']}\tinterval: [{ex['interval'][0]:.6g}, "
+                      f"{ex['interval'][1]:.6g}]")
+            if "familiarity" in ex:
+                print(f"{r['row']}\tfamiliarity: {ex['familiarity']:.4f} "
+                      f"(ood={ex['ood']})")
+    return 0
+
+
+def _cmd_adapt(args: argparse.Namespace) -> int:
+    """`adapt` (SPEC.md 93.3, v0.79, A83): adapt a finished run's champion
+    to SIMILAR data — the 93.3.1 dry-run plan (`--dry-run`) or the 93.3.2
+    adapt (before/after on the new holdout, the adapted model saved as a
+    new reconstructible run, the registry lineage via `parent_run`).
+    Champion resolution is the 88.3 pattern (explicit `--run` wins, else
+    the registry's latest finished run; neither is a silent fallback);
+    incompatible data is a fail-loud rc 1 with the 80.2.3 reason."""
+    if args.run:
+        run_dir = Path(args.run)
+    else:
+        try:
+            entries = load_registry(args.runs_dir)
+        except Exception:
+            entries = []
+        if not entries:
+            print(f"adapt: no finished runs in {args.runs_dir} - run "
+                  f"autorefine fit or go first (SPEC.md 93.3.4)",
+                  file=sys.stderr)
+            return 1
+        best = max(entries, key=lambda e: (str(e.get("timestamp") or ""),
+                                          str(e.get("run_id") or "")))
+        run_dir = Path(args.runs_dir) / str(best.get("run_id", "?"))
+        if not (run_dir / "summary.json").is_file():
+            print(f"adapt: the latest run {run_dir} has no summary.json - "
+                  f"finish it first (SPEC.md 93.3.4)", file=sys.stderr)
+            return 1
+        print(f"using   : latest run {best.get('run_id')} (task "
+              f"{best.get('task')}) (SPEC.md 93.3.4)")
+    if args.dry_run:
+        try:
+            plan = plan_adapt(run_dir, args.data, seed=int(args.seed))
+        except (ValueError, FileNotFoundError) as exc:
+            print(f"adapt: {exc}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(plan, sort_keys=True))
+            return 0
+        pf = plan["preflight"]
+        bal = ", ".join(f"{k}: {v}" for k, v in pf["class_balance"].items())
+        print(f"champion : {plan['champion_run']} ({plan['champion_family']}, "
+              f"head={plan['champion_head']})")
+        print(f"data     : {plan['new_data']} ({pf['n_rows']} rows x "
+              f"{pf['n_cols']} cols, label {pf['label_name']}, balance {bal})")
+        print(f"new task : {plan['new_task']['name']} (state_dim "
+              f"{plan['new_task']['state_dim']}, head {plan['new_task']['head']})")
+        if plan["compatible"]:
+            note = ("the champion's weights seed the training (warm start)"
+                    if plan["warm_start"]
+                    else "the champion's spec is retrained fresh "
+                         "(its weights cannot transfer)")
+            print(f"mode     : {plan['mode']} - {note}")
+        else:
+            print(f"incompatible: {plan['compatibility_reason']} "
+                  f"(SPEC.md 93.3.3)", file=sys.stderr)
+            return 1
+        print("plan     : ok - run without --dry-run to adapt")
+        return 0
+    try:
+        rep = adapt_model(run_dir, args.data, runs_dir=args.runs_dir,
+                          seed=int(args.seed), steps=args.steps,
+                          max_seconds=args.max_seconds, target=args.target)
+    except (ValueError, FileNotFoundError) as exc:
+        print(f"adapt: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(rep, sort_keys=True))
+        return 0
+    print(render_adapt_text(rep))
     return 0
 
 
@@ -4086,6 +4207,11 @@ _EP_EVAL = """examples:
 _EP_PREDICT = """examples:
   autorefine predict --run runs/<run_id> --row '{"x1": 0.5, "x2": -0.2}'
   autorefine predict --run runs/<run_id> --csv new_rows.csv --prob
+  autorefine predict --latest --csv new_rows.csv --cal --ood   # v0.79 (93.1/93.2)
+"""
+_EP_ADAPT = """examples:
+  autorefine adapt --data new.csv --dry-run
+  autorefine adapt --run runs/<run_id> --data new.csv --steps 3000
 """
 _EP_COMPARE = """examples:
   autorefine compare --run runs/<run_id_A> --run runs/<run_id_B>
@@ -4903,8 +5029,52 @@ def build_parser() -> argparse.ArgumentParser:
     p_pred.add_argument("--json", action="store_true",
                         help="print the predictions as a pure JSON array "
                              "([{row, prediction, probabilities}, ...])")
+    p_pred.add_argument("--cal", action="store_true",
+                        help="v0.79 (SPEC.md 93.1): split-conformal output per "
+                             "row - prediction_set (softmax) or interval (mse), "
+                             "calibrated on the run task's holdout split")
+    p_pred.add_argument("--alpha", type=float, default=0.1,
+                        help="the nominal miscoverage for --cal (default 0.1)")
+    p_pred.add_argument("--ood", action="store_true",
+                        help="v0.79 (SPEC.md 93.2): per row, an OOD flag + a "
+                             "0-1 familiarity (the distance thresholded on the "
+                             "holdout rows)")
+    p_pred.add_argument("--beta", type=float, default=0.95,
+                        help="the OOD specificity for --ood (default 0.95)")
     _add_config_flag(p_pred)  # 47.1.2
     p_pred.set_defaults(func=_cmd_predict)
+
+    p_ad = sub.add_parser(
+        "adapt", help="v0.79 (SPEC.md 93.3): adapt a run's champion model to "
+                      "similar data - before/after on the new holdout, saved "
+                      "as a new run",
+        epilog=_EP_ADAPT,  # 47.2.2
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p_ad.add_argument("--run", default=None,
+                      help="the champion run dir (default: the registry's "
+                           "latest finished run, the 88.3 rule)")
+    p_ad.add_argument("--data", required=True,
+                      help="the NEW similar CSV (a later export of the "
+                           "champion's table)")
+    p_ad.add_argument("--steps", type=int, default=None,
+                      help="training steps for the adapted model (default: "
+                           "the champion spec's steps)")
+    p_ad.add_argument("--seed", type=int, default=7,
+                      help="the training seed (default 7)")
+    p_ad.add_argument("--max-seconds", type=float, default=30.0,
+                      help="the wall-time cap for the training (default 30s)")
+    p_ad.add_argument("--target", type=float, default=95.0,
+                      help="the score bar for the met_target flag (default 95.0)")
+    p_ad.add_argument("--runs-dir", default="runs",
+                      help="where the adapted run dir + registry live "
+                           "(default runs)")
+    p_ad.add_argument("--dry-run", action="store_true",
+                      help="print the plan (preflight + compatibility + mode) "
+                           "and train nothing (93.3.1)")
+    p_ad.add_argument("--json", action="store_true",
+                      help="print the plan/report as pure JSON")
+    _add_config_flag(p_ad)  # 47.1.2
+    p_ad.set_defaults(func=_cmd_adapt)
 
     p_cmp = sub.add_parser(
         "compare", help="v0.28 (SPEC.md 42.2; 50.1.4 v0.36): the app's "

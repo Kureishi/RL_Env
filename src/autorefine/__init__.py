@@ -303,11 +303,26 @@ from .ondemand import (  # SPEC.md 90 (v0.76, A80): the on-demand Adapt cores
     refresh_model,
     score_fresh,
 )
+from .conformal import (  # SPEC.md 93 (v0.79, A83): calibration + OOD
+    Calibration,
+    fit_calibration,
+    conformal_prediction_set,
+    conformal_interval,
+    conformal_distance,
+    is_ood,
+    familiarity,
+)
+from .adapt import (  # SPEC.md 93.3 (v0.79, A83): the transfer core
+    plan_adapt,
+    adapt_model,
+    render_adapt_text,
+    ADAPT_EPS,
+)
 
 # SPEC.md 33.1 (C1): single version source — must equal pyproject.toml's
 # [project].version (enforced by the A23 test); one step per feature round
-# (v0.78 ⇒ 0.78.0, M81, SPEC.md 92)
-__version__ = "0.78.0"
+# (v0.79 ⇒ 0.79.0, M82, SPEC.md 93)
+__version__ = "0.79.0"
 
 __all__ = [
     "AutoRefineEnv",
@@ -479,5 +494,9 @@ __all__ = [
     "BackendUnavailable", "available_gpus", "detect_backend", "load_backend",
     "backend_info", "resolve_backend", "to_device", "to_host",
     "gpu_matmul", "parallel_map",
+    # SPEC.md 93 (v0.79, A83): extrapolation + intuitive transfer learning
+    "Calibration", "fit_calibration", "conformal_prediction_set",
+    "conformal_interval", "conformal_distance", "is_ood", "familiarity",
+    "plan_adapt", "adapt_model", "render_adapt_text", "ADAPT_EPS",
     "__version__",
 ]

@@ -191,6 +191,21 @@ from autorefine.ondemand import (
     refresh_model,
     score_fresh,
 )
+# SPEC.md 93 (v0.79, A83): the transfer + calibration cores — the app is a
+# thin renderer over these (23.1; the ondemand 90 pattern).
+from autorefine.adapt import adapt_model, plan_adapt  # 93.3 (A83)
+from autorefine.conformal import (  # 93.1/93.2 (A83)
+    conformal_interval,
+    conformal_prediction_set,
+    familiarity,
+    fit_calibration,
+    is_ood,
+)
+from autorefine.predict import (  # 42.1 (v0.28): the scoring leaf
+    csv_rows_to_features,
+    predict_features,
+    standardize,
+)
 
 
 def _render_past_runs(runs_dir: str) -> None:
@@ -2580,6 +2595,223 @@ def _render_adapt(runs_dir: str, session_csv: str | None) -> None:
                     + (f" ({w['lo']} → {w['hi']})" if w.get("lo")
                        else f" — {w.get('note', '')}"))
 
+    # --- Transfer: adapt the champion to similar data (SPEC.md 93.3) ---
+    st.subheader("Transfer: adapt the champion to similar data")
+    st.caption(
+        "Point the champion at a NEW CSV of similar rows — a later export "
+        "of the same table, a refreshed cohort, a neighbouring deployment. "
+        "It is scored on the new data first (**before**), then fine-tuned "
+        "from the champion's own weights when those can transfer (or "
+        "honestly retrained on the champion's recipe), and scored again "
+        "(**after**). The adapted model is saved as a new run you can "
+        "keep, compare, and predict with.")
+    from autorefine.registry import load_registry  # 88.3: the finished runs
+    _entries = load_registry(runs)
+    run_ids = [
+        str(e["run_id"])
+        for e in sorted(_entries,
+                        key=lambda x: (str(x.get("timestamp") or ""),
+                                       str(x.get("run_id") or "")),
+                        reverse=True)
+        if e.get("run_id")
+        and (Path(runs) / str(e["run_id"]) / "summary.json").is_file()
+    ]
+    if not run_ids:
+        st.caption("No finished runs yet — there is no champion to adapt.")
+        return
+    tchamp = st.selectbox(
+        "Champion run", run_ids, key="adapt_champ",
+        help="The run whose best model is adapted (default: the most recent).")
+    tdata = st.file_uploader(
+        "New similar data (a CSV with the same shape)",
+        type=["csv"], key="adapt_transfer_csv",
+        help="A fresh CSV the champion should be adapted to. If you "
+             "uploaded a file above, it is used automatically.")
+    tpath: str | None = None
+    if tdata is not None:
+        _td = Path(tempfile.gettempdir()) / "autorefine_dashboard"
+        _td.mkdir(parents=True, exist_ok=True)
+        tpath = str(_td / ("transfer_" +
+                           (Path(tdata.name).name or "new_data.csv")))
+        Path(tpath).write_bytes(tdata.getvalue())
+    elif fresh_path:
+        tpath = fresh_path
+    if tpath is None:
+        st.caption("Upload the new data (or use the file above) to plan or "
+                   "run the transfer.")
+        return
+    _k1, _k2 = st.columns(2)
+    with _k1:
+        tsteps = st.number_input(
+            "Training steps (0 = the champion's)", min_value=0, value=0,
+            step=500, key="adapt_steps",
+            help="0 keeps the champion spec's training steps.")
+    with _k2:
+        tmaxs = st.number_input("Max training seconds", min_value=1.0,
+                                max_value=3600.0, value=30.0, step=5.0,
+                                key="adapt_maxsec")
+    _g1, _g2 = st.columns([1, 1])
+    with _g1:
+        tplan = st.button("Show plan", key="adapt_show_plan")
+    with _g2:
+        tgo = st.button("Fine-tune on the new data", key="adapt_transfer_go",
+                        type="primary")
+    steps_arg = int(tsteps) if int(tsteps) > 0 else None
+    if tplan:
+        try:
+            plan = plan_adapt(tchamp, tpath)
+        except (ValueError, FileNotFoundError, OSError) as exc:
+            st.warning(f"the plan could not be built: {exc}")
+        else:
+            if not plan["compatible"]:
+                st.error(f"not compatible: {plan['compatibility_reason']}")
+            else:
+                (st.success if plan["warm_start"] else st.info)(
+                    f"mode: **{plan['mode']}** — "
+                    + ("the champion's weights seed the training "
+                       "(warm start)."
+                       if plan["warm_start"]
+                       else "the champion's recipe is retrained fresh "
+                            "(its weights cannot transfer)."))
+                pf = plan["preflight"]
+                bal = ", ".join(f"{k}: {v}" for k, v in
+                                pf["class_balance"].items()) or "-"
+                st.caption(
+                    f"new data: **{pf['n_rows']} rows** × "
+                    f"{pf['n_cols']} cols · label **{pf['label_name']}** · "
+                    f"balance {bal} · new state_dim "
+                    f"**{plan['new_task']['state_dim']}** (head "
+                    f"{plan['new_task']['head']})")
+    if tgo:
+        st.spinner("Fine-tuning the champion on the new data …")
+        try:
+            rep = adapt_model(
+                tchamp, tpath, runs_dir=runs, steps=steps_arg,
+                max_seconds=float(tmaxs))
+        except (ValueError, FileNotFoundError, OSError) as exc:
+            st.error(f"the transfer could not run: {exc}")
+        else:
+            _v = rep["verdict"]
+            (st.success if _v == "IMPROVED"
+             else st.warning if _v == "NEUTRAL" else st.error)(
+                f"**{_v}** — **{rep['after']:.1f}** after vs "
+                f"**{rep['before']:.1f}** before "
+                f"({rep['delta']:+.1f} on {rep['n_holdout']} holdout rows).")
+            st.caption(
+                f"mode: **{rep['mode']}**"
+                + (" (warm start)" if rep["warm_start"]
+                   else " (fresh init, the champion's recipe)")
+                + f" · adapted run: `{rep['run_dir']}` · "
+                  f"{rep['wall_seconds']:.1f}s")
+            _adapt_before_after_table(rep)
+            if rep.get("per_class_after"):
+                st.markdown("**Per-class accuracy on the new data:**")
+                _adapt_per_class_table(rep)
+            if rep.get("weight_deltas"):
+                st.caption("weight movement per layer (L2): "
+                           + " · ".join(
+                               f"w {d['w_l2']:.3f} / b {d['b_l2']:.3f}"
+                               for d in rep["weight_deltas"]))
+            _adapt_old_vs_new(tpath, tchamp, rep)
+
+
+def _adapt_before_after_table(rep: dict) -> None:
+    """SPEC.md 93.3 (v0.79, A83): the before/after scores on the new
+    data's holdout — the apples-to-apples bar (the 89.3.1 rule)."""
+    st.markdown("**Score on the new data's holdout (apples to apples):**")
+    st.dataframe([
+        {"model": "champion (before)", "score": round(rep["before"], 2)},
+        {"model": "adapted (after)", "score": round(rep["after"], 2)},
+    ])
+
+
+def _adapt_per_class_table(rep: dict) -> None:
+    """SPEC.md 93.3 (v0.79, A83): per-class accuracy before/after on the
+    new data — where the adaptation moved, class by class."""
+    rows = []
+    for pb, pa in zip(rep["per_class_before"], rep["per_class_after"]):
+        rows.append({
+            "class": pa["class"],
+            "n": pa["n"],
+            "before": (None if pb.get("acc") is None else round(pb["acc"], 1)),
+            "after": (None if pa.get("acc") is None else round(pa["acc"], 1)),
+            "delta": (None if (pb.get("acc") is None
+                               or pa.get("acc") is None)
+                      else round(pa["acc"] - pb["acc"], 1)),
+        })
+    st.dataframe(rows)
+
+
+def _adapt_old_vs_new(csv_path: str, champ_run: str, rep: dict,
+                      n_rows: int = 12) -> None:
+    """SPEC.md 93.3 (v0.79, A83): the new rows through BOTH models, with
+    the adapted model's calibrated confidence (SPEC.md 93.1/93.2) — the
+    concrete "what changed" view. Every cell is plain (the Arrow rule,
+    the 72.2.4 pattern)."""
+    from autorefine.cli import _run_task_and_model  # the 42 one home
+    try:
+        _, old_task, old_model = _run_task_and_model(Path(champ_run))
+        new_task = CsvTask(seed=int(rep["seed"]), path=csv_path)
+        new_model = load_checkpoint(
+            Path(rep["run_path"]) / "best_model.npz").model
+        raws = csv_rows_to_features(csv_path, new_task)[:n_rows]
+        if not raws:
+            return
+        cal = fit_calibration(new_task, new_model, alpha=0.1, beta=0.95)
+        rows = []
+        old_ok = 0
+        for i, raw in enumerate(raws):
+            feat = standardize(new_task, raw)
+            new_res = predict_features(new_task, new_model, feat)
+            old_res = None
+            if (old_task.state_dim == new_task.state_dim
+                    and old_task.head == new_task.head):
+                try:
+                    old_res = predict_features(old_task, old_model, feat)
+                    old_ok += 1
+                except Exception:  # noqa: BLE001 — shape mismatch → n/a
+                    old_res = None
+            probs = new_res.get("probabilities")
+            conf = None
+            if probs:
+                try:
+                    idx = list(new_task.class_values).index(
+                        new_res["prediction"])
+                    conf = round(float(probs[idx]), 3)
+                except (ValueError, AttributeError):
+                    conf = None
+            row = {
+                "row": i + 1,
+                "champion": (str(old_res["prediction"])
+                             if old_res is not None else "n/a"),
+                "adapted": str(new_res["prediction"]),
+                "confidence": conf,
+                "familiarity": round(familiarity(feat, cal), 3),
+                "in-range": (not bool(is_ood(feat, cal))),
+            }
+            if new_task.head == "softmax":
+                row["prediction set"] = ", ".join(
+                    str(v) for v in
+                    conformal_prediction_set(new_task, new_model, feat, cal))
+            else:
+                lo, hi = conformal_interval(float(new_res["prediction"]),
+                                            cal)
+                row["95% interval"] = f"[{lo:.4g}, {hi:.4g}]"
+            rows.append(row)
+        if old_ok == 0:
+            for r in rows:  # champion column only when it could score
+                r.pop("champion", None)
+        st.markdown("**The new rows through both models:**")
+        st.dataframe(rows)
+        st.caption(
+            "confidence = the adapted model's probability for its own "
+            "prediction · familiarity = how much this row looks like the "
+            "adapted model's data (1 = typical, 0 = far) · prediction set "
+            "/ interval = the calibrated range that should contain the "
+            "truth most of the time.")
+    except (ValueError, FileNotFoundError, OSError) as exc:
+        st.caption(f"the old-vs-new table could not be built: {exc}")
+
 
 def main() -> None:
     st.set_page_config(page_title="AutoRefine dashboard", page_icon=":gear:",
@@ -2810,7 +3042,7 @@ def main() -> None:
                               key="live_mode",
                               help="Tick the page as experiments land instead "
                                    "of one synchronous block (off by default; "
-                                   "the default path stays byte-identical — "
+                                   "the default path stays byte-identical "
                                    ").")
 
     path = _resolve_csv(upload, csv_path)

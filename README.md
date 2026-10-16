@@ -5,7 +5,7 @@ The improver loop proposes model-configuration changes, trains, evaluates on
 splits it never saw, records the outcome, and proposes the next change — all
 within a hard budget, fully reproducible, NumPy-only.
 
-**Current version: 0.51.0.** Input modalities: CSV, plus labelled
+**Current version: 0.79.0.** Input modalities: CSV, plus labelled
 image / audio / text directories via `autorefine fit --data PATH`.
 
 **Spec (source of truth):** [SPEC.md](SPEC.md)
@@ -393,6 +393,8 @@ carries the full detail; this table is the index.
 | Report formats + guides | Markdown / plain-text / PDF; a "what this model does" user guide; the go/no-go decision artifact | `report --format md|txt|pdf`; `report --user`; `report --decision` | 63 |
 | Benchmark report | Cross-run leaderboard, generalization matrix, best-score trend; ± uncertainty on every headline | `report --benchmark` | 64 |
 | Quickstart in the UI | The same four steps in the README, the CLI, and the app's first screen — one source | `quickstart` | 65 |
+| Transfer learning (`adapt`) | Adapt a champion to similar new data — before/after scores, verdict, saved as a new run | `adapt --run DIR --data new.csv` (or the latest champion); `--dry-run` for the plan | 93.3 |
+| Conformal calibration + OOD | "How sure?" per-row prediction sets / intervals; "is this in my world?" OOD flag + familiarity | `predict --run DIR --csv rows.csv --cal --ood` | 93.1–93.2 |
 
 ## Run artifacts
 

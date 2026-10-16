@@ -99,6 +99,7 @@ numbers and carry none.)
 | M79 | v0.76   | 90     | A80 | tests/test_ondemand_ui_v076.py |
 | M80 | v0.77   | 91     | A81 | tests/test_accel_v077.py |
 | M81 | v0.78   | 92     | A82 | tests/test_modalities_v078.py |
+| M82 | v0.79   | 93     | A83 | tests/test_transfer_v079.py |
 
 ---
 
@@ -8532,3 +8533,218 @@ optional extra with a graceful hint), every legacy surface stays green
 (the image+audio `mixed` detection is unchanged, only its consequence
 changed), and the A-index advances to A82/M81 with
 `tests/test_modalities_v078.py` (92.13).
+
+## 93. v0.79 — Extrapolation + intuitive transfer learning (A83)
+
+v0.78 widened the data space; v0.79 closes the **extrapolation** gap
+and makes **transfer learning** a first-class verb. A finished model
+used to answer "what?" — not "how sure?" (a calibrated set/interval),
+not "is this row even in my world?" (an OOD flag), and not "what if
+the data shifted a little?" (an adapted model). Three additive
+additions, all on the flat protocol (22.1), no new hard dependency:
+
+* **Split-conformal calibration (93.1)** — a per-row prediction SET
+  (classification) or INTERVAL (regression) with a
+  finite-sample-corrected nominal coverage, fit on the task's own
+  holdout split (the 28.2 `holdout_rows` protocol).
+* **OOD familiarity (93.2)** — a per-row diagonal-Mahalanobis distance
+  in the model's input space, thresholded on the holdout, and a 0–1
+  "how much like the training data" score.
+* **The transfer surface (93.3)** — `autorefine adapt` takes a champion
+  run and a NEW CSV of similar rows, adapts the champion's model
+  (fine-tuned from its own weights when they can transfer, honestly
+  retrained on the champion's recipe when they can't), scores
+  before/after on the new data's own holdout, and saves the result as
+  a new, reconstructible, lineage-linked run; `predict --cal --ood`
+  exposes the first two per row (opt-in); the app's Adapt tab gains
+  the Transfer section.
+
+Two invariants govern the design:
+
+* **Additive; pinned surfaces byte-identical.** `predict`'s default
+  output (no new flag), the exporter's standalone `predict.py`
+  template, the RL action catalog (106 actions this round), and the
+  A1–A19 legacy sequence are all untouched — the new output is an
+  *extra* JSON field behind opt-in flags, and the adapt artifacts are
+  new files in a new directory.
+* **Honesty over convenience (93.3.7).** Incompatible data fails loud
+  with the reason; weights that cannot transfer are labeled `retrain`,
+  never silently fresh-initialized; G2 determinism holds given
+  (champion, data, seed).
+
+### 93.1 A83.A1 — Split-conformal calibration (conformal.py)
+
+`fit_calibration(task, model, alpha=0.1, beta=0.95, n=None,
+with_ood=True)` fits **split conformal prediction** (Vovk et al.) on
+the task's holdout split in one forward pass: the nonconformity scores
+(softmax: `1 − p(y_true)`; mse: `|y − ŷ|`) fix the threshold
+`tau = (1 + 1/m) · nearest-rank(1 − alpha)` — the finite-sample
+correction that makes the nominal coverage real for small holdouts.
+Deterministic (nearest-rank quantile, no RNG — G2), pure stdlib +
+numpy, import-cycle-free (the task/model protocol is duck-typed,
+exactly like the 42.1 `predict` leaf). 93.1.1: the row's output —
+`conformal_prediction_set(task, model, x, cal)` is the prediction SET,
+the classes with `p ≥ 1 − tau` mapped through the task's
+`class_values`, never empty (the argmax joins when the threshold
+excludes every class); `conformal_interval(ŷ, cal)` is the regression
+interval `[ŷ − tau, ŷ + tau]`. 93.1.2: the supported heads are
+`softmax` and `mse`; anything else is a `ValueError`. 93.1.3: a
+softmax holdout target outside `0..k−1` is a `ValueError`. 93.1.4:
+a task without a usable `holdout_rows` protocol (or with an empty
+split), or non-finite scores, is a `ValueError` — a task that cannot
+be calibrated is an error, never a silent skip.
+
+### 93.2 A83.A2 — OOD familiarity (conformal.py)
+
+93.2.1: `conformal_distance(x)` is the per-row OOD distance — the
+diagonal-Mahalanobis `sqrt(mean(z²))` of the model-space row (the
+42.1.3 rule: the row is the task's standardized feature). 93.2.2:
+`is_ood(x, cal)` flags the row past the `(1 − beta)` nearest-rank
+quantile of the holdout distances (default `beta = 0.95` — ~5% of
+holdout rows sit above), and `familiarity(x, cal) = 1 − min(d/θ, 1)`
+turns the distance into a 0–1 "how much like the training data" score
+(1 at the holdout center, 0 beyond twice the threshold). 93.2.3: a
+`Calibration` fit with `with_ood=False` carries `ood_threshold =
+None`, and both `is_ood` and `familiarity` fail loud on it.
+
+### 93.3 A83.A3–A6 — The transfer surface (cli.py, adapt.py, dashboard_app.py)
+
+`adapt` is the user-facing "fine-tune" verb: a finished run's champion
+is adapted to a NEW CSV of similar rows (a later export of the same
+table, a refreshed cohort), and the before/after are scored on the NEW
+data's own holdout — apples to apples (the 89.3.1 rule).
+
+93.3.1 (A83.A4): `plan_adapt(run_dir, data_path, seed=7)` is the
+DRY-RUN plan — the champion's identity (family/head/outputs, the 42
+reconstruction), the new data's preflight (the 90.4 stats), the
+compatibility verdict (the 80.2.3 `validate_for_task` check), and the
+mode: `finetune` when the 80.3 warm-start check passes (the `mlp`
+family, matching head/outputs/architecture, and input width
+`state_dim · (2K+1)` with the champion's spectral order K — the only
+parametric family whose input is flat CSV features), `retrain`
+otherwise. Pure read + one `CsvTask` construction; no training, no
+writes.
+
+93.3.2 (A83.A5): `adapt_model(run_dir, data_path, runs_dir="runs",
+seed=7, steps=None, max_seconds=30.0, target=95.0)` runs the transfer:
+reconstruct the champion (42) → build the new `CsvTask` (22.1) → the
+93.3.3 compatibility check → **before** = the champion's official
+`task.score(model, "holdout", n)` (the 22.1 contract) on the new
+holdout → train the champion's spec on the new train split
+(`warm_start` = the champion's weights when 93.3.1 says they transfer,
+else a fresh init — the mode is labeled honestly) → **after** = the
+same official score on the same new holdout → the verdict (`IMPROVED`
+/ `NEUTRAL` / `DEGRADED` around the 93.3.4 margin) → the per-class
+before/after (softmax tasks) and the per-layer L2 weight deltas (warm
+starts only) → the 93.3.6 artifacts. Returns the JSON-safe report dict.
+
+93.3.3: an incompatible champion (head / output count / input contract)
+is a `ValueError` naming the reason — never a silent fallback; a
+champion whose task is an episode task (`max_steps > 1`) is a
+`ValueError` (adapt supports fitting tasks only).
+
+93.3.4: the CLI (`_cmd_adapt`) resolves the champion from `--run`,
+else the registry's latest finished run (the 88.3 pattern; neither
+usable is rc 1 with the message); `--dry-run` prints the 93.3.1 plan
+(or pure JSON with `--json`) and trains nothing. The verdict margin
+`ADAPT_EPS = 0.5` percentage points: a delta inside ±0.5 of the
+champion's own score is `NEUTRAL` (noise, not signal).
+
+93.3.5: `render_adapt_text(report)` is the deterministic ASCII
+narrative (the house console rule): champion, data, mode (with the
+warm-start note), before/after, verdict, target line, run dir.
+
+93.3.6: the artifacts — a new run dir `adapt-csv-seed{seed}-{stamp}`
+(collision-suffixed, never overwriting) with `summary.json`
+(reconstructible: `task="csv"`, `task_config.path`, `best_spec`,
+`final_best_score` = after, `baseline_score` = before,
+`finished_reason="adapted"`, `policy` = the mode), `best_spec.json`,
+`best_model.npz`, `adapt_report.json`, plus a 13-key registry entry
+(38.1.2) with `parent_run` = the champion's run id — transfer
+**chaining**: an adapted model can itself become a future champion.
+
+93.3.7: the honesty rules — 93.3.3's fail-loud mismatch; `retrain`
+labeling for non-transferable weights (knn/tree/boost/gp/gam memorize
+rows: nothing to copy); G2 determinism given (champion, data, seed) —
+the only clock is the wall-time the training actually took; and the
+pinned surfaces (the `predict` default output, the exporter template,
+the RL action catalog — 106 actions this round — and the A1–A19
+sequence) stay byte-identical.
+
+93.3.8: `predict --cal --ood` — the 93.1/93.2 surface per row. `--cal`
+(with `--alpha`, default 0.1) adds `prediction_set` (softmax) or
+`interval` (mse) to each row's JSON entry; `--ood` (with `--beta`,
+default 0.95) adds `familiarity` + `ood`. Either flag fits one
+calibration for the whole run's task (one forward pass over the
+holdout); a calibration failure is rc 1 with the message. **With
+neither flag, the output is byte-identical to the pre-v0.79 surface**
+(the A32/A82 predict pins hold).
+
+93.3.9: the app's Adapt tab gains the **Transfer** section
+(dashboard_app): the champion picker, the new-CSV upload (or the file
+already uploaded for the refresh), the 93.3.1 plan on demand ("Show
+plan"), and the 93.3.2 adapt ("Fine-tune on the new data") with the
+verdict, the before/after table, the per-class table, the weight
+deltas, and the old-vs-new rows table — the new rows through BOTH
+models with the adapted model's calibrated confidence (a
+`fit_calibration` per row, 93.1/93.2). All user-facing strings
+app-language (23.1).
+
+### 93.4 Acceptance (A83)
+
+1. **Conformal core (93.1, A83.A1)**: on a tiny softmax task, `tau`
+   is finite and the fit is deterministic (two fits agree); the
+   prediction set is never empty and contains the argmax; on a tiny
+   mse task, the interval is `[ŷ − tau, ŷ + tau]`; an unsupported
+   head, a bad holdout target, a task without `holdout_rows`, and an
+   empty holdout all fail loud.
+2. **OOD (93.2, A83.A2)**: in-distribution holdout rows sit at/below
+   the threshold while a 1000×-scaled row is flagged `ood`;
+   `familiarity` is in [0, 1] (higher for in-distribution rows);
+   `with_ood=False` makes `is_ood`/`familiarity` fail loud.
+3. **`predict` (93.3.8, A83.A3)**: `--cal`/`--ood` add the documented
+   JSON fields; with neither flag the output is byte-identical to the
+   pre-v0.79 surface (the A32/A82 pins).
+4. **The plan (93.3.1, A83.A4)**: `adapt --dry-run` on a compatible
+   pair is rc 0 with the plan (preflight + compatibility + mode);
+   an incompatible pair is rc 1 with the reason; an episode-task
+   champion fails loud.
+5. **The adapt (93.3.2–93.3.6, A83.A5)**: a full `adapt` on a tiny
+   mlp champion + a similar CSV is rc 0 — before/after present, the
+   artifacts exist, the adapted run reconstructs through
+   `_run_task_and_model` and `predict`, and the registry entry carries
+   `parent_run`; a non-parametric champion takes mode `retrain` (not
+   an error); `render_adapt_text` is ASCII and mentions the verdict.
+6. **The app (93.3.9, A83.A6)**: the Transfer section's source tokens
+   are present (champion picker, upload, Show plan, Fine-tune, the
+   three tables) and a minimal AppTest of the Adapt tab stays green;
+   the app-language scan stays clean.
+7. **Honesty + pinned surfaces (93.3.7, A83.A7)**: the exporter's
+   standalone `predict.py` template is untouched; the RL action
+   catalog keeps exactly 106 actions this round; the A1–A19 legacy
+   sequence stays green under the full suite.
+8. **Ceremony**: the version steps to `0.79.0` in both sources (33.1);
+   the A-index advances (`defined == set(range(1, 84))`, 79
+   acceptance rows, M82 resolving to this file); the conformal +
+   adapt names land in `autorefine.__all__`.
+
+All in `tests/test_transfer_v079.py`.
+
+### 93.5 Milestone (M82)
+
+**M82** — v0.79 "Extrapolation + intuitive transfer learning": the
+finished model gains a "how sure?" (split-conformal prediction
+sets/intervals on the task's own holdout, 93.1) and an "is this in my
+world?" (the diagonal-Mahalanobis OOD flag + 0–1 familiarity, 93.2),
+and the tool gains a transfer verb — `autorefine adapt` fine-tunes a
+champion's model onto similar data when the weights can transfer, or
+honestly retrains on its recipe when they can't, scores before/after
+on the new data's own holdout, and saves the result as a new
+lineage-linked run (`parent_run` — transfer chaining, 93.3.6);
+`predict --cal --ood` exposes both surfaces per row behind opt-in
+flags (the default output stays byte-identical, 93.3.8), and the app's
+Adapt tab renders the whole flow with the old-vs-new calibrated table
+(93.3.9). No new hard dependency (pure stdlib + numpy, the 42.1
+leaf pattern), every pinned surface stays green (the RL action catalog
+keeps its 106 actions), and the A-index advances to A83/M82 with
+`tests/test_transfer_v079.py` (93.4).
