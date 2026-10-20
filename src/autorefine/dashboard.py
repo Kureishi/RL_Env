@@ -133,6 +133,16 @@ class DashboardRunner:
         # SPEC.md 51.2.2 (v0.37): the app's stop request (request_stop)
         # — the flag the env's stop_check reads between experiments
         self._stop_requested = False
+        # SPEC.md 96.2.1 (v0.82): the pause hold — the stop flag's sibling
+        # (51.2.2). Unlike stop, the run is NOT finished: resume() continues
+        # it exactly where it held (96.2.2 trajectory-neutrality)
+        self._paused = False
+
+    @property
+    def paused(self) -> bool:
+        """SPEC.md 96.2.1 (v0.82): True while the run holds between
+        experiments — no experiment is consumed, nothing trains."""
+        return self._paused
 
     # v0.78 (SPEC.md 92.1-92.7): every directory-based data task the
     # runner accepts (the cli `_DIR_TASKS` set, kept local — this module
@@ -158,6 +168,38 @@ class DashboardRunner:
     def _stop_check(self) -> bool:
         """The zero-arg callable handed to `AutoRefineEnv` (SPEC.md 51.2.2)."""
         return self._stop_requested
+
+    def pause(self) -> None:
+        """SPEC.md 96.2.1 (v0.82): hold the live loop between experiments.
+
+        The run is NOT finished: `resume()` continues it exactly where it
+        held (96.2.2), and the wall-clock budget is suspended while paused
+        (96.2.4). A call before `start()` is a `RuntimeError` (fail loud —
+        the `steer()` guard style, 94.1.4); a call after `done` is a no-op
+        (the env already finished, like `request_stop`); idempotent (a
+        second pause is a no-op).
+        """
+        if self._phase == "idle":
+            raise RuntimeError("pause() before start() — start the run first")
+        if self._phase == "done":
+            return
+        if not self._paused:
+            self._paused = True
+            self.env.bm.pause()  # 96.2.4: suspend the wall clock
+
+    def resume(self) -> None:
+        """SPEC.md 96.2.1 (v0.82): release a `pause()` hold — the loop
+        continues where it held (96.2.2). The same guards as `pause()`;
+        idempotent (a resume with no hold is a no-op).
+        """
+        if self._phase == "idle":
+            raise RuntimeError(
+                "resume() before start() — start the run first")
+        if self._phase == "done":
+            return
+        if self._paused:
+            self._paused = False
+            self.env.bm.resume()  # 96.2.4: the hold is not charged
 
     def steer(self, pin=None, bias=None, constrain=None,
               clear: bool = False) -> list[dict]:
@@ -301,6 +343,10 @@ class DashboardRunner:
             raise RuntimeError("call start() before next()")
         if self._phase == "done":
             raise RuntimeError("the run is done; call finish()")
+        if self._paused:  # SPEC.md 96.2.1 (v0.82): the hold is explicit
+            raise RuntimeError(
+                "the run is paused — call resume() to continue (or "
+                "request_stop() to end it)")
         action = self.policy.propose(self._state)
         # D2 (SPEC.md 26.2): the best spec *before* this step, and the
         # proposed spec, for the old → new chips

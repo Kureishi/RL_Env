@@ -39,7 +39,7 @@ Covers the nine A items as implemented — all additive / opt-in (the
   stderr hint on an un-steered run, and the mutual exclusions;
 - A84.8 the **app** — the "Steer now" panel + the "Steering effects"
   result view tokens in the source, and a clean ``AppTest`` run;
-- A84.9 the **ceremony** — 0.81.0 in both version sources, the SPEC
+- A84.9 the **ceremony** — 0.82.0 in both version sources, the SPEC
   94.3 heading + the M83 index row, the two new exports in
   ``autorefine.__all__``.
 
@@ -598,13 +598,13 @@ def test_app_renders_with_steering():
 # --- A84.9 the ceremony -------------------------------------------------------
 
 def test_version_ceremony():
-    """A84.9 (SPEC.md 94.3): 0.81.0 in both version sources, the
+    """A84.9 (SPEC.md 94.3): 0.82.0 in both version sources, the
     SPEC 94.3 heading + the M83 index row, and the two new exports in
     ``autorefine.__all__``."""
-    assert autorefine.__version__ == "0.81.0"
+    assert autorefine.__version__ == "0.82.0"
     with open(ROOT / "pyproject.toml", "rb") as fh:
         data = tomllib.load(fh)
-    assert data["project"]["version"] == "0.81.0"
+    assert data["project"]["version"] == "0.82.0"
     spec = SPEC.read_text(encoding="utf-8")
     assert "### 94.3 Acceptance (A84)" in spec
     assert re.search(r"^\s*\|\s*M83\s*\|\s*v0\.80\s*\|\s*94\s*\|\s*A84\s*\|",

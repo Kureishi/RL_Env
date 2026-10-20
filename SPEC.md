@@ -102,6 +102,7 @@ numbers and carry none.)
 | M82 | v0.79   | 93     | A83 | tests/test_transfer_v079.py |
 | M83 | v0.80   | 94     | A84 | tests/test_livesteer_v080.py |
 | M84 | v0.81   | 95     | A85 | tests/test_narrative_v081.py |
+| M85 | v0.82   | 96     | A86 | tests/test_pauseresume_v082.py |
 
 ---
 
@@ -9129,3 +9130,114 @@ temp-dir hygiene (`--keep` opt-out), a cp1252-safe output path, and
 an exit code (0 iff verify PASS) that makes the story CI-runnable.
 The A-index advances to A85/M84 with `tests/test_narrative_v081.py`
 (95.3).
+
+## 96. v0.82 — Pause & resume (A86)
+
+### 96.1 Why
+
+The Stop button (51.2) ends a run. A long run that needs to *hold* —
+to inspect a live view, to yield the session, to wait on a decision —
+should be able to hold without losing anything. The loop is already
+cooperative between experiments (51.2.1: the stop hook is honored
+between experiments, never inside one), so pause and resume are the
+driver's business, not a new state machine: **pause = the driver stops
+consuming experiments; resume = it continues** (96.2.1). No new
+threading, no new dependency: the same flag protocol that carries Stop
+(51.2.3) carries Pause/Resume (96.2.3).
+
+### 96.2 Design
+
+- **96.2.1 Core.** `DashboardRunner.pause()` / `resume()` / `paused` —
+  the stop flag's (51.2.2) sibling. While paused, `next()` fails loud
+  (the hold is explicit, never a silent no-op); `pause()` / `resume()`
+  before `start()` fail loud (the `steer()` guard style, 94.1.4); after
+  `done` they are no-ops (the env already finished, like
+  `request_stop`); both are idempotent. Any driver can use them (the
+  app worker, a custom harness, tests). The RL loop (`RLRunner`) takes
+  no part — its episodes own no between-experiment pull in the same
+  shape (96.2.6).
+- **96.2.2 Trajectory neutrality (G2).** A pause holds *between*
+  experiments and touches no per-experiment compute: a same-seed run
+  paused and resumed logs the identical decision trajectory (order,
+  specs, holdout scores, verdicts) as the uninterrupted run. The
+  wall-clock-derived floats — `train_seconds`, `ts`, and the v0.4
+  efficiency term's `effective_score` — differ between *any* two runs
+  (the A2 wall-clock exclusion, 18.4); the only run-level difference a
+  pause adds is total wall time (the hold duration), which is honest
+  accounting, not a knob.
+- **96.2.3 App.** The worker honors `record["pause"]["flag"]` /
+  `record["resume"]["flag"]` between experiments (the 51.2.3
+  protocol): pause → the run holds (no experiment is consumed), a
+  `PAUSED` notice posts; resume → the hold releases, a `RESUMED`
+  notice posts; Stop while paused releases the hold first and ends the
+  run `stopped` (51.2.1 semantics — the run did stop, at the user's
+  request). The buttons live on the live loop where Stop lives,
+  bandit/search only (96.2.6). A run that never pauses is the
+  pre-v0.82 path exactly: both flags start `False`, and the worker's
+  new lines are no-ops for it.
+- **96.2.4 Budget.** `BudgetManager.pause()` / `resume()` suspend the
+  wall clock — a paused run does not burn its wall budget while it
+  holds (on resume, `_t0` shifts by the hold duration, so the clock
+  reads as if the pause never happened). The experiment budget is
+  untouched by a hold. Both are idempotent; a fresh `start()` clears
+  the hold (an episode starts unpaused).
+- **96.2.5 CLI.** No new flag: `run` / `fit` are fire-and-forget loops,
+  and a CLI "pause" with nothing to resume into would just be a
+  budget split. Pause is a live-driver capability — the app, or any
+  custom driver over the core API (96.2.1).
+- **96.2.6 Non-goals (v0.82).** Cross-process checkpoint/resume
+  (serialize the env, bandit, and budget to the run dir and continue
+  in a later process) is the natural follow-up round, not this one —
+  it is a serialization contract with its own pin surface. Mid-
+  experiment pause is out: the trainer's wall-clock cap (18.4) makes
+  an interrupted-then-restarted train non-deterministic, and the
+  between-experiments hold is the G2-safe seam (51.2.1). The RL loop
+  (96.2.1) and the CLI (96.2.5) are deliberately untouched.
+
+### 96.3 Acceptance (A86)
+
+1. **A86.1 — core contract.** `pause()` / `resume()` / `paused` on
+   `DashboardRunner`: before `start()` both fail loud; `next()` while
+   paused fails loud; after `done` both are no-ops; pause is
+   idempotent; a resume with no hold is a no-op (96.2.1).
+2. **A86.2 — hold & continue.** A paused run consumes no experiments
+   while it holds (the experiment budget is frozen across a sleep),
+   and a resumed run runs to completion. Same seed, tiny budget: the
+   paused-and-resumed decision trajectory (experiments.jsonl minus the
+   wall-clock floats, 96.2.2) is identical to the uninterrupted run's,
+   with the same final best score.
+3. **A86.3 — worker protocol.** Headless (no page render): the worker
+   honors the pause flag between experiments (the `paused` notice
+   posts and the loop holds with no further updates), the resume flag
+   releases it (the `resumed` notice posts), and the run completes
+   with the full result + artifact set; Stop while paused ends the run
+   `stopped` (96.2.3).
+4. **A86.4 — budget hold.** `BudgetManager.pause()` freezes
+   `wall_seconds_left` across a sleep; `resume()` does not charge the
+   hold; both are idempotent; a fresh `start()` clears the hold
+   (96.2.4).
+5. **A86.5 — app wiring.** The live loop renders the Pause/Resume
+   buttons (bandit/search only), the drain renders the `paused` /
+   `resumed` notices, and the record carries the flag pair; a no-pause
+   run takes the pre-v0.82 path byte-identically (96.2.3).
+6. **A86.6 — ceremony.** The version steps to `0.82.0` in both
+   sources (33.1); SPEC.md §96.3 + the M85 index row resolve to
+   `tests/test_pauseresume_v082.py`; the A-index advances to A86/M85;
+   the README points at the capability.
+
+All in `tests/test_pauseresume_v082.py`.
+
+### 96.4 Milestone (M85)
+
+**M85** — v0.82 "Pause & resume": the live improvement loop can now
+hold. `pause()` / `resume()` on the runner (96.2.1) carry the same
+between-experiments, fail-loud, idempotent discipline as the stop flag
+(51.2.2); the wall-clock budget suspends while the run holds (96.2.4);
+the app's worker honors the pause/resume flag pair with the 51.2.3
+protocol and renders the hold notices (96.2.3); and a same-seed run
+paused and resumed is decision-trajectory-identical to the
+uninterrupted run (96.2.2) — so a held run loses nothing: state,
+budget, and trajectory all continue where the hold began. No new
+dependency, no new knob, no pinned surface touched; cross-process
+resume, mid-experiment pause, the RL loop, and the CLI are the
+explicit non-goals (96.2.6, 96.2.5).

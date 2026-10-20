@@ -112,12 +112,12 @@ def test_hygiene_leaves_no_artifacts():
 
 
 def test_version_ceremony():
-    """A85.4 (SPEC.md 95.3.4): 0.81.0 in both version sources, the
+    """A85.4 (SPEC.md 95.3.4): 0.82.0 in both version sources, the
     SPEC 95.3 heading + the M84 index row, and the README pointer."""
-    assert autorefine.__version__ == "0.81.0"
+    assert autorefine.__version__ == "0.82.0"
     with open(ROOT / "pyproject.toml", "rb") as fh:
         data = tomllib.load(fh)
-    assert data["project"]["version"] == "0.81.0"
+    assert data["project"]["version"] == "0.82.0"
     spec = SPEC.read_text(encoding="utf-8")
     assert "### 95.3 Acceptance (A85)" in spec
     assert re.search(r"^\s*\|\s*M84\s*\|\s*v0\.81\s*\|\s*95\s*\|\s*A85\s*\|",

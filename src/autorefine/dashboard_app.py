@@ -808,8 +808,38 @@ def _worker_loop(runner: DashboardRunner, record: dict) -> None:
         info = runner.start()
         post("info", info)
         while not runner.done:
-            if record["stop"]["flag"]:  # 51.2.3: honor Stop between experiments
+            # 51.2.3: honor Stop between experiments; a paused run releases
+            # the hold first (96.2.3) and then takes the normal `stopped`
+            # path — the run did stop, at the user's request
+            if record["stop"]["flag"]:
+                if getattr(runner, "paused", False):
+                    runner.resume()
                 runner.request_stop()
+            # SPEC.md 96.2.3 (v0.82): honor Pause between experiments — the
+            # same flag protocol as Stop (51.2.3). The run holds (no
+            # experiment is consumed) until Resume or Stop; a runner that
+            # owns no pause (the RL loop, 96.5) ignores the flags.
+            if (record["pause"]["flag"] and hasattr(runner, "pause")
+                    and not runner.paused):
+                record["pause"]["flag"] = False
+                runner.pause()
+                post("paused", None)
+            if getattr(runner, "paused", False):
+                while getattr(runner, "paused", False) \
+                        and not record["stop"]["flag"]:
+                    if record["resume"]["flag"]:
+                        record["resume"]["flag"] = False
+                        runner.resume()
+                        post("resumed", None)
+                        break
+                    time.sleep(0.05)  # the hold: a bounded, daemon-safe poll
+                if record["stop"]["flag"] \
+                        and getattr(runner, "paused", False):
+                    # Stop while paused (96.2.3): release the hold first —
+                    # next() would fail loud while paused (96.2.1) — then
+                    # take the normal `stopped` path (51.2.1)
+                    runner.resume()
+                    runner.request_stop()
             u = runner.next()
             post("update", u)
             if u.get("done"):
@@ -1164,6 +1194,16 @@ def _drain_live(record: dict, narrate: bool = False,
             best_before = u["best_score"]  # the running best for the next row
             continue
 
+        if kind == "paused":  # SPEC.md 96.2.3 (v0.82): the hold notice
+            st.warning("PAUSED — the loop is holding between experiments; "
+                       "nothing is training. Press **Resume** to continue, "
+                       "or **Stop** to end the run here.")
+            continue
+
+        if kind == "resumed":
+            st.success("Resumed — the loop continues where it held.")
+            continue
+
         if kind == "result":
             res = payload
             # Persistence (SPEC.md 23.2): store the finished result so the
@@ -1249,6 +1289,11 @@ def _run(csv_path: str, label: str, target: float, policy: str, seed: int,
     record = {
         "thread": None,
         "stop": {"flag": bool(initial_stop)},
+        # SPEC.md 96.2.3 (v0.82): the pause/resume flag pair (the 51.2.3
+        # protocol; both start False — a run that never pauses is the
+        # pre-v0.82 path exactly)
+        "pause": {"flag": False},
+        "resume": {"flag": False},
         "queue": _queue.Queue(),
         "messages": [],
         "drained": False,
@@ -3288,6 +3333,22 @@ def main() -> None:
                     ".")
             if stop_pressed:
                 rec["stop"]["flag"] = True
+            # SPEC.md 96.2.3 (v0.82): Pause/Resume — the live-loop hold.
+            # Bandit/search only (the RL runner owns no pause, 96.5); the
+            # same flag protocol as Stop, honored between experiments
+            if hasattr(rec["runner"], "pause"):
+                if rec["runner"].paused:
+                    if st.button("Resume the run (continue where it "
+                                 "paused)", key="resume_button",
+                                 help="The loop continues exactly where it "
+                                      "held; nothing is retrained."):
+                        rec["resume"]["flag"] = True
+                elif st.button("Pause the run (hold between experiments)",
+                              key="pause_button",
+                              help="Nothing trains while paused, and the "
+                                   "wall-clock budget holds too. Resume to "
+                                   "continue, or Stop to end the run."):
+                    rec["pause"]["flag"] = True
             # SPEC.md 94.2.1 (v0.80): the live "Steer now" panel
             _steer_live(rec)
             _drain_live(rec, narrate, stream_mode=live_mode)

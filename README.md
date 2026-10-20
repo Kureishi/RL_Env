@@ -109,10 +109,13 @@ five-tab layout driven from the **sidebar**:
    experiments, max train seconds, search quality, runs dir); toggle
    **Narrate the loop** for a plain-English line per experiment.
 2. **Run** — every experiment appears as it happens (live table +
-   best-score curve); **Stop** any time (keyboard `S`; `R` = Run) for an
-   honest partial run with full artifacts; **Copy status** gives a
-   self-contained "how's it going?" card; the *reference run* picker draws
-   a past run's curve beneath the current one.
+   best-score curve); **Pause the run** holds the loop between
+   experiments (nothing trains, and the wall-clock budget holds too) and
+   **Resume the run** continues exactly where it held; **Stop** any time
+   (keyboard `S`; `R` = Run) for an honest partial run with full
+   artifacts; **Copy status** gives a self-contained "how's it going?"
+   card; the *reference run* picker draws a past run's curve beneath the
+   current one.
 3. **Results** — the PASS/MISS verdict, the plots, and the downloads:
    `report.html`, `best_model.npz`, `best_spec.json`,
    `experiments.jsonl`, `run_config.json`, and a self-contained
@@ -399,6 +402,7 @@ carries the full detail; this table is the index.
 | Transfer learning (`adapt`) | Adapt a champion to similar new data — before/after scores, verdict, saved as a new run | `adapt --run DIR --data new.csv` (or the latest champion); `--dry-run` for the plan | 93.3 |
 | Conformal calibration + OOD | "How sure?" per-row prediction sets / intervals; "is this in my world?" OOD flag + familiarity | `predict --run DIR --csv rows.csv --cal --ood` | 93.1–93.2 |
 | Live steering (v0.80) | Pin / bias / constrain the search *while it runs* — the changed field is re-explored first, and each change's measured effect (pre/post/delta) is logged and reported | dashboard ("Steer now"); `AutoRefineEnv.steer(pin=(...))`; `report --run DIR --steer` (ASCII table; `--json` for the rows) | 94 |
+| Pause & Resume (v0.82) | Hold the live loop between experiments — nothing trains and the wall-clock budget holds while paused; resuming continues exactly where it held (decision trajectory unchanged); Stop while paused ends the run | dashboard (**Pause the run** / **Resume the run**); `DashboardRunner.pause()` / `resume()` | 96 |
 
 ## Run artifacts
 

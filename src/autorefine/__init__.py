@@ -323,8 +323,8 @@ from .adapt import (  # SPEC.md 93.3 (v0.79, A83): the transfer core
 
 # SPEC.md 33.1 (C1): single version source — must equal pyproject.toml's
 # [project].version (enforced by the A23 test); one step per feature round
-# (v0.81 ⇒ 0.81.0, M84, SPEC.md 95)
-__version__ = "0.81.0"
+# (v0.82 ⇒ 0.82.0, M85, SPEC.md 96)
+__version__ = "0.82.0"
 
 __all__ = [
     "AutoRefineEnv",
