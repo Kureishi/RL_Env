@@ -5,7 +5,7 @@ The improver loop proposes model-configuration changes, trains, evaluates on
 splits it never saw, records the outcome, and proposes the next change — all
 within a hard budget, fully reproducible, NumPy-only.
 
-**Current version: 0.80.0.** Input modalities: CSV, plus labelled
+**Current version: 0.81.0.** Input modalities: CSV, plus labelled
 image / audio / text directories via `autorefine fit --data PATH`.
 
 **Spec (source of truth):** [SPEC.md](SPEC.md)
@@ -59,6 +59,9 @@ python examples/gym_dqn.py --task sine-v1 --experiments 5 --seed 7
 
 # worked example (v0.7): custom tabular task, "which model fits?", gate on >95%
 python examples/tabular.py --experiments 20 --target 95.0
+
+# the whole story in one screen (v0.81): plan -> run+steer -> what-if -> verify
+python examples/narrative.py
 
 # list plugin entry points (v0.7): tasks/policies contributed by other packages
 python -m autorefine plugins list

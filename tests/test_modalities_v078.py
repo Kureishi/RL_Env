@@ -812,10 +812,10 @@ class TestCeremony:
     def test_version_steps_to_078_in_both_sources(self):
         init = (REPO / "src" / "autorefine" / "__init__.py").read_text(
             encoding="utf-8")
-        assert '__version__ = "0.80.0"' in init
-        assert 'version = "0.80.0"' in (
+        assert '__version__ = "0.81.0"' in init
+        assert 'version = "0.81.0"' in (
             REPO / "pyproject.toml").read_text(encoding="utf-8")
-        assert autorefine.__version__ == "0.80.0"
+        assert autorefine.__version__ == "0.81.0"
 
     def test_spec_section_and_index_row(self):
         spec = SPEC.read_text(encoding="utf-8")

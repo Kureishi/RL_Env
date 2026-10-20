@@ -101,6 +101,7 @@ numbers and carry none.)
 | M81 | v0.78   | 92     | A82 | tests/test_modalities_v078.py |
 | M82 | v0.79   | 93     | A83 | tests/test_transfer_v079.py |
 | M83 | v0.80   | 94     | A84 | tests/test_livesteer_v080.py |
+| M84 | v0.81   | 95     | A85 | tests/test_narrative_v081.py |
 
 ---
 
@@ -9020,3 +9021,111 @@ per-event table). The pinned surfaces stay byte-identical (the A49
 three-key round-trip pin, the RL action catalog, the A1–A19 legacy
 sequence), and the A-index advances to A84/M83 with
 `tests/test_livesteer_v080.py` (94.3).
+
+## 95. v0.81 — The narrative: the environment's identity, in one screen (A85)
+
+95.1. `examples/narrative.py` is the single executable answer to "what
+is this environment?": it walks the existing surface in sequence —
+**plan** (a zero-training `fit --dry-run`), **run** (a tiny live
+search loop over a deliberately hard dataset, steered mid-run with the
+94.1 verb), **effects** (`report --steer`, the 94.1.7 measured
+before/after table), **what-if** (`report --what-if 'score>=97'`,
+the 40.2 counterfactual re-gate), and **verify** (`verify --run DIR`,
+the independent re-derivation of every reported number). No new
+command, no new dependency, no new package export — the story is the
+pinned CLI + `DashboardRunner`, told in order, in one screen of
+terminal output.
+
+95.1.1. **The dataset** — 60 rows of quadrant XOR over two unit
+features (`a`, `b`, label `churn = (a > 0.4) ^ (b > 0.4)`), written
+deterministically (no RNG) to a temp dir. The "classically hard"
+property is load-bearing for the story: the baseline (33.3) lands
+**below** the 50.0 a majority-class guess scores, and the loop still
+recovers to 100.0 — the narrative prints both facts by name.
+
+95.1.2. **Beat plumbing** — each CLI beat runs through
+`autorefine.cli.main` with `contextlib.redirect_stdout` capture, so
+the narrative can frame (`[n/5] title   ($ command)`) and trim
+without touching the pinned command output. The what-if beat keeps
+only the `what-if` block onward (the command's summary preamble is
+recap, not story); a missing marker prints a loud "shape changed, update the
+narrative" line and fails the beat (so `main()` returns 1,
+95.1.3), never silent garbage.
+
+95.1.3. **The beats and their success criteria** —
+(1) `fit --data CSV --dry-run --target 95` rc 0 (the plan includes
+data health + headroom, 40.1); (2) `DashboardRunner(csv,
+experiments=4, target=50.0, seed=7)` → `start()` → one `next()` →
+`steer(pin=("activation", "relu"))` (exactly one event at experiment
+1, 94.1.3) → drain → `finish()`, with the beat's success being
+`final_best_score > baseline_score` (read from `summary.json` —
+the honest source, 94.1.6); (3) `report --run DIR --steer` rc 0;
+(4) `report --run DIR --what-if score>=97` rc in {0, 2} — PASS
+*and* MISS are both "the gate answered"; only an error rc fails;
+(5) `verify --run DIR` rc 0 (PASS) is the narrative's verdict line.
+
+95.1.4. **Hygiene** — the run lives in `tempfile.mkdtemp` and is
+removed by default (`--keep` retains it); the script exits 0 iff all
+five beats ran clean and verify said PASS, 1 otherwise; a
+`sys.path` fallback to `<repo>/src` lets it run uninstalled from
+anywhere; stdout is `errors="replace"`-hardened for cp1252 consoles.
+Total output is ~one screen (≤ ~60 lines) by construction: the dry-run
+plan is 19 lines, the run narration 6, each report beat ≤ 8.
+
+95.2. **Design decisions.** (a) The narrative reuses, it does not
+wrap: it calls the same `cli_main` / `DashboardRunner` the README
+teaches, so it cannot drift into a second interface. (b) Beat 2 uses
+`target=50.0` (not 95) so the run finishes on budget — the story is
+the loop + the steer, not the target; the dry-run beat shows the
+`--target 95` headroom math the user would actually see. (c) The
+mutation *order* of beat 2 is not pinned (the bandit's first field is
+deterministic per process); the narrative asserts only the stable
+facts (baseline < majority-class score, final 100.0 > baseline,
+verify PASS) — the same G2-honest posture the A84.4 rewrite took.
+(d) `examples/narrative.py` is not an `APP_MODULES` file (35.2):
+its docstrings may cite SPEC numbers; its user-facing output is
+plain narrative text (the cited SPEC tags appear only inside the
+pinned CLI output it prints verbatim, which is `cli.py`'s surface).
+
+### 95.3 Acceptance (A85)
+
+1. **A85.1 — the script runs end-to-end**: importing
+   `examples/narrative.py` by path and calling `main()` in a temp
+   working dir returns 0; all five beats executed (plan rc 0; a
+   steered 4-experiment run with `final_best_score >
+   baseline_score`; `report --steer` rc 0; the what-if beat rc in
+   {0, 2} with a PASS or MISS verdict printed; `verify` PASS);
+   `main()` returns 1 (not an exception) when a beat's marker is
+   missing or a CLI rc is an error.
+2. **A85.2 — determinism of the story facts**: two fresh
+   `main()` runs in separate temp dirs produce the same baseline
+   score, the same final best score, the same steer event
+   (`activation` → `relu` at experiment 1), and verify PASS in
+   both.
+3. **A85.3 — hygiene**: the default run leaves no `runs/` dir and
+   no temp dir behind (the mkdtemp path is gone after `main()`);
+   the script parses (`ast.parse`) and carries the A85 citation.
+4. **A85.4 — ceremony**: the version steps to `0.81.0` in both
+   sources (33.1); the A-index advances (`defined == set(range(1, 86))`,
+   81 acceptance rows, M84 resolving to `tests/test_narrative_v081.py`);
+   the README points at `python examples/narrative.py`.
+
+All in `tests/test_narrative_v081.py`.
+
+### 95.4 Milestone (M84)
+
+**M84** — v0.81 "The narrative": `examples/narrative.py` answers
+"what is this environment?" with one executable screen — plan
+(`fit --dry-run`, data health + headroom, zero training) → run (a
+steered 4-experiment loop on quadrant-XOR churn, the classically
+hard case where the baseline lands below majority-class and the
+loop still recovers to 100.0) → effects (`report --steer`, the
+measured before/after of the mid-run pin) → what-if (`report
+--what-if score>=97`, the counterfactual re-gate with zero
+retraining) → verify (`verify --run`, every reported number
+independently re-derived). No new command, dependency, or export:
+the narrative is the existing pinned surface in sequence, with
+temp-dir hygiene (`--keep` opt-out), a cp1252-safe output path, and
+an exit code (0 iff verify PASS) that makes the story CI-runnable.
+The A-index advances to A85/M84 with `tests/test_narrative_v081.py`
+(95.3).
