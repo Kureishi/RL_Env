@@ -21,6 +21,10 @@ from .memory import KIND_BASELINE, KIND_CURRICULUM, KIND_EXPERIMENT  # 35.1 (C4)
 # importing them here is safe — the research import chain does not
 # come back through plotting
 from .research import KNOB_SPREAD_DECISIVE, KNOB_SPREAD_WEAK
+# SPEC.md 94.2.2 (v0.80): the steering-effect derivations — the same G2
+# source as `report --steer` (94.1.7); steering's top-level imports never
+# reach back here (config / specspace only), so no cycle
+from .steering import best_score_curve, effect_windows
 
 _AXIS = "#333333"
 _LINE = "#1a66c2"
@@ -982,6 +986,121 @@ def svg_ladder_curve(entries, levels, width: int = 640, height: int = 360) -> st
             titles.append(f"experiment: {'accepted' if ok else 'rejected'}, "
                           f"best {v:.2f}")
     _svg_plot(parts, xs, ys, colors, titles)
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def _steer_value_text(v) -> str:
+    """SPEC.md 94.2.2 (v0.80): the display text of one steering value —
+    a list/tuple is comma-joined, anything else stringified, `None` is
+    the dash (the 57.2 value-key convention, 30.2)."""
+    if v is None:
+        return "-"
+    if isinstance(v, (list, tuple)):
+        return ", ".join(str(x) for x in v)
+    return str(v)
+
+
+def svg_steering_curve(entries, events, window: int = 3, eps: float = 0.05,
+                       width: int = 640, height: int = 360) -> str:
+    """SPEC.md 94.2.2 (v0.80): the live-steering effects — the run's
+    running-best score curve (94.1.5, ``best_score_curve``: point 0 the
+    baseline, point ``i`` the running best after the i-th scored
+    experiment) with one vertical marker per live steering event
+    (94.1.1), each carrying a signed delta badge colored by direction
+    (up ``_ACCEPTED``, down ``_REJECTED``, flat ``_AXIS``) and a
+    ``<title>`` tooltip with the event's field / verb / before / after
+    and its measured effect window (pre / post / delta). A numbered
+    legend row per event below the chart ties the badges to their
+    events (numbering keeps two badges at the same experiment apart).
+
+    The effect numbers come from ``effect_windows`` (94.1.5) — the same
+    G2 source as ``report --steer`` (94.1.7). Empty input states render
+    the placeholder branches (the 27.3 ladder pattern); an event *past*
+    the logged curve is a `ValueError` (fail loud, 94.1.5). Pure and
+    deterministic in (entries, events) (G2); valid XML like the other
+    21.2 charts.
+    """
+    evs = list(events or [])
+    if not evs:
+        parts = _svg_header(width, height, "steering effects (no events)")
+        parts.append(
+            f'<text x="{width // 2}" y="{height // 2}" text-anchor="middle" '
+            f'font-size="13" fill="{_AXIS}">no live steering events in this run</text>')
+        parts.append("</svg>")
+        return "\n".join(parts)
+    curve = best_score_curve(entries)
+    if not curve:
+        parts = _svg_header(width, height, "steering effects (no scored rows)")
+        parts.append(
+            f'<text x="{width // 2}" y="{height // 2}" text-anchor="middle" '
+            f'font-size="13" fill="{_AXIS}">no scored rows in the experiment log</text>')
+        parts.append("</svg>")
+        return "\n".join(parts)
+    # 94.1.5: the single G2 effect source (raises on a past-curve event)
+    rows = effect_windows(curve, evs, window=window, eps=eps)
+    vals = list(curve)
+    lo, hi = min(vals), max(vals)
+    if hi - lo < 1e-9:
+        hi = lo + 1.0
+    n = len(vals)
+    # layout: the numbered legend (one row per event) grows the bottom
+    # margin; the chart keeps the 27.3 geometry (L / T / R)
+    L, T, R = 72.0, 28.0, 24.0
+    B = 44.0 + 18.0 * len(rows)
+    pw, ph = width - L - R, height - T - B
+    pos = {i: L + pw * (i / (n - 1) if n > 1 else 0.5) for i in range(n)}
+    xs = [pos[i] for i in range(n)]
+    ys = [T + ph * (1.0 - (v - lo) / (hi - lo)) for v in vals]
+    parts = _svg_header(width, height, "steering effects (best score)")
+    parts += _svg_axes(L, T, pw, ph, lo, hi, 0.0, float(n - 1),
+                       "experiment index")
+    titles = ([f"baseline: best {vals[0]:.2f}"]
+              + [f"after experiment {i}: best {vals[i]:.2f}"
+                 for i in range(1, n)])
+    _svg_plot(parts, xs, ys, [_LINE] * n, titles)
+    # one marker per event: dashed vertical at the (clamped) curve index,
+    # delta badge on top, <title> tooltip with the full effect (94.2.2)
+    for k, row in enumerate(rows, start=1):
+        i = min(int(row["at_experiment"]), n - 1)  # clamp the marker only
+        x = pos[i]
+        direction = row["direction"]
+        color = (_ACCEPTED if direction == "up"
+                 else _REJECTED if direction == "down" else _AXIS)
+        ev = evs[k - 1]
+        field = ev.get("field")
+        if field is None:  # a 'clear' event (94.1.1)
+            what = "clear (all rules)"
+        else:
+            what = (f"{ev.get('verb')} {html.escape(str(field))} "
+                    f"{_steer_value_text(ev.get('before'))} -> "
+                    f"{_steer_value_text(ev.get('after'))}")
+        parts.append(
+            f'<line x1="{x:.1f}" y1="{T:.1f}" x2="{x:.1f}" y2="{T + ph:.1f}" '
+            f'stroke="{color}" stroke-width="1.5" stroke-dasharray="5 4">'
+            f'<title>steer {k}: {what} @ experiment {row["at_experiment"]}; '
+            f'pre {row["pre_mean"]:.2f}, post {row["post_mean"]:.2f}, '
+            f'delta {row["delta"]:+.2f} ({direction})</title></line>')
+        parts.append(
+            f'<text x="{x:.1f}" y="{T - 8:.1f}" text-anchor="middle" '
+            f'font-size="10" font-weight="bold" fill="{color}">'
+            f'{k}:{row["delta"]:+.2f}</text>')
+    # the numbered legend rows (the badges' keys)
+    ly = T + ph + 52
+    for k, row in enumerate(rows, start=1):
+        ev = evs[k - 1]
+        if ev.get("field") is None:  # a 'clear' event (94.1.1)
+            what = "clear (all rules)"
+        else:
+            _fld = html.escape(str(ev.get('field')))
+            what = (f"{ev.get('verb')} {_fld} "
+                    f"{_steer_value_text(ev.get('before'))} -> "
+                    f"{_steer_value_text(ev.get('after'))}")
+        parts.append(
+            f'<text x="{L:.1f}" y="{ly + (k - 1) * 18:.1f}" font-size="11" '
+            f'fill="{_AXIS}">{k}. {what} @ experiment '
+            f'{row["at_experiment"]}: delta {row["delta"]:+.2f} '
+            f'({row["direction"]})</text>')
     parts.append("</svg>")
     return "\n".join(parts)
 

@@ -35,6 +35,7 @@ no import cycle — this module's top-level imports never include
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -44,10 +45,17 @@ from .improver.specspace import SPEC_FIELDS
 __all__ = [
     "SteeringState",
     "apply_steering",
+    "best_score_curve",
+    "effect_windows",
     "manual_spec",
     "parameter_inspection",
     "train_manual",
 ]
+
+# SPEC.md 94.1.1 (v0.80): the live-steering event verbs — the three 59.2
+# verbs plus ``clear`` (the rule set is removed wholesale). Closed set:
+# a new verb must be added here AND in `record`'s validation.
+STEER_VERBS = ("pin", "bias", "constrain", "clear")
 
 
 def _spec_field(name: str) -> str:
@@ -106,10 +114,20 @@ class SteeringState:
     The builder methods validate at the registry (59.2.1) and return a
     **new** state (immutability, the RunConfig 37.1.2 pattern); a second
     rule for the same field replaces the first (last one wins).
+
+    ``history`` (SPEC.md 94.1.1, v0.80) is the append-only log of
+    **live** steering changes — one event dict per ``record()`` call, in
+    change order. It is the 4th field with a default, so positional
+    construction and ``SteeringState() == SteeringState.from_dict({})``
+    (the 59.2 pins) stay green; only ``record()`` (the live ``steer()``
+    path, 94.1.3) ever appends to it — pre-run rules (CLI / the app's
+    Setup panel) leave it empty, which is what keeps the
+    ``steering_events`` summary key absent (94.1.6, the A49/A84 pin).
     """
     pins: tuple = ()
     biases: tuple = ()
     constraints: tuple = ()
+    history: tuple = ()
 
     @property
     def active(self) -> bool:
@@ -122,7 +140,11 @@ class SteeringState:
         v = _validate_value(name, value)
         pins = tuple((name, v) if f == name else (f, x)
                      for f, x in self.pins if f != name) + ((name, v),)
-        return SteeringState(pins, self.biases, self.constraints)
+        # 94.1.1 (v0.80): the builders preserve the history (the
+        # log of changes is never rewritten -- only `record`
+        # appends to it)
+        return SteeringState(pins, self.biases, self.constraints,
+                             self.history)
 
     def bias(self, name: str, value: Any) -> "SteeringState":
         """Add/replace the bias for `name` (validated, 59.2.1)."""
@@ -130,7 +152,46 @@ class SteeringState:
         v = _validate_value(name, value)
         biases = tuple((name, v) if f == name else (f, x)
                        for f, x in self.biases if f != name) + ((name, v),)
-        return SteeringState(self.pins, biases, self.constraints)
+        return SteeringState(self.pins, biases, self.constraints,
+                             self.history)  # 94.1.1: preserved
+
+    def record(self, field: Any, verb: str, before: Any, after: Any,
+               at_experiment: int) -> "SteeringState":
+        """SPEC.md 94.1.1 (v0.80): append one live-steering event to the
+        history — the **only** writer of ``history`` (the pre-run path
+        never records, 94.1.6).
+
+        The event is the JSON-safe dict ``{field, verb, before, after,
+        at_experiment}``: ``verb`` is in ``STEER_VERBS`` (``clear`` has
+        ``field=None``; the three rule verbs require a registry field,
+        59.2.1); ``at_experiment`` is the 1-based experiment count the
+        change followed (``bm.used_experiments`` at the call, 94.1.3);
+        ``before`` / ``after`` are the rule values around the change
+        (``None`` where there was none). Tuples are normalized to lists
+        at insertion (JSON-safe round trip, the 94.1.1 rule).
+        """
+        if verb not in STEER_VERBS:
+            raise ValueError(
+                f"steering event verb must be one of {list(STEER_VERBS)}, "
+                f"got {verb!r}")
+        if verb == "clear":
+            if field is not None:
+                raise ValueError(
+                    f"a 'clear' steering event has no field "
+                    f"(field must be None, got {field!r})")
+        else:
+            _spec_field(field)  # registry-level, fail loud (59.2.1)
+        if (isinstance(at_experiment, bool)
+                or not isinstance(at_experiment, int) or at_experiment < 0):
+            raise ValueError(
+                f"steering event at_experiment must be an int >= 0, got "
+                f"{at_experiment!r}")
+        b = list(before) if isinstance(before, tuple) else before
+        a = list(after) if isinstance(after, tuple) else after
+        event = {"field": field, "verb": verb, "before": b, "after": a,
+                 "at_experiment": int(at_experiment)}
+        return SteeringState(self.pins, self.biases, self.constraints,
+                             self.history + (event,))
 
     def constrain(self, name: str, values) -> "SteeringState":
         """Add/replace the allowed set for `name` (non-empty; every value
@@ -151,21 +212,34 @@ class SteeringState:
         constraints = tuple((name, vs) if f == name else (f, x)
                             for f, x in self.constraints if f != name) \
             + ((name, vs),)
-        return SteeringState(self.pins, self.biases, constraints)
+        return SteeringState(self.pins, self.biases, constraints,
+                             self.history)  # 94.1.1: preserved
 
     # --- JSON-safe round trip (RunConfig 59.4 pairs) -------------------------
     def to_dict(self) -> dict:
         """JSON-safe dict: lists of ``[field, value]`` (pins/biases) and
-        ``[field, [value, ...]]`` (constraints) pairs."""
-        return {
+        ``[field, [value, ...]]`` (constraints) pairs.
+
+        ``history`` (94.1.1) is a **conditional** key — present only when
+        non-empty, so the empty state serializes to the exact pre-v0.80
+        three-key dict (the 59.2 round-trip pin stays byte-identical).
+        """
+        d = {
             "pins": [[f, v] for f, v in self.pins],
             "biases": [[f, v] for f, v in self.biases],
             "constraints": [[f, list(vs)] for f, vs in self.constraints],
         }
+        if self.history:
+            d["history"] = [dict(e) for e in self.history]
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "SteeringState":
-        """Reconstruct + re-validate (a mutated/unknown dict is rejected)."""
+        """Reconstruct + re-validate (a mutated/unknown dict is rejected).
+
+        ``history`` is optional (a pre-v0.80 dict without the key loads
+        as the empty history); each entry is re-validated through
+        ``record()`` (the verb, the field, the experiment index)."""
         if not isinstance(d, dict):
             raise ValueError(
                 f"steering state must be a JSON object, got "
@@ -180,6 +254,14 @@ class SteeringState:
         for pair in d.get("constraints") or []:
             f, vs = pair
             state = state.constrain(f, vs)
+        for e in d.get("history") or []:
+            if not isinstance(e, dict):
+                raise ValueError(
+                    f"steering history entries must be JSON objects, got "
+                    f"{type(e).__name__}")
+            state = state.record(
+                e.get("field"), e.get("verb"), e.get("before"),
+                e.get("after"), e.get("at_experiment"))
         return state
 
 
@@ -288,6 +370,127 @@ def train_manual(task_name: str, values: dict, seed: int = 7,
         "final_loss": float(result.final_loss),
         "time_capped": bool(result.time_capped),
     }
+
+
+def _finite(x: Any) -> bool:
+    """A finite real number (bools are not numbers here)."""
+    return (isinstance(x, (int, float)) and not isinstance(x, bool)
+            and math.isfinite(float(x)))
+
+
+def best_score_curve(entries) -> list[float]:
+    """SPEC.md 94.1.5 (v0.80): the run's running-best score curve —
+    point 0 is the scored baseline, then the running best after each
+    scored experiment (a rejected dip never lowers the curve): the
+    50.1.2 ``running_best_curve`` semantics exactly (``kind`` in
+    baseline/experiment with a finite ``holdout_score``, in log order).
+    ``[]`` when no row is scored. Pure, deterministic (G2); this is the
+    single curve both the CLI and the app feed to ``effect_windows``.
+    """
+    # local import: the kind registry is the single source (35.1); a
+    # leaf module, but keep this one's import surface small
+    from .memory import KIND_BASELINE, KIND_EXPERIMENT
+    scores: list[float] = []
+    for r in entries or []:
+        if not isinstance(r, dict):
+            continue
+        if (r.get("kind") in (KIND_BASELINE, KIND_EXPERIMENT)
+                and _finite(r.get("holdout_score"))):
+            scores.append(float(r["holdout_score"]))
+    out: list[float] = []
+    best: float | None = None
+    for s in scores:  # running best (the 50.1.2 rule)
+        best = s if best is None else max(best, s)
+        out.append(best)
+    return out
+
+
+def effect_windows(curve, events, window: int = 3,
+                   eps: float = 0.05) -> list[dict]:
+    """SPEC.md 94.1.5 (v0.80): the measured effect of each live-steering
+    event — the single G2 source of the effect numbers (the CLI's
+    ``report --steer`` and the app's effects panel both call this).
+
+    ``curve`` is a ``best_score_curve`` (point 0 = the baseline; point
+    ``i`` = the running best after the i-th experiment). For an event at
+    experiment ``i`` (1-based, "after the i-th experiment"):
+
+    * ``pre_mean``  = the mean of ``curve[max(0, i-window) : i]`` (a
+      partial window at the start; the empty case — an event at
+      experiment 0 — falls back to ``curve[0]``);
+    * ``post_mean`` = the mean of ``curve[i : i+window]`` (clamped by
+      the curve's end; an event *past* the logged curve fails loud);
+    * ``delta``     = ``post_mean − pre_mean``;
+    * ``direction`` = ``flat`` when ``|delta| <= eps`` (the default
+      0.05 = 0.5 score points — noise, not a signal), else ``up`` / ``down``.
+
+    Each row carries the event's identity through unchanged: ``{
+    field, verb, before, after, at_experiment, pre_mean, post_mean,
+    delta, direction}``. Fail loud on a bad window / eps / curve /
+    event (94.1.5); an empty event list is the empty list.
+    """
+    if (isinstance(window, bool) or not isinstance(window, int)
+            or window < 1):
+        raise ValueError(
+            f"effect_windows: window must be an int >= 1, got "
+            f"{window!r}")
+    if (isinstance(eps, bool) or not isinstance(eps, (int, float))
+            or not math.isfinite(float(eps)) or float(eps) < 0):
+        raise ValueError(
+            f"effect_windows: eps must be a finite number >= 0, got "
+            f"{eps!r}")
+    try:
+        cv = [float(v) for v in curve]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"effect_windows: curve must be a sequence of numbers, got "
+            f"{type(curve).__name__}") from exc
+    if not cv or not all(math.isfinite(v) for v in cv):
+        raise ValueError(
+            "effect_windows: curve must be a non-empty sequence of "
+            "finite numbers  ")
+    try:
+        evs = list(events)
+    except TypeError as exc:
+        raise ValueError(
+            f"effect_windows: events must be a sequence, got "
+            f"{type(events).__name__}") from exc
+    eps_f = float(eps)
+    out: list[dict] = []
+    for e in evs:
+        if not isinstance(e, dict):
+            raise ValueError(
+                f"effect_windows: each event must be a dict, got "
+                f"{type(e).__name__}")
+        i = e.get("at_experiment")
+        if (isinstance(i, bool) or not isinstance(i, int) or i < 0):
+            raise ValueError(
+                f"effect_windows: event at_experiment must be an int >= 0, "
+                f"got {i!r}")
+        pre = cv[max(0, i - window):i] or [cv[0]]  # 94.1.5: the i=0 fallback
+        post = cv[i:i + window]
+        if not post:
+            raise ValueError(
+                f"effect_windows: the event at experiment {i} has no "
+                f"post window — the logged curve has {len(cv)} points "
+                f" ")
+        pre_mean = sum(pre) / len(pre)
+        post_mean = sum(post) / len(post)
+        delta = post_mean - pre_mean
+        direction = ("flat" if abs(delta) <= eps_f
+                     else "up" if delta > 0 else "down")
+        out.append({
+            "field": e.get("field"),
+            "verb": e.get("verb"),
+            "before": e.get("before"),
+            "after": e.get("after"),
+            "at_experiment": i,
+            "pre_mean": pre_mean,
+            "post_mean": post_mean,
+            "delta": delta,
+            "direction": direction,
+        })
+    return out
 
 
 def parameter_inspection(entries, best_spec: dict | None = None,

@@ -100,6 +100,7 @@ numbers and carry none.)
 | M80 | v0.77   | 91     | A81 | tests/test_accel_v077.py |
 | M81 | v0.78   | 92     | A82 | tests/test_modalities_v078.py |
 | M82 | v0.79   | 93     | A83 | tests/test_transfer_v079.py |
+| M83 | v0.80   | 94     | A84 | tests/test_livesteer_v080.py |
 
 ---
 
@@ -8748,3 +8749,274 @@ Adapt tab renders the whole flow with the old-vs-new calibrated table
 leaf pattern), every pinned surface stays green (the RL action catalog
 keeps its 106 actions), and the A-index advances to A83/M82 with
 `tests/test_transfer_v079.py` (93.4).
+
+## 94. v0.80 — Live steering: respond to changing parameters, and visualize the effects (A84)
+
+v0.45 (59) gave the loop three human-in-the-loop verbs over the spec
+space — `pin`, `bias`, `constrain` — but they were **pre-run** rules:
+set at construction, then the loop runs to the end. A researcher
+watching a run cannot change course: a wrong pin burns the remaining
+budget, and there is no way to say whether a mid-run change helped. v0.80
+closes that gap with one append-only log and one effect measure:
+
+* **Live steering (94.1.1–94.1.4)** — `AutoRefineEnv.steer()` (94.1.3)
+  and `DashboardRunner.steer()` (94.1.4) apply the same 59.2 verbs
+  **while the loop is running**, each change recorded as one event in
+  the new `SteeringState.history` (94.1.1) with the experiment it
+  followed. The changed field is re-explored *first*: the policies' new
+  `reset_field` (94.1.2) drops its credit / refinement tracking, so the
+  bandit's cold-start (infinite UCB) or the search's fresh field pick
+  surfaces it on the next step.
+* **Effect measurement (94.1.5)** — `best_score_curve` +
+  `effect_windows`: each event's measured effect is a before/after
+  window of means over the run's best-score curve, with an
+  `up` / `down` / `flat` direction. One G2 source shared by the CLI,
+  the app, and the SVG.
+* **Surfaces (94.1.6–94.1.7, 94.2)** — the conditional
+  `steering_events` summary key (94.1.6), `report --run DIR --steer`
+  (94.1.7), the app's "Steer now" panel (94.2.1) and the results-view
+  effects panel + `svg_steering_curve` (94.2.2).
+
+Two invariants govern the design:
+
+* **Additive; pinned surfaces byte-identical.** `SteeringState.history`
+  is a 4th frozen-dataclass field with a default, so positional
+  construction and `from_dict({}) == SteeringState()` (59.2) stay
+  green; the `to_dict()` `history` key is **conditional** — the empty
+  state still serializes to the exact pre-v0.80 three-key dict (the
+  A49 round-trip pin); the `steering_events` summary key is absent on
+  un-steered runs; a no-arg `steer()` fails loud; the pre-run path
+  (CLI / the app's Setup panel) is byte-identical.
+* **The log is never rewritten.** `clear` removes every rule (one
+  `clear` event) but keeps the history; only `record()` appends. Events
+  carry `before` / `after` (the rule values around the change), so a
+  report can answer "what did it change from, and to."
+
+### 94.1 A84.1–A84.7 — The core (steering.py, meta_env.py, bandit.py,
+policy.py, dashboard.py, cli.py)
+
+#### 94.1.1 A84.1 — The history log + `record()` (steering.py)
+
+94.1.1.1: `SteeringState` gains a 4th frozen field `history:
+tuple = ()` — the append-only log of **live** steering changes, one
+event dict per `record()` call, in change order. `STEER_VERBS =
+("pin", "bias", "constrain", "clear")` is the closed verb set. `record(
+field, verb, before, after, at_experiment)` is the **only writer** of
+`history`: `verb` must be in `STEER_VERBS`; `clear` requires
+`field=None` and the three rule verbs require a registry field (59.2.1);
+`at_experiment` must be an int >= 0 (bools rejected); tuples are
+normalized to lists at insertion (the JSON-safe round trip).
+
+94.1.1.2: the 59.2 builders (`pin` / `bias` / `constrain`) are
+unchanged and always keep `history == ()` — the pre-run path never
+records. `to_dict()` emits `history` **conditionally** (present only
+when non-empty), so the empty state still serializes to the exact
+pre-v0.80 three-key dict; `from_dict` re-validates each history entry
+through `record()` (a bad verb / field / index fails loud), and
+`from_dict({}) == SteeringState()` stays green (59.2).
+
+#### 94.1.2 A84.3 — The policies' `reset_field` (bandit.py, policy.py)
+
+94.1.2.1 (bandit): `BanditPolicy.reset_field(field)` zeros the field's
+trial/win credit — zero trials imply infinite UCB — so the bandit
+re-proposes it first: the immediate re-exploration a live steering
+change asks for. The field must be in the bandit's space
+(`FIELD_NAMES`, 36.2); an unknown field is a `ValueError` (fail loud,
+the 59.2.1 style); all other fields' credit is untouched (G2).
+
+94.1.2.2 (search): `SearchPolicy.reset_field(field)` drops the field's
+per-field tracking — when it is the current refinement target
+(`last_field`), the refine queue clears (`last_field = None`,
+`refine_left = 0`) and the search re-picks fields from the pool. A
+field the policy never tracks (outside `SEARCH_FIELDS`, e.g. `knn_k` —
+the 25.7 exclusion) is a legal no-op: there is nothing of its to reset.
+`fail_streak` is loop-level, not per-field, and is untouched (resetting
+it would trigger an unwanted evolutionary restart). An unknown field
+(outside the spec registry, `FIELD_NAMES`) is a `ValueError`.
+
+#### 94.1.3 A84.2 — `AutoRefineEnv.steer()` (meta_env.py)
+
+94.1.3.1: `steer(pin=None, bias=None, constrain=None, clear=False)`
+changes the 59.2 rules *while the loop is running*. Exactly one (or
+more) of the four must be given; a call with none is a `ValueError`
+(a silent no-op would be a bug, not a feature). Each change is applied
+through the 59.2 builders (registry validation, fail loud — 59.2.1),
+then **recorded** (94.1.1) with `at_experiment =
+bm.used_experiments` — the 1-based experiment count the change
+followed. The event's `before` is the field's previous rule value
+(`None` where there was none); `after` is the value actually stored
+(the validator's output).
+
+94.1.3.2: `clear=True` first: it removes every rule (one `clear` event
+whose `before` is the removed rule set and `after` is `None`) while
+keeping the history — the log of changes is never rewritten. The new
+state takes effect at the *next* `step()` (the `apply_steering` site,
+59.2.2) — the Stop-flag precedent (51.2.2): a GIL-atomic attribute
+write the loop reads between experiments. Returns the JSON-safe event
+dicts — only the **new** events, in application order. A `steer()` on
+an env constructed without steering (`self.steering is None`) creates
+a fresh state — live steering works on any run.
+
+#### 94.1.4 A84.4 — `DashboardRunner.steer()` (dashboard.py)
+
+`runner.steer(...)` is the app's entry point: it applies the change
+through `env.steer()` (94.1.3), then re-explores the changed field(s)
+first — for every event with a field, the policy's `reset_field`
+(94.1.2) drops that field's credit / refinement tracking, so the
+bandit's cold start (infinite UCB) or the search's fresh field pick
+surfaces it on the next `next()`. A call before `start()` (no
+env/policy yet) is a `RuntimeError` (the `finish()` guard style, fail
+loud). The event dicts (94.1.1) are returned for the UI to render.
+
+#### 94.1.5 A84.5 — `best_score_curve` + `effect_windows`
+(steering.py)
+
+94.1.5.1: `best_score_curve(entries)` — the run's running-best score
+curve: point 0 is the scored baseline, point `i` the running best
+after the i-th scored experiment (a rejected dip never lowers the
+curve): the 50.1.2 `running_best_curve` semantics exactly (`kind` in
+baseline/experiment with a finite `holdout_score`, in log order).
+`[]` when no row is scored; non-dict rows are skipped. Pure and
+deterministic (G2); the single curve both the CLI and the app feed to
+`effect_windows`.
+
+94.1.5.2: `effect_windows(curve, events, window=3, eps=0.05)` — the
+measured effect of each event: for an event at experiment `i`,
+`pre_mean` = the mean of `curve[max(0, i-window) : i]` (a partial
+window at the start; the empty case — an event at experiment 0 — falls
+back to `curve[0]`), `post_mean` = the mean of `curve[i : i+window]`
+(clamped by the curve's end; an event *past* the logged curve fails
+loud), `delta` = post − pre, and `direction` = `flat` when
+`|delta| <= eps` (the default 0.05 = 0.5 score points — noise, not a
+signal), else `up` / `down`. Each row carries the event's identity
+through: `{field, verb, before, after, at_experiment, pre_mean,
+post_mean, delta, direction}`. A bad window / eps / curve / event
+fails loud (94.1.5); an empty event list is the empty list.
+
+#### 94.1.6 A84.6 — The `steering_events` summary artifact
+(meta_env.py)
+
+The finished run's `summary.json` gains a **conditional** key
+`steering_events` — the event list (94.1.1) — present **only** when
+`steer()` actually ran mid-run (only `record()` appends, so pre-run
+rules leave it absent). The pre-v0.80 summary key set stays intact on
+un-steered and pre-run-rules runs (the A49/A84 pin); the
+`RunConfig.from_env` round-trip is unchanged with a history-carrying
+state (it reads only the flat pins/biases/constraints, 37.1).
+
+#### 94.1.7 A84.7 — `report --run DIR --steer` (cli.py)
+
+One row per live steering event of the run (94.1.1): the verb, field,
+before -> after, the experiment it followed, and the pre / post /
+delta effect window (94.1.5) over the run's best-score curve
+(94.1.5). Human form (default): an ASCII table (cp1252-safe: `->`
+and `delta` — no Unicode). `--json`: the pure 94.1.5 effect-row list
+on stdout (sorted keys). A run with no live steering events (the
+94.1.6 key absent) or no scored rows is rc 1 with a stderr hint — the
+view is for steered runs. `--steer` shares `--json` (the machine
+form) and is mutually exclusive with `--history` and the other human
+views (94.1.7 guards).
+
+### 94.2 A84.8 — The app (dashboard_app.py, plotting.py,
+dashboard.py)
+
+94.2.1: the **Steer now** panel (the Run tab): the verb (pin / bias /
+constrain / clear), the field, and the value(s) (from the field's
+registry space), and an "Apply steering change" button →
+`runner.steer(...)` (94.1.4). Each change is named in the
+confirmation caption (which field/value, after which experiment); a
+rejected change (unknown field or value) is an error caption, never a
+silent skip. Only a live `DashboardRunner` (a run in progress) has
+`steer` — the RL runner does not (68.1), so the panel is absent
+there.
+
+94.2.2: the **Steering effects** panel (the results view):
+`svg_steering_curve` (plotting.py) — the run's running-best curve
+(94.1.5) with one dashed marker per event, a signed delta badge
+colored by direction (up = the accepted green, down = the rejected
+red, flat = the axis), a `<title>` tooltip with the event's field /
+verb / before / after and its measured effect window, and a numbered
+legend row per event tying the badges to their events. Below it, the
+per-event table (exp, steering, before, after, pre, post, delta,
+direction) from the same `effect_windows` (94.1.5). The runner's
+`finish()` result dict gains a **conditional** `steering_svg` (present
+only when the run was steered mid-run — the pre-v0.80 result dict
+stays byte-identical). An event past the logged curve is a `ValueError`
+(94.1.5); the app catches it and degrades to a friendly caption. All
+user-facing strings app-language (23.1).
+
+### 94.3 Acceptance (A84)
+
+1. **The history (94.1.1, A84.1)**: the 59.2 builders keep
+   `history == ()`; `record()` validates (a bad verb; a clear with a
+   field; a bad / bool / negative `at_experiment`) and appends;
+   `to_dict` / `from_dict` round-trip including history;
+   `from_dict({}) == SteeringState()`; the empty state's `to_dict()`
+   has **exactly** three keys (the A49 pin).
+2. **`env.steer()` (94.1.3, A84.2)**: a mid-run event carries
+   `at_experiment == bm.used_experiments`; pin / bias / constrain /
+   clear all work; `before` / `after` are correct (pin replace: before
+   = the old pinned value; clear: before = the removed rule-set dict,
+   after = `None`); only the NEW events are returned; a bad field /
+   value / no-args call fails loud.
+3. **`reset_field` (94.1.2, A84.3)**: bandit — a credited field is
+   zeroed and its UCB is infinite again; an unknown field raises; the
+   other fields' credit is untouched. Search — a matching field's
+   `last_field` / `refine_left` clear; `knn_k` is a legal no-op; an
+   unknown field raises; `fail_streak` is untouched.
+4. **`DashboardRunner.steer()` (94.1.4, A84.4)**: `steer()` before
+   `start()` is a `RuntimeError`; a pin after one experiment records
+   one event at experiment 1, is honored (the pinned field is in the
+   next update's mutation list), and resets the bandit's credit; the
+   finished run carries `steering_svg` + `steering_events`; an
+   un-steered determinism pin (two fresh same-parameter runners
+   produce identical summaries).
+5. **The effect math (94.1.5, A84.5)**: hand-computed window
+   slicing; partial windows; the `i=0` fallback; up / down / flat at
+   the `eps` boundary; an event past the curve end fails loud; a bad
+   window / eps / curve / non-dict event fails loud; `best_score_curve`
+   mirrors `running_best_curve` (baseline + experiment rows with a
+   finite `holdout_score`, running max, point 0 = the baseline, `[]`
+   when none scored, non-dict rows skipped).
+6. **Artifacts (94.1.6, A84.6)**: a steered run has
+   `summary["steering_events"]` with the event dicts; an un-steered
+   run and a pre-run-rules run do not have the key; the
+   `RunConfig.from_env` round-trip is unchanged with a
+   history-carrying state.
+7. **`report --steer` (94.1.7, A84.7)**: the human table is ASCII
+   (cp1252-safe); `--json` is the pure 9-key effect-row list; a run
+   with no events is rc 1 with the "no live steering events" hint;
+   `--steer` is mutually exclusive with `--history` / `--importance`
+   (and the other views) and compatible with `--json`.
+8. **The app (94.2, A84.8)**: the "Steer now" + "Steering effects"
+   source tokens are present; a minimal AppTest stays green; the
+   app-language scan (23.1) stays clean.
+9. **Ceremony (94.3.9)**: the version steps to `0.80.0` in both
+   sources (33.1); the A-index advances (`defined == set(range(1, 85))`,
+   80 acceptance rows, M83 resolving to `tests/test_livesteer_v080.py`);
+   `best_score_curve` / `effect_windows` are in `autorefine.__all__`.
+
+All in `tests/test_livesteer_v080.py`.
+
+### 94.4 Milestone (M83)
+
+**M83** — v0.80 "Live steering: respond to changing parameters, and
+visualize the effects": the 59.2 human-in-the-loop verbs become
+**live** — `AutoRefineEnv.steer()` / `DashboardRunner.steer()` apply
+pin / bias / constrain / clear mid-run, each change is recorded as an
+event in the new append-only `SteeringState.history` (with the
+experiment it followed and its before/after rule values), the changed
+field is re-explored *first* (the policies' `reset_field` drops its
+credit / refinement tracking — the bandit's cold-start infinite UCB or
+the search's fresh field pick), and the effect of each change is
+**measured** — `effect_windows` slices a before/after window over the
+run's best-score curve (one G2 source for the CLI, the app, and the
+SVG) — surfaced on three surfaces: the conditional `steering_events`
+summary key (absent on un-steered runs — the pre-v0.80 key set intact),
+`report --run DIR --steer` (the ASCII table / `--json`), the app's
+Run-tab "Steer now" panel, and the results-view "Steering effects"
+panel (`svg_steering_curve` markers + delta badges + tooltips + the
+per-event table). The pinned surfaces stay byte-identical (the A49
+three-key round-trip pin, the RL action catalog, the A1–A19 legacy
+sequence), and the A-index advances to A84/M83 with
+`tests/test_livesteer_v080.py` (94.3).

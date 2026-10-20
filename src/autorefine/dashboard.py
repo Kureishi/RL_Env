@@ -44,6 +44,7 @@ from .plotting import (
     svg_score_curve,
     svg_score_gap_scatter,
     svg_score_strip,
+    svg_steering_curve,  # SPEC.md 94.2.2 (v0.80): the live-steering effects
     svg_time_strip,  # B2 (SPEC.md 54.2) the wall-time cost strip
 )
 from .tasks import TASKS, detect_modality
@@ -157,6 +158,31 @@ class DashboardRunner:
     def _stop_check(self) -> bool:
         """The zero-arg callable handed to `AutoRefineEnv` (SPEC.md 51.2.2)."""
         return self._stop_requested
+
+    def steer(self, pin=None, bias=None, constrain=None,
+              clear: bool = False) -> list[dict]:
+        """SPEC.md 94.1.4 (v0.80): live steering from the app — apply a
+        steering change (94.1.3, the env's ``steer()``) to the running
+        loop, then re-explore the changed field(s) first (94.1.2):
+        for every event with a field, the policy's ``reset_field`` drops
+        that field's credit / refinement tracking, so the bandit's cold
+        start (infinite UCB) or the search's fresh field pick surfaces
+        it on the next step.
+
+        A call before ``start()`` (no env/policy yet) is a `RuntimeError`
+        (fail loud — the same guard style as ``finish()``). The event
+        dicts (94.1.1) are returned for the UI to render.
+        """
+        if self.env is None:
+            raise RuntimeError(
+                "steer() before start() — start the run first")
+        events = self.env.steer(pin=pin, bias=bias, constrain=constrain,
+                                clear=clear)
+        for e in events:
+            f = e.get("field")
+            if f is not None and self.policy is not None:
+                self.policy.reset_field(f)  # 94.1.2: re-explore first
+        return events
 
     # --- lifecycle ----------------------------------------------------------
     def _resolve_task(self, data: Path) -> str:
@@ -496,6 +522,13 @@ deterministic run, so per-seed results are bit-identical to the serial
             "ladder_svg": (svg_ladder_curve(
                 entries, summary.get("curriculum", {}).get("levels"))
                 if summary.get("curriculum") else None),
+            # SPEC.md 94.2.2 (v0.80): the live-steering effects — the
+            # best-score curve with one marker per steer() event (94.1.1)
+            # + the measured effect windows (94.1.5). None on runs with no
+            # live steering (the pre-v0.80 result dict stays byte-identical)
+            "steering_svg": (svg_steering_curve(
+                entries, summary.get("steering_events"))
+                if summary.get("steering_events") else None),
             # B2 (SPEC.md 54.2): the wall-time cost strip — the baseline's
             # train time (the first baseline log row) + one segment per
             # update with a finite train time

@@ -106,6 +106,8 @@ from .steering import (  # 59 (v0.45): parameters interpreted + modified
     manual_spec,
     parameter_inspection,
     train_manual,
+    best_score_curve,   # 94.1.5 (v0.80): the steering best-score curve
+    effect_windows,    # 94.1.5 (v0.80): the per-event effect windows
 )
 from .whatif import (  # 60 (v0.46): parameters what-iffed + compared
     fingerprint_diff,
@@ -321,8 +323,8 @@ from .adapt import (  # SPEC.md 93.3 (v0.79, A83): the transfer core
 
 # SPEC.md 33.1 (C1): single version source — must equal pyproject.toml's
 # [project].version (enforced by the A23 test); one step per feature round
-# (v0.79 ⇒ 0.79.0, M82, SPEC.md 93)
-__version__ = "0.79.0"
+# (v0.80 ⇒ 0.80.0, M83, SPEC.md 94)
+__version__ = "0.80.0"
 
 __all__ = [
     "AutoRefineEnv",
@@ -368,6 +370,8 @@ __all__ = [
     "manual_spec",
     "parameter_inspection",
     "train_manual",
+    "best_score_curve",
+    "effect_windows",
     "whatif_preview",
     "spec_fingerprint",
     "fingerprint_diff",

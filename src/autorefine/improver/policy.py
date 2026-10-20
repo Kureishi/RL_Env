@@ -8,7 +8,8 @@ from typing import Any
 
 import numpy as np
 
-from .actions import SEARCH_FIELDS, mutate_spec_dict, uniform_random_spec
+from .actions import (FIELD_NAMES, SEARCH_FIELDS, mutate_spec_dict,
+                      uniform_random_spec)
 
 K_RESTART_AFTER = 5  # consecutive non-improvements before a uniform restart
 REFINE_STEPS = 2  # extra mutations in the same field after a success
@@ -25,6 +26,30 @@ class SearchPolicy:
         self.refine_left = 0
         self.last_field: str | None = None
         self._started = False
+
+    # --- live steering (SPEC.md 94.1.2, v0.80) --------------------------------
+    def reset_field(self, field: str) -> None:
+        """SPEC.md 94.1.2 (v0.80): drop this field's per-field tracking —
+        when it is the current refinement target (``last_field``), the
+        refine queue clears (``last_field = None``, ``refine_left = 0``),
+        so a live steering change ends the old field's refinement run and
+        the search re-picks fields from the pool (94.1.4). A field the
+        policy never tracks (outside ``SEARCH_FIELDS``, e.g. ``knn_k`` —
+        the 25.7 exclusion) is a legal no-op: there is nothing of its to
+        reset (the pre-v0.45 pin path already tolerated such rules).
+
+        ``fail_streak`` is loop-level, not per-field, and is untouched
+        (resetting it would trigger an unwanted evolutionary restart).
+        An unknown field (outside the spec registry, ``FIELD_NAMES``) is
+        a `ValueError` (fail loud, the 59.2.1 style).
+        """
+        if field not in FIELD_NAMES:
+            raise ValueError(
+                f"search reset_field: {field!r} is not a spec field "
+                f"(available: {', '.join(FIELD_NAMES)}) (SPEC.md 94.1.2)")
+        if field in SEARCH_FIELDS and self.last_field == field:
+            self.last_field = None
+            self.refine_left = 0
 
     def propose(self, env_state: dict[str, Any]) -> dict:
         """Consume the previous step's outcome, then propose a candidate spec."""

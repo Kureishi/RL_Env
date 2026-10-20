@@ -2798,6 +2798,70 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     return 0 if result["passed"] else 2
 
 
+def _steer_value_cli(v) -> str:
+    """SPEC.md 94.1.7 (v0.80): one steering value as CLI text (cp1252-
+    safe) — a list/tuple is comma-joined, `None` is the dash (the 57.2
+    value-key convention, 30.2)."""
+    if v is None:
+        return "-"
+    if isinstance(v, (list, tuple)):
+        return ", ".join(str(x) for x in v)
+    return str(v)
+
+
+def _cmd_report_steer(args, summary: dict, entries, run_dir: Path) -> int:
+    """SPEC.md 94.1.7 (v0.80): ``report --run DIR --steer`` — the measured
+    effect of every live steering event (94.1.1) of the run: one row per
+    event (verb, field, before -> after, the experiment it followed, and
+    the pre / post / delta effect windows over the run's best-score
+    curve, 94.1.5).
+
+    Human form (default): an ASCII table (cp1252-safe: ``->`` and
+    ``delta`` — no Unicode). ``--json``: the pure 94.1.5 effect-row
+    list on stdout (sorted keys). A run with no live steering events
+    (the ``steering_events`` summary key absent, 94.1.6) or no scored
+    rows is rc 1 with a stderr hint — the view is for steered runs.
+    rc 0 on success.
+    """
+    from .steering import best_score_curve, effect_windows
+    events = summary.get("steering_events") or []
+    if not events:
+        print("no live steering events in this run: the --steer view "
+              "reports the effect of mid-run steering changes, and this "
+              "run was not steered mid-run (the app's 'Steer now' panel "
+              "or AutoRefineEnv.steer records them) (SPEC.md 94.1.7)",
+              file=sys.stderr)
+        return 1
+    curve = best_score_curve(entries)
+    if not curve:
+        print("no scored rows in the experiment log — nothing to measure "
+              "a steering effect against (SPEC.md 94.1.7)", file=sys.stderr)
+        return 1
+    try:
+        rows = effect_windows(curve, events)
+    except ValueError as exc:
+        print(str(exc).strip(), file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(rows, indent=2, sort_keys=True))
+        return 0
+    print(f"\nsteering effects ({len(rows)} event"
+          f"{'s' if len(rows) != 1 else ''} in this run)")
+    print(f"  {'exp':>4s}  {'steering':<38s}  {'pre':>6s}  {'post':>6s}  "
+          f"{'delta':>7s}  direction")
+    for row in rows:
+        if row["field"] is None:  # a 'clear' event (94.1.1)
+            what = "clear (all rules)"
+        else:
+            what = (f"{row['verb']} {row['field']} "
+                    f"{_steer_value_cli(row['before'])} -> "
+                    f"{_steer_value_cli(row['after'])}")
+        print(f"  {row['at_experiment']:4d}  {what:<38s}  "
+              f"{row['pre_mean']:6.2f}  {row['post_mean']:6.2f}  "
+              f"{row['delta']:+7.2f}  {row['direction']}")
+    return 0
+
+
 def _cmd_report_nonlinearity(args, summary: dict, entries,
                              run_dir: Path) -> int:
     """SPEC.md 82.5 (v0.68): the ``report --nonlinearity`` human view —
@@ -2856,7 +2920,7 @@ def _cmd_report(args: argparse.Namespace) -> int:
                 ("trace", "--trace"), ("importance", "--importance"),
                 ("certificate", "--certificate"), ("fmt", "--format"),
                 ("user", "--user"), ("decision", "--decision"),
-                ("nonlinearity", "--nonlinearity")):
+                ("nonlinearity", "--nonlinearity"), ("steer", "--steer")):
             if getattr(args, flag, None) not in (None, False, []):
                 print(f"--backtest and {why} are mutually exclusive "
                       f"(SPEC.md 89.9)", file=sys.stderr)
@@ -2921,6 +2985,26 @@ def _cmd_report(args: argparse.Namespace) -> int:
                   "--json/--history/--what-if/--project/--trace/--benchmark "
                   "(SPEC.md 44.2.2)", file=sys.stderr)
             return 1
+    # SPEC.md 94.1.7 (v0.80): --steer is the per-run live-steering effects
+    # view — the measured effect of the run's mid-run steering events
+    # (94.1.1) over the best-score curve (94.1.5). It shares --json (the
+    # machine form; the --benchmark/--history precedent) but is mutually
+    # exclusive with the other human views and with --history (they are
+    # disjoint renderings of the same run data).
+    if getattr(args, "steer", False):
+        if args.history:
+            print("--steer and --history are mutually exclusive "
+                  "(SPEC.md 94.1.7)", file=sys.stderr)
+            return 1
+        for flag, why in (
+                ("what_if", "--what-if"), ("project", "--project"),
+                ("trace", "--trace"), ("benchmark", "--benchmark"),
+                ("importance", "--importance"),
+                ("certificate", "--certificate")):
+            if getattr(args, flag, None):
+                print(f"--steer and {why} are mutually exclusive "
+                      f"(SPEC.md 94.1.7)", file=sys.stderr)
+                return 1
     # SPEC.md 56.1.1 (v0.42): --certificate is a human view — the
     # provenance card on stdout + the cover in report.html (with --html) —
     # mutually exclusive with the machine path (--json) and --history (it
@@ -3008,6 +3092,12 @@ def _cmd_report(args: argparse.Namespace) -> int:
     # identical) report path.
     if getattr(args, "nonlinearity", False):
         return _cmd_report_nonlinearity(args, summary, entries, run_dir)
+    # SPEC.md 94.1.7 (v0.80): the live-steering effects — one row per
+    # mid-run steering event (94.1.1) with its measured effect window
+    # (94.1.5); human table by default, --json for the pure effect-row
+    # list. Dispatches before the default (byte-identical) report path.
+    if getattr(args, "steer", False):
+        return _cmd_report_steer(args, summary, entries, run_dir)
     # SPEC.md 56.1.1 (v0.42): the provenance certificate — the text card on
     # stdout + (with --html) the cover block in report.html. The payload is
     # pure over the run's identity + the env facts (56.1); `target` comes
@@ -4443,6 +4533,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_rep.add_argument("--importance-repeats", type=int, default=5,
                        help="with --importance: shuffles per column "
                             "(default 5, SPEC.md 44.2)")
+    p_rep.add_argument("--steer", action="store_true",
+                       help="v0.80 (SPEC.md 94.1.7): the live-steering "
+                            "effects — one row per mid-run steering change "
+                            "(verb, field, before -> after, the experiment "
+                            "it followed, and the pre/post/delta effect "
+                            "window over the run's best-score curve); the "
+                            "app's 'Steer now' panel records the events "
+                            "mid-run; mutually exclusive with "
+                            "--history/--what-if/--project/--trace/"
+                            "--benchmark/--importance/--certificate; "
+                            "--json for the machine form; informational, rc 0")
     p_rep.add_argument("--certificate", action="store_true",
                        help="v0.42 (SPEC.md 56.1): the provenance certificate "
                             "— the text card on stdout (config hash, version, "

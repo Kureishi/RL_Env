@@ -476,6 +476,88 @@ class AutoRefineEnv:
             return ModelSpec.from_dict(base)
         return DEFAULT_SPEC
 
+    def steer(self, pin=None, bias=None, constrain=None,
+              clear: bool = False) -> list[dict]:
+        """SPEC.md 94.1.3 (v0.80): **live steering** — change the
+        human-in-the-loop rules (59.2) *while the loop is running*.
+
+        Exactly one (or more) of ``pin=(field, value)``,
+        ``bias=(field, value)``, ``constrain=(field, [values])``, or
+        ``clear=True``; a call with none is a `ValueError` (a silent
+        no-op would be a bug, not a feature). Each change is applied
+        through the 59.2 builders (registry validation, fail loud —
+        59.2.1), then **recorded** as one history event (94.1.1) with
+        ``at_experiment = bm.used_experiments`` (the 1-based experiment
+        count the change followed). The event's ``before`` is the
+        field's previous rule value (``None`` where there was none);
+        ``after`` is the value actually stored (the validator's output).
+
+        ``clear=True`` first: it removes every rule (one ``clear``
+        event whose ``before`` is the removed rule set) while keeping
+        the history — the log of changes is never rewritten. The new
+        state takes effect at the *next* ``step()`` (the
+        ``apply_steering`` site, 59.2.2) — the Stop-flag precedent
+        (51.2.2): a GIL-atomic attribute write the worker reads between
+        experiments. Returns the JSON-safe event dicts (one per change,
+        in application order). Pre-run rules (the constructor, the CLI,
+        the app's Setup panel) never call this — only ``record()`` via
+        this method appends history, which is what keeps the
+        ``steering_events`` summary key absent on un-steered runs
+        (94.1.6, the A49/A84 pin).
+        """
+        state = self.steering or SteeringState()
+        exp = int(self.bm.used_experiments)
+        n_before = len(state.history)
+        if clear:
+            state = state.record(
+                None, "clear",
+                {"pins": [list(p) for p in state.pins],
+                 "biases": [list(p) for p in state.biases],
+                 "constraints": [[f, list(vs)] for f, vs in
+                                 state.constraints]},
+                None, exp)
+            state = SteeringState(history=state.history)  # rules gone
+        if pin is not None:
+            try:
+                f, v = pin
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"steer(pin=...): pin must be a (field, value) pair, "
+                    f"got {pin!r} (SPEC.md 94.1.3)") from exc
+            before = dict(state.pins).get(f)
+            new = state.pin(f, v)
+            after = dict(new.pins)[f]  # the stored (validated) value
+            state = new.record(f, "pin", before, after, exp)
+        if bias is not None:
+            try:
+                f, v = bias
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"steer(bias=...): bias must be a (field, value) pair, "
+                    f"got {bias!r} (SPEC.md 94.1.3)") from exc
+            before = dict(state.biases).get(f)
+            new = state.bias(f, v)
+            after = dict(new.biases)[f]
+            state = new.record(f, "bias", before, after, exp)
+        if constrain is not None:
+            try:
+                f, vs = constrain
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"steer(constrain=...): constrain must be a "
+                    f"(field, [values]) pair, got {constrain!r} "
+                    f"(SPEC.md 94.1.3)") from exc
+            before = dict(state.constraints).get(f)
+            new = state.constrain(f, vs)
+            after = list(dict(new.constraints)[f])
+            state = new.record(f, "constrain", before, after, exp)
+        if not clear and pin is None and bias is None and constrain is None:
+            raise ValueError(
+                "steer(): nothing to do — pass pin=, bias=, constrain= "
+                "or clear=True (SPEC.md 94.1.3) ")
+        self.steering = state
+        return [dict(e) for e in state.history[n_before:]]
+
     # --- lifecycle ----------------------------------------------------------
     def reset(self) -> dict:
         # a reset starts a fresh episode (R5): clear all per-run state so the
@@ -1147,6 +1229,14 @@ class AutoRefineEnv:
         # runs (the pre-v0.72 key set stays intact)
         if self.prior is not None:
             summary["from_prior_run"] = self.prior.source_run
+        # SPEC.md 94.1.6 (v0.80): the live-steering events — additive
+        # *conditional* key, present only when steer() actually ran
+        # mid-run (record() is the only history writer, 94.1.1): pre-run
+        # rules (CLI / the app's Setup panel) leave it absent, so the
+        # pre-v0.80 summary key set stays intact (the A49/A84 pin)
+        if self.steering is not None and self.steering.history:
+            summary["steering_events"] = [
+                dict(e) for e in self.steering.history]
         self.memory.save_summary(summary)
         # SPEC.md 38.1 (v0.24, T1): the run registry — one appended entry
         # per finished run (recovery-safe, 38.1.4); the same wall seconds

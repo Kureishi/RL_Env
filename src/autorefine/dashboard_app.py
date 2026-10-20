@@ -33,6 +33,8 @@ from autorefine import (
     RLRunner,               # 68.1 (v0.54, A58): the RL loop in the dashboard
     RLMultiRunner,          # 68.1.4 (v0.54): the multi-task RL transfer
     describe_policy,        # 68.2.2 (v0.54): the policy preview card
+    best_score_curve,       # 94.1.5 (v0.80): the steering best-score curve
+    effect_windows,         # 94.1.5 (v0.80): the per-event effect windows
 )
 from autorefine.improver.rl_policy import policy_from_bytes  # 68.2.1 (v0.54)
 from autorefine.finetune import load_checkpoint  # 80 (v0.66): uploaded model
@@ -508,6 +510,68 @@ def _svg_block(title: str, html) -> None:
     else:
         st.caption(f"{title}: plot unavailable — the renderer returned "
                    "no complete SVG")
+
+
+def _steer_live(record: dict) -> None:
+    """SPEC.md 94.2.1 (v0.80): the live "Steer now" panel — apply a
+    steering change to the running loop (94.1.3/94.1.4) from the Run
+    tab. Only a live DashboardRunner (a run in progress) has ``steer``
+    — the RL runner does not (68.1), so the panel is absent there.
+    Each change is named in the confirmation caption (which
+    field/value, at which experiment); a rejected change (unknown
+    field or value) is an error caption, never a silent skip."""
+    runner = record.get("runner")
+    if runner is None or not hasattr(runner, "steer"):
+        return
+    with st.expander("Steer now — change the search while it runs",
+                     expanded=False):
+        st.caption(
+            "Apply a steering change to the running loop — the changed "
+            "field is re-explored first on the next experiments. The "
+            "effect of each change is measured and shown in the result "
+            "view when the run finishes.")
+        _lv = st.selectbox(
+            "Verb", ("pin", "bias", "constrain", "clear"),
+            key="stg_live_verb")
+        if _lv != "clear":
+            _f = st.selectbox("Field", list(SPEC_FIELDS),
+                              key="stg_live_field")
+            _fsp = list(SPEC_FIELDS[_f].space)
+            _flab = [_spec_v(v) for v in _fsp]
+            if _lv == "constrain":
+                _sel = st.multiselect(
+                    "Allowed values", _flab, default=_flab[:1],
+                    key=f"stg_live_vals_{_f}")
+                _val = [_fsp[_flab.index(x)] for x in _sel] or _fsp[:1]
+            else:
+                _sel = st.selectbox("Value", _flab,
+                                    key=f"stg_live_val_{_f}")
+                _val = _fsp[_flab.index(_sel)]
+        if st.button("Apply steering change", key="stg_live_apply"):
+            try:
+                if _lv == "clear":
+                    events = runner.steer(clear=True)
+                elif _lv == "pin":
+                    events = runner.steer(pin=(_f, _val))
+                elif _lv == "bias":
+                    events = runner.steer(bias=(_f, _val))
+                else:
+                    events = runner.steer(constrain=(_f, list(_val)))
+                for e in events:
+                    if e.get("field") is None:
+                        st.success(
+                            f"cleared all steering rules after "
+                            f"experiment {e['at_experiment']} — the "
+                            f"loop runs free")
+                    else:
+                        st.success(
+                            f"{e['verb']} `{e['field']}` "
+                            f"{_spec_v(e['before'])} -> "
+                            f"{_spec_v(e['after'])} after experiment "
+                            f"{e['at_experiment']} — the improver "
+                            f"re-explores it first")
+            except ValueError as exc:
+                st.error(str(exc))
 
 
 def _svg_pair(left: tuple | None, right: tuple | None) -> None:
@@ -1227,6 +1291,42 @@ def _render_result(res: dict) -> None:
             st.caption(_sw["when_to_distrust"])
             st.caption(_sw["where_it_fails"])
             st.caption("next: " + _sw["next_step"])
+            # SPEC.md 94.2.2 (v0.80): the live-steering effects — the
+            # best-score curve with a marker per mid-run steering change
+            # (94.1.1) + one row per event with its measured effect
+            # (94.1.5). Renders nothing when the run was not steered
+            # mid-run (the pre-v0.80 result view stays byte-identical).
+            _st_ev = _sw_summary.get("steering_events")
+            if _st_ev:
+                if res.get("steering_svg"):
+                    _svg_block("Steering effects", res["steering_svg"])
+                _st_curve = best_score_curve(_sw_entries)
+                try:
+                    _st_rows = effect_windows(_st_curve, _st_ev)
+                except ValueError as exc:
+                    st.caption(f"steering effect unavailable: {exc}")
+                    _st_rows = None
+                if _st_rows:
+                    st.dataframe([
+                        {
+                            "exp": r["at_experiment"],
+                            "steering": (f"{r['verb']} {r['field']}"
+                                         if r["field"] is not None
+                                         else "clear (all rules)"),
+                            "before": _spec_v(r["before"]),
+                            "after": _spec_v(r["after"]),
+                            "pre": round(r["pre_mean"], 4),
+                            "post": round(r["post_mean"], 4),
+                            "delta": round(r["delta"], 4),
+                            "direction": r["direction"],
+                        }
+                        for r in _st_rows
+                    ], width="stretch")
+                    st.caption(
+                        f"{len(_st_rows)} steering change(s) mid-run — "
+                        "each row shows the score before (pre) and after "
+                        "(post) the change took effect, and its measured "
+                        "delta")
     if res["verdict"] == "PASS":
         st.success(
             f"PASS: final **{res['final_best_score']:.2f}** ≥ target "
@@ -3188,6 +3288,8 @@ def main() -> None:
                     ".")
             if stop_pressed:
                 rec["stop"]["flag"] = True
+            # SPEC.md 94.2.1 (v0.80): the live "Steer now" panel
+            _steer_live(rec)
             _drain_live(rec, narrate, stream_mode=live_mode)
             if live_mode and stream_tick_due(rec):  # 55.1: keep ticking
                 st.rerun()

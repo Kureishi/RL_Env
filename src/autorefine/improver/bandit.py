@@ -45,6 +45,24 @@ class BanditPolicy:
                     self.trials[field] = int(slot.get("trials", 0))
                     self.wins[field] = float(slot.get("wins", 0.0))
 
+    # --- live steering (SPEC.md 94.1.2, v0.80) --------------------------------
+    def reset_field(self, field: str) -> None:
+        """SPEC.md 94.1.2 (v0.80): zero a field's trial/win credit — the
+        changed field becomes **cold-start** again (zero trials ⇒ infinite
+        UCB), so the bandit re-proposes it first: the immediate
+        re-exploration a live steering change asks for (94.1.4).
+
+        The field must be in the bandit's space (``FIELD_NAMES``, 36.2);
+        an unknown field is a `ValueError` (fail loud, the 59.2.1 style).
+        All other fields' credit is untouched (G2).
+        """
+        if field not in self.trials:
+            raise ValueError(
+                f"bandit reset_field: {field!r} is not a bandit field "
+                f"(available: {', '.join(self.trials)}) (SPEC.md 94.1.2)")
+        self.trials[field] = 0
+        self.wins[field] = 0.0
+
     # --- feedback --------------------------------------------------------------
     def _update(self, env_state: dict[str, Any]) -> None:
         """Credit the fields mutated in the previous step with its outcome."""

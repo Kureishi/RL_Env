@@ -5,7 +5,7 @@ The improver loop proposes model-configuration changes, trains, evaluates on
 splits it never saw, records the outcome, and proposes the next change — all
 within a hard budget, fully reproducible, NumPy-only.
 
-**Current version: 0.79.0.** Input modalities: CSV, plus labelled
+**Current version: 0.80.0.** Input modalities: CSV, plus labelled
 image / audio / text directories via `autorefine fit --data PATH`.
 
 **Spec (source of truth):** [SPEC.md](SPEC.md)
@@ -395,6 +395,7 @@ carries the full detail; this table is the index.
 | Quickstart in the UI | The same four steps in the README, the CLI, and the app's first screen — one source | `quickstart` | 65 |
 | Transfer learning (`adapt`) | Adapt a champion to similar new data — before/after scores, verdict, saved as a new run | `adapt --run DIR --data new.csv` (or the latest champion); `--dry-run` for the plan | 93.3 |
 | Conformal calibration + OOD | "How sure?" per-row prediction sets / intervals; "is this in my world?" OOD flag + familiarity | `predict --run DIR --csv rows.csv --cal --ood` | 93.1–93.2 |
+| Live steering (v0.80) | Pin / bias / constrain the search *while it runs* — the changed field is re-explored first, and each change's measured effect (pre/post/delta) is logged and reported | dashboard ("Steer now"); `AutoRefineEnv.steer(pin=(...))`; `report --run DIR --steer` (ASCII table; `--json` for the rows) | 94 |
 
 ## Run artifacts
 
