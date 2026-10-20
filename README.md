@@ -5,8 +5,9 @@ The improver loop proposes model-configuration changes, trains, evaluates on
 splits it never saw, records the outcome, and proposes the next change — all
 within a hard budget, fully reproducible, NumPy-only.
 
-**Current version: 0.81.0.** Input modalities: CSV, plus labelled
-image / audio / text directories via `autorefine fit --data PATH`.
+**Current version: 0.83.0.** Input modalities: CSV and JSONL records,
+plus labelled image / audio / text / signal / MIDI / point-cloud /
+video / mixed directories — all via `autorefine fit --data PATH`.
 
 **Spec (source of truth):** [SPEC.md](SPEC.md)
 
@@ -83,7 +84,10 @@ python -m autorefine fit --data examples/data/image_shapes --target 90.0
 # upload the CSV or directory, watch every experiment live, view the plots, download the model
 python -m autorefine dashboard          # or: streamlit run src/autorefine/dashboard_app.py
 
-# run the test suite (acceptance pins A1-A55)
+# check the environment (v0.29): version / numpy / extras / a micro smoke train
+python -m autorefine doctor
+
+# run the test suite (per-round acceptance pins — the SPEC §0 index)
 python -m pytest tests/
 ```
 
@@ -174,19 +178,8 @@ In v0.4 the bandit mutates by *local* (neighborhood) moves by default —
 `BanditPolicy(seed, mode="local")`; `mode="uniform"` restores the v0.3
 proposal stream — and its field selection is conditioned on the best
 spec's family (a tree best only tries the 4 fields trees actually use,
-SPEC.md 18.1/18.2):
-
-```python
-from autorefine import AutoRefineEnv, Budget, BanditPolicy
-
-env = AutoRefineEnv(task="parity-v1", seed=7,
-                    budget=Budget(max_experiments=10, max_wall_seconds=600,
-                                  max_train_seconds=30))
-policy = BanditPolicy(seed=7)
-state = env.reset()
-while not env.done:
-    state, reward, done, info = env.step(policy.propose(state))
-```
+SPEC.md 18.1/18.2). Same `propose` contract as `SearchPolicy` — drive it
+exactly like the first example above, with `policy = BanditPolicy(seed=7)`.
 
 ### Search quality (v0.4)
 
@@ -200,16 +193,12 @@ beyond 5% of score. The constructor's defaults stay legacy (v0.3 rule);
 command uses it by default (`--search-quality legacy` opts out):
 
 ```python
-from autorefine import AutoRefineEnv, Budget, BanditPolicy, search_quality_v04
+from autorefine import AutoRefineEnv, Budget, search_quality_v04
 
 env = AutoRefineEnv(task="parity-v1", seed=7,
                     budget=Budget(max_experiments=10, max_wall_seconds=600,
                                   max_train_seconds=30),
-                    **search_quality_v04())  # ci_blocks=8, z=1.0, η=0.5, P_GEN=0.5
-policy = BanditPolicy(seed=7)   # v0.4: local mutations + family-conditioned fields
-state = env.reset()
-while not env.done:
-    state, reward, done, info = env.step(policy.propose(state))
+                    **search_quality_v04())   # ci_blocks=8, z=1.0, η=0.5, P_GEN=0.5
 # info["effective_score"], info["se"] expose the acceptance quantities;
 # summary.json gains baseline_effective / final_best_effective + the active preset
 ```
@@ -223,11 +212,8 @@ Same `propose` contract as `SearchPolicy`:
 ```python
 from autorefine import AutoRefineEnv, Budget, MetaRLPolicy, train_policy
 
-env = AutoRefineEnv(task="sine-v1", seed=7,
-                    budget=Budget(max_experiments=10, max_wall_seconds=600,
-                                  max_train_seconds=30))
-policy = MetaRLPolicy(seed=7)
-report = train_policy(env, policy, n_episodes=3, verbose=True)
+env = AutoRefineEnv(task="sine-v1", seed=7, budget=Budget(10, 600, 30))
+report = train_policy(env, MetaRLPolicy(seed=7), n_episodes=3, verbose=True)
 # report -> {"episode_returns": [...], "policy_updates": 3, ...}
 ```
 
@@ -242,8 +228,7 @@ over the tasks in `task_names` order:
 ```python
 from autorefine import AutoRefineEnv, Budget, MetaRLPolicy, train_multi_policy
 
-envs = [AutoRefineEnv(task=name, seed=7,
-                      budget=Budget(3, 600, 30), runs_dir=tmp_dir / name)
+envs = [AutoRefineEnv(task=name, seed=7, budget=Budget(3, 600, 30))
         for name in ("sine-v1", "parity-v1", "cartpole-v1")]
 policy = MetaRLPolicy(seed=7, task_names=["sine-v1", "parity-v1", "cartpole-v1"])
 report = train_multi_policy(envs, policy, episodes_per_task=2)
@@ -269,23 +254,9 @@ pip install gymnasium
 python examples/gym_dqn.py --task sine-v1 --experiments 5 --seed 7
 ```
 
-```python
-from autorefine import Budget
-from autorefine.gym import AutoRefineGymEnv
-from gym_dqn import DQNAgent          # examples/gym_dqn.py
-
-env = AutoRefineGymEnv(task="sine-v1", seed=7,
-                       budget=Budget(5, 600, 30), runs_dir="runs")
-obs, _ = env.reset(seed=7)
-agent = DQNAgent(obs.shape[0], env.action_space.n, seed=7)
-while True:
-    a = agent.act(obs)
-    next_obs, r, terminated, truncated, _ = env.step(a)
-    agent.step_learning(obs, a, r, next_obs, terminated)   # replay + update
-    obs = next_obs
-    if terminated:
-        break
-```
+The script is the full walkthrough (Q-network, replay, ε-greedy); it
+imports nothing from AutoRefine except `AutoRefineGymEnv` and the two
+spaces.
 
 ### Gymnasium adapter (v0.2, optional dependency)
 
@@ -331,15 +302,19 @@ changes is the *space* it searches and the *surfaces* that explain it.
 - **Tasks** — `cartpole-v1` (mean episode survival), `sine-v1` (100·R²,
   regression), `gridnav-v1` (navigation policy), `parity-v1` (noisy 4-bit
   XOR — linear models provably can't solve it; an MLP reaches the ≈75 Bayes
-  ceiling), `csv` (your own CSV), and labelled image / audio / text
-  directories.
+  ceiling), `sequence-motif-v1` (temporal motif — drives the `conv1d` /
+  `rnn` families), `medical-v1` / `finance-v1` (domain packs), `csv`
+  (your own CSV), and labelled image / audio / text / signal / MIDI /
+  point-cloud / video / mixed directories plus JSONL records (SPEC §92).
 - **Model families** — `mlp` (depth 0..3; 0 = linear), `tree` (bagged
   CART), `boost` (gradient-boosted CART — clearly stronger than bag on
-  regression), `knn` (memorized k-NN), and `convnet` (grid tasks only:
-  image pixels and audio spectrograms; SPEC §25).
+  regression), `knn` (memorized k-NN), `convnet` (grid tasks: image
+  pixels and audio spectrograms; SPEC §25), `gp` (Gaussian process) and
+  `gam` (generalized additive model; SPEC §75), and the temporal pair
+  `conv1d` / `rnn` (sequences, signals, video; SPEC §83).
 
 **Feature → command.** Every row is opt-in or additive — with the defaults
-off, every pinned sequence (A1–A55) stays byte-identical. [SPEC.md](SPEC.md)
+off, every pinned sequence (SPEC §0) stays byte-identical. [SPEC.md](SPEC.md)
 carries the full detail; this table is the index.
 
 | Feature | What it does | How to use it | SPEC § |
@@ -383,7 +358,7 @@ carries the full detail; this table is the index.
 | Log-loss metric | Softmax CSV scored by calibrated log-loss instead of accuracy | `fit --metric logloss` | 46.1 |
 | Portfolio mode | One shared budget across several CSV datasets, each gated on its own | `fit --tasks a.csv,b.csv` | 46.3 |
 | Ergonomics | `--config FILE` on any command, `--quiet`, `--version`, help examples + exit codes | (flags) | 47 |
-| Share bundle | One deterministic self-contained .zip of a finished run | `share --run DIR` | 47.4, 50.2 |
+| Share bundle | One deterministic self-contained .zip of a finished run | `share --run DIR`; `export --run DIR` (portable bundle) | 47.4, 50.2 |
 | Beginner onboarding | Guided setup, knob glossary, presets, a "what happened" narrative, narrate toggle | dashboard | 48 |
 | Advanced analysis | Interactive what-if re-gating, editable best-spec re-score, policy A/B | dashboard | 49 |
 | Tabs + live control | Five tabs; Stop mid-run; live rejection reasons; keyboard + colorblind-safe palettes | dashboard | 51 |
@@ -399,6 +374,29 @@ carries the full detail; this table is the index.
 | Report formats + guides | Markdown / plain-text / PDF; a "what this model does" user guide; the go/no-go decision artifact | `report --format md|txt|pdf`; `report --user`; `report --decision` | 63 |
 | Benchmark report | Cross-run leaderboard, generalization matrix, best-score trend; ± uncertainty on every headline | `report --benchmark` | 64 |
 | Quickstart in the UI | The same four steps in the README, the CLI, and the app's first screen — one source | `quickstart` | 65 |
+| Decision robustness | The verdict shows its own seed band — "is the improvement real?" | dashboard | 66 |
+| Self-improving RL | Policy persistence, exploration, and reuse across `rl` runs | `run --policy rl` | 67 |
+| RL loop in the dashboard | RL episodes and policy learning visible and steered in the app | dashboard | 68 |
+| Workflow efficiency | Result-view tabs + the workflow strip (finished is all-green) | dashboard | 69, 76–77 |
+| Hot-path performance | Faster training/eval hot paths (two optimization rounds) | (automatic) | 70, 74 |
+| Visuals interface | Card layout, spacing, side-by-side charts | dashboard | 71 |
+| RL stability | Task-aware action masking + no-op exclusion — the learning-collapse fixes | `run --policy rl` | 72–73 |
+| Modeling v0.61 | `adamw` optimizer, three LR schedules, `gp` + `gam` families | (automatic) | 75 |
+| Modeling v0.64 | Fine-pattern capture: Fourier features, GAM interactions, GP length scale | (automatic) | 78 |
+| Data-utilization diagram | A diagram of how your data flows through the chosen model | dashboard | 79 |
+| Fine-tuning | Start a new search from a previously trained model (weights + spec) | dashboard | 80 |
+| Model comparison | Dynamic multi-model graphics across all metrics | dashboard | 81 |
+| Nonlinearity intelligence | Functionality + interconnection surfaces for nonlinear tasks | `report`; dashboard | 82 |
+| Native temporal models | Sequence layout, the `conv1d` / `rnn` families, the motif task | `run --task sequence-motif-v1` | 83 |
+| Sequential decision-making | Sample weights, the cartpole sim, AWR, learned-model MPC | (automatic) | 84 |
+| Sim-in-the-loop | The autonomous sequential improvement loop (train → act → learn) | (automatic) | 85 |
+| Transfer prior | A past run's learned field beliefs seed the next search | (automatic — belief prior) | 86 |
+| Plain-language entry | `ask "your goal"` resolves the recipe; `go` one command from data to verdict; `run --tour`; `card` model card | `ask`; `go`; `run --tour`; `card` | 87 |
+| Minimum input | Found data, a fair auto-target, reused runs, one-command hand-off | `go` | 88 |
+| Time-based ingestion | `feed` watches a CSV (drift-gated), `refresh` re-scores the champion, `datasets` lists snapshots, `schedule` N rounds, `ingest` merges dropped CSVs | `feed`; `refresh`; `datasets`; `schedule`; `ingest` | 89 |
+| On-demand UI | Upload fresh data, score/adapt the champion without retraining | dashboard | 90 |
+| GPU / acceleration | Dense parallelism + optional CuPy GPU backend (G2-safe) | `backend` | 91 |
+| More modalities | Signal / JSONL / MIDI / point-cloud / video / mixed labelled inputs | `fit --data DIR` | 92 |
 | Transfer learning (`adapt`) | Adapt a champion to similar new data — before/after scores, verdict, saved as a new run | `adapt --run DIR --data new.csv` (or the latest champion); `--dry-run` for the plan | 93.3 |
 | Conformal calibration + OOD | "How sure?" per-row prediction sets / intervals; "is this in my world?" OOD flag + familiarity | `predict --run DIR --csv rows.csv --cal --ood` | 93.1–93.2 |
 | Live steering (v0.80) | Pin / bias / constrain the search *while it runs* — the changed field is re-explored first, and each change's measured effect (pre/post/delta) is logged and reported | dashboard ("Steer now"); `AutoRefineEnv.steer(pin=(...))`; `report --run DIR --steer` (ASCII table; `--json` for the rows) | 94 |
@@ -420,48 +418,38 @@ Each run writes to `runs/<task>-seed<seed>-<timestamp>/`:
 
 ```
 src/autorefine/
-├── config.py          # ModelSpec (validated, hashed; mlp/tree/boost/knn/convnet families), Budget
-├── tasks/
-│   ├── base.py        # minimal Task protocol (make_dataset + score)
-│   ├── cartpole.py    # CartPoleV1: dynamics, reference controller, dataset
-│   ├── sine.py        # SineRegressionV1: function fitting (mse head)
-│   ├── gridnav.py     # GridNavV1: toroidal navigation policy
-│   ├── parity.py      # ParityTask (n_bits, p_flip) + Parity4V1 + parity_ceiling (v0.6)
-│   ├── csv.py         # CsvTask: user CSV data (v0.8; head/split inference, seed splits)
-│   ├── media.py       # shared labelled-directory rules for image/audio (v0.10)
-│   ├── images.py      # ImageTask: labelled image directory (v0.10; optional Pillow)
-│   ├── audio.py       # AudioTask: labelled audio directory, WAV/MP3 (v0.10; optional soundfile)
-│   └── __init__.py    # TASKS registry
-├── models/
-│   ├── mlp.py         # NumPy MLP (softmax + mse heads), pickle-free checkpoints
-│   ├── trees.py       # TreeEnsemble (bagged) + BoostingEnsemble (boosted, v0.5) CART
-│   ├── knn.py         # KNN: memorized-train-split k-NN family (v0.11)
-│   ├── convnet.py     # ConvNet: small NumPy convnet over grid features (v0.11)
-│   └── optimizers.py  # SGD / momentum / Adam
+├── config.py          # ModelSpec (validated, hashed), Budget, MODEL_FAMILIES
+├── tasks/             # base (the Task ABC) + 18 registered tasks: cartpole, sine,
+│                      #   gridnav, parity, csv, images, audio, text, signals, jsonl,
+│                      #   midi, pointcloud, graph, video, mixed, medical, finance,
+│                      #   sequence + shared media rules, the robust wrapper, TASKS
+├── models/            # mlp, trees (bagged + boosted), knn, convnet, conv1d, gp,
+│                      #   gam, rnn + shared feature layers + optimizers
+├── improver/          # meta_env (AutoRefineEnv), policy, bandit, actions,
+│                      #   catalog (registry-derived), specspace (the field
+│                      #   registry), curriculum, rl_policy
 ├── trainer.py         # deterministic training, mid-loop time cap, family dispatch
-├── evaluator.py       # holdout + gen scoring, block-bootstrap CI (v0.4), episodes
-├── improver/
-│   ├── meta_env.py    # AutoRefineEnv — reset()/step(); v0.4 CI/efficiency/gen-gap rule
-│   ├── policy.py      # v1 search: hill-climb + restarts + local refinement (v0.4)
-│   ├── bandit.py      # BanditPolicy: UCB over spec fields (v0.3; local/family-aware v0.4)
-│   ├── actions.py     # per-field mutation samplers (uniform + local modes, v0.4)
-│   ├── catalog.py     # discrete mutation catalog (77 actions, v0.11) + family-relevant fields
-│   ├── curriculum.py  # ParityCurriculum: adaptive-difficulty ladder (v0.6)
-│   └── rl_policy.py   # MetaRLPolicy: REINFORCE on the loop (masked v0.4; multi-task v0.6)
-├── pareto.py          # score-vs-train-time frontier (efficiency memory)
-├── gym.py             # optional Gymnasium adapter
+├── evaluator.py       # holdout + gen scoring, block-bootstrap CI, episodes
 ├── budget.py          # BudgetManager (experiments / wall time / train time)
+├── pareto.py          # score-vs-train-time frontier (efficiency memory)
 ├── memory.py          # JSONL log + artifact writers/readers
 ├── plotting.py        # hand-written ASCII/SVG charts + self-contained HTML report
-├── plugins.py         # entry-point plugin loader (v0.7)
-├── dashboard.py       # DashboardRunner: streamlit-free core of the v0.9 dashboard
+├── runconfig.py       # the canonical frozen RunConfig — the run's recipe
+├── quickstart.py      # the four-step onboarding: one home for README / CLI / app
+├── dashboard.py       # DashboardRunner: streamlit-free core of the GUI
 ├── dashboard_app.py   # Streamlit app (optional extra: pip install autorefine[gui])
-└── cli.py             # run / fit (v0.8) / report (--plot, --json, --html) / eval / plugins
+├── gym.py             # optional Gymnasium adapter
+├── plugins.py         # entry-point plugin loader (tasks / policies)
+├── cli.py             # the 29 subcommands — the feature table maps each to SPEC §
+└── (one feature module per SPEC round — transfer, steering, simulate,
+    reporting, audience, research, finetune, calibration, conformal, …)
 
 examples/
-├── gym_dqn.py         # DQN-style agent through the Gymnasium adapter (v0.7)
-├── tabular.py         # custom tabular task + improver run + >95% target gate (v0.7)
-└── make_sample_media.py  # synthesize sample tone/image directories for `fit` (v0.10)
+├── gym_dqn.py                 # DQN-style agent through the Gymnasium adapter
+├── tabular.py                 # custom tabular task + improver run + >95% target gate
+├── make_sample_media.py       # synthesize sample tone/image directories for `fit`
+├── make_sample_images_csv.py  # a sample image directory + its index.csv
+└── narrative.py               # the whole story in one screen
 ```
 
 ## Extending
@@ -511,4 +499,5 @@ All four paths are demonstrated by working, tested examples (SPEC.md 17/21.3):
   reusing the shared neural training loop verbatim); both reach 100 on the
   bundled tone and shape samples, and `eval`, the §19.3 ensemble, and the
   loop's `invalid_spec` rejection (SPEC.md 25.4) pick them up with no
-  protocol change (77 catalog actions; SPEC.md 25.5, A15).
+  protocol change (the catalog derives from the field registry;
+  SPEC.md 25.5, 36.2, A15).

@@ -1,8 +1,9 @@
 # AutoRefine — Spec for an Autonomous Iterative Model-Improvement Environment
 
-**Version:** 0.1 (draft for review)
+**Version:** living document — tracks `autorefine.__version__`; the §0
+acceptance index maps every round (M# → SPEC § → A# → test file)
 **Date:** 2026-08-23
-**Status:** Awaiting approval before implementation
+**Status:** approved; implemented round by round
 
 ---
 
@@ -103,6 +104,7 @@ numbers and carry none.)
 | M83 | v0.80   | 94     | A84 | tests/test_livesteer_v080.py |
 | M84 | v0.81   | 95     | A85 | tests/test_narrative_v081.py |
 | M85 | v0.82   | 96     | A86 | tests/test_pauseresume_v082.py |
+| M86 | v0.83   | 97     | A87 | tests/test_docs_v083.py |
 
 ---
 
@@ -9241,3 +9243,75 @@ budget, and trajectory all continue where the hold began. No new
 dependency, no new knob, no pinned surface touched; cross-process
 resume, mid-experiment pause, the RL loop, and the CLI are the
 explicit non-goals (96.2.6, 96.2.5).
+
+---
+
+## 97. v0.83 — Documentation agreement and succinctness (A87)
+
+### 97.1 Why
+
+The docs drifted from the code: the README's version line (stale by a
+round), its model-family list (five of nine), its task list (missing
+the temporal, domain, and v0.78 tasks), its modality line, its catalog
+count (77 of a registry-derived catalog), and its project layout
+(missing the field registry, quickstart, runconfig, and ~40 feature
+modules) all disagreed with `src/autorefine`; the feature table — the
+index — skipped rounds §66–§92; ten CLI subcommands (`ask`, `go`,
+`card`, `feed`, `refresh`, `datasets`, `schedule`, `ingest`,
+`backend`, `export`) had no README row; and the SPEC header still
+claimed "draft, awaiting approval". Nothing pinned any of it, so each
+round's ceremony could silently re-break it.
+
+### 97.2 Design
+
+One audit pass (README ↔ SPEC ↔ CLI ↔ code ↔ examples) produced the fix
+list; the README is the trim target, the SPEC gets surgical header
+edits only (its structure is test-pinned by A25 and the A1–A86
+citations). The fixes then become invariants: a new test pins the
+agreement surfaces — version line, SPEC-ref resolution, layout file
+existence, no stale literals, the one-home quickstart commands, the
+full family/task/command lists — so the next round's ceremony cannot
+silently drift them again (97.3). No code change, no new dependency,
+no pinned surface touched.
+
+### 97.3 Acceptance (A87)
+
+1. **A87.1 — version agreement.** The README's "Current version" line,
+   `pyproject.toml`, and `autorefine.__version__` all state the same
+   version (97.2).
+2. **A87.2 — SPEC refs resolve.** Every `SPEC §` / `SPEC.md NN`
+   reference in the README resolves to an existing SPEC section header
+   (97.2).
+3. **A87.3 — layout is real.** Every `*.py` file named in the README's
+   project-layout block exists in the repository (97.2).
+4. **A87.4 — no stale literals.** The README carries no stale
+   acceptance-range claim (no `A1-A<NN>` / `A1–A<NN>` range) and no
+   stale catalog count (no "77 catalog actions" / "(77 actions")
+   (97.2).
+5. **A87.5 — one home.** All four quickstart one-home commands
+   (`quickstart.quickstart_commands()`) appear in the README (the
+   `python -m autorefine …` and `autorefine …` spellings both count)
+   (97.2).
+6. **A87.6 — space is complete.** Every family in
+   `config.MODEL_FAMILIES` is named in the README's model-families
+   bullet, and every task registered in `tasks.TASKS` is named in the
+   README (97.2).
+7. **A87.7 — SPEC header.** The SPEC header no longer claims the
+   document is a draft awaiting approval (97.2).
+8. **A87.8 — commands are documented.** Every top-level CLI
+   subcommand (parsed from `cli.py`'s `add_parser` calls) is named in
+   the README (97.2).
+
+All in `tests/test_docs_v083.py`.
+
+### 97.4 Milestone (M86)
+
+**M86** — v0.83 "Documentation agreement and succinctness": the
+README, SPEC, CLI, and code agree on the version, the model space
+(nine families), the task space, the modalities, the catalog's
+provenance, and the project layout; the feature table indexes every
+round §18–§96 with its command; the ten previously undocumented
+subcommands have rows; the SPEC header states its living status; and
+`tests/test_docs_v083.py` (A87) pins all of it, so the per-round
+ceremony can no longer drift the docs silently. No code change, no
+new dependency, no pinned surface touched.

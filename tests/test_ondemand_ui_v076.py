@@ -16,7 +16,7 @@ rendered as a thin layer over new pure cores (23.1):
   * 90.5 — ``quality_events`` (the 89.1.3 event log the Adapt tab charts);
   * 90.6 — the Adapt tab (the sixth, appended-last tab; the first five
     render exactly as before; empty state before a finished run);
-  * 90.7 — acceptance: the version steps to ``0.82.0`` in both sources,
+  * 90.7 — acceptance: the version steps to ``0.83.0`` in both sources,
     the index row M79 resolves to this file, and the new exports land in
     ``autorefine.__all__``.
 
@@ -314,10 +314,10 @@ class TestCeremony:
     def test_version_steps_to_076_in_both_sources(self):
         init = (REPO / "src" / "autorefine" / "__init__.py").read_text(
             encoding="utf-8")
-        assert '__version__ = "0.82.0"' in init
-        assert 'version = "0.82.0"' in (
+        assert '__version__ = "0.83.0"' in init
+        assert 'version = "0.83.0"' in (
             REPO / "pyproject.toml").read_text(encoding="utf-8")
-        assert autorefine.__version__ == "0.82.0"
+        assert autorefine.__version__ == "0.83.0"
 
     def test_spec_section_and_index_row(self):
         spec = SPEC.read_text(encoding="utf-8")
