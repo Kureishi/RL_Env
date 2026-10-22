@@ -227,7 +227,7 @@ def _drive(args: argparse.Namespace, env: AutoRefineEnv) -> None:
                 epsilon_decay=getattr(args, "rl_epsilon_decay", 1.0))
         if not quiet:
             print(f"task    : {args.task}  (meta-RL, {args.rl_episodes} full-budget episodes"
-                  + (f", ε={policy.epsilon:g}" if policy.epsilon > 0.0 else "")
+                  + (f", eps={policy.epsilon:g}" if policy.epsilon > 0.0 else "")
                   + (
                       f" (loaded from {args.rl_load})"
                       if getattr(args, "rl_load", None) else ""))
@@ -4390,15 +4390,15 @@ def build_parser() -> argparse.ArgumentParser:
                        help="meta-RL: number of full-budget episodes to train for")
     p_run.add_argument("--rl-save", default=None, metavar="PATH",
                        help="v0.53 (SPEC.md 67.4): save the trained policy "
-                            "(learn → persist → reuse)")
+                            "(learn, persist, reuse)")
     p_run.add_argument("--rl-load", default=None, metavar="PATH",
                        help="v0.53 (SPEC.md 67.4): resume a policy saved with "
                             "--rl-save before training")
     p_run.add_argument("--rl-epsilon", type=float, default=0.0,
-                       help="v0.53 (SPEC.md 67.2): ε-greedy exploration in "
+                       help="v0.53 (SPEC.md 67.2): epsilon-greedy exploration in "
                             "[0, 1] (0 = pure softmax, the default)")
     p_run.add_argument("--rl-epsilon-decay", type=float, default=1.0,
-                       help="v0.53 (SPEC.md 67.2): per-episode ε decay "
+                       help="v0.53 (SPEC.md 67.2): per-episode epsilon decay "
                             "factor in (0, 1] (1.0 = no decay)")
     p_run.add_argument("--seed", type=int, default=7)
     p_run.add_argument("--experiments", type=int, default=30)
@@ -4677,7 +4677,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="v0.32 (SPEC.md 46.1): the CSV task metric — "
                             "accuracy (default, the §22.1 contract) or "
                             "logloss (softmax-head CSV files only; score = "
-                            "100·(1 − mean NLL/ln 2), clamped at 0)")
+                            "100*(1 - mean NLL/ln 2), clamped at 0)")
     p_fit.add_argument("--dry-run", dest="dry_run", action="store_true",
                        help="v0.26 (SPEC.md 40.1): resolve data -> task -> head -> "
                             "split and print the plan + wall-time estimate, then exit "
@@ -4687,7 +4687,7 @@ def build_parser() -> argparse.ArgumentParser:
                        metavar="NAME OP THRESHOLD",
                        help="v0.23 (SPEC.md 37.2): an acceptance objective, e.g. "
                             "'score>=95', 'train<=30', 'model<=100000' "
-                            "(repeatable); none → the §22.1 score gate")
+                            "(repeatable); none = the §22.1 score gate")
     p_fit.add_argument("--task", default="auto",
                        choices=("auto", "csv", "jsonl") + _DIR_TASKS,
                        help="v0.10 (SPEC.md 24.5; v0.78 92.1-92.7): force the "
@@ -4709,15 +4709,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_fit.add_argument("--rl-episodes", type=int, default=5,
                        help="meta-RL: number of full-budget episodes to train for")
     p_fit.add_argument("--rl-epsilon", type=float, default=0.1,
-                       help="v0.59 (SPEC.md 73.3): ε-greedy exploration in "
+                       help="v0.59 (SPEC.md 73.3): epsilon-greedy exploration in "
                             "[0, 1] for the meta-RL improver (default 0.1 — "
-                            "SPEC.md 73.9: ε=0 deadlocks the loop — the greedy "
+                            "SPEC.md 73.9: eps=0 deadlocks the loop — the greedy "
                             "policy re-proposes its initial action, the "
                             "duplicate-stall guard ends the episode, and the "
                             "policy never learns; pass --rl-epsilon 0 to "
                             "restore the pre-v0.59 pure-softmax path)")
     p_fit.add_argument("--rl-epsilon-decay", type=float, default=1.0,
-                       help="v0.59 (SPEC.md 73.3): per-episode ε decay "
+                       help="v0.59 (SPEC.md 73.3): per-episode epsilon decay "
                             "factor in (0, 1] (1.0 = no decay)")
     p_fit.add_argument("--seed", type=int, default=7)
     p_fit.add_argument("--experiments", type=int, default=30)
@@ -4819,7 +4819,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=_EP_ASK,  # 47.2.2
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p_ask.add_argument("goal",
-                       help='the goal in a sentence, e.g. "reach 96% on '
+                       help='the goal in a sentence, e.g. "reach 96%% on '
                             'this churn table, quick"')
     p_ask.add_argument("--data", default=None,
                        help="optional data path to fold into the plan "
@@ -5035,7 +5035,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="built-in task (default cartpole-v1); or pass --data "
                             "for a data task (SPEC.md 59.3)")
     p_man.add_argument("--data", default=None,
-                       help="a CSV file / media directory → a data task "
+                       help="a CSV file / media directory -> a data task "
                             "(csv/image/audio/text), like fit --data (overrides "
                             "--task when both are given)")
     p_man.add_argument("--label", default=None,
@@ -5260,7 +5260,7 @@ def build_parser() -> argparse.ArgumentParser:
                        metavar="NAME OP THRESHOLD",
                        help="v0.23 (SPEC.md 37.2): per-seed acceptance objective, "
                             "e.g. 'score>=95', 'train<=30', 'model<=100000' "
-                            "(repeatable); none → the §22.1 score gate")
+                            "(repeatable); none = the §22.1 score gate")
     _add_config_flag(p_var)  # 47.1.2
     p_var.set_defaults(func=_cmd_variance)
 

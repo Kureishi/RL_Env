@@ -105,6 +105,7 @@ numbers and carry none.)
 | M84 | v0.81   | 95     | A85 | tests/test_narrative_v081.py |
 | M85 | v0.82   | 96     | A86 | tests/test_pauseresume_v082.py |
 | M86 | v0.83   | 97     | A87 | tests/test_docs_v083.py |
+| M87 | v0.84   | 98     | A88 | tests/test_release_gate_v084.py |
 
 ---
 
@@ -9315,3 +9316,91 @@ subcommands have rows; the SPEC header states its living status; and
 `tests/test_docs_v083.py` (A87) pins all of it, so the per-round
 ceremony can no longer drift the docs silently. No code change, no
 new dependency, no pinned surface touched.
+
+## 98. v0.84 — Release gate: packaging, CLI audit, release pins (A88)
+
+### 98.1 Why
+
+Before a release, "all tests pass" is not enough: the package has to
+*ship* — installable metadata, a license, a changelog — and the CLI has
+to work where users first touch it: every `--help`. The audit found two
+classes of real defect, both invisible to the existing suite:
+
+* five commands (`run`, `fit`, `ask`, `manual`, `variance`) whose
+  `--help` crashed on a Windows cp1252 console — help strings carrying
+  characters cp1252 cannot encode (`→`, `−`, `ε`, `≥`) violate the 48.5
+  console rule in the one place a user reads first;
+* `ask`'s goal example held a bare `%` ("reach 96% on this churn
+  table"), which argparse's help formatting treats as a format
+  specifier — `--help` raised `TypeError` before printing anything.
+
+Also absent from a releasable package: `readme`, `authors`, `license`,
+and `classifiers` in `pyproject.toml`; a `LICENSE` file; a
+`CHANGELOG.md`; and line-ending hygiene (`.gitattributes`) for a repo
+developed on Windows whose tests are byte-exact.
+
+### 98.2 Design
+
+* **CLI strings** — every user-facing CLI string (help text, epilog,
+  printed line) is cp1252-encodable and %-safe; docstrings and comments
+  may keep math glyphs (they are never printed). `ask`'s example uses
+  `96%%`, so the rendered help reads `96%`.
+* **Packaging** — `pyproject.toml` gains `authors`, `license` (MIT —
+  the `LICENSE` file at the repo root), `readme`, and `classifiers`;
+  the wheel (verified with `pip wheel`) carries the full metadata, the
+  LICENSE file, the long description, and the `autorefine` console
+  script.
+* **Changelog** — `CHANGELOG.md`: one line per round, newest first,
+  each pointing at its SPEC section; derived from the SPEC §0 index so
+  it cannot drift from the milestones.
+* **Hygiene** — `.gitattributes` pins `* text=auto eol=lf` and marks
+  binary artifact types; `runs/`, caches, and build outputs stay
+  covered by `.gitignore`.
+* **Release gate** — `tests/test_release_gate_v084.py` (A88) pins the
+  invariants above: metadata completeness, help renderability for every
+  top-level command, cp1252-safety of every help string, a live
+  run → report → verify → export smoke, a `fit --dry-run` plan, task /
+  family / policy coverage of the CLI surface, the changelog, and the
+  repo-hygiene files.
+
+No model, task, trainer, or gate change; no new dependency; no pinned
+surface touched.
+
+### 98.3 Acceptance (A88)
+
+1. **A88.1 — the package ships.** `pyproject.toml` declares `name`,
+   `version`, `description`, `requires-python`, `dependencies`,
+   `authors`, `license`, `readme`, and `classifiers`; a non-empty
+   `LICENSE` exists at the repo root; the version triple agrees
+   (98.2).
+2. **A88.2 — every help renders.** Every top-level subcommand accepts
+   `--help` with exit 0, and every action's help string and each
+   command's epilog is cp1252-encodable and safe under argparse's help
+   formatting (98.2).
+3. **A88.3 — the loop ships.** In a temp dir: `run` (parity, 2
+   experiments) → `report --json` → `verify` → `export` all exit 0 and
+   leave their artifacts (98.2).
+4. **A88.4 — the plan ships.** `fit --dry-run` on a generated CSV exits
+   0 and prints the task / dataset / budget / catalog lines (98.2).
+5. **A88.5 — the surface is complete.** Every registered task is an
+   accepted `--task` choice of `run` and `manual`; every family in
+   `config.MODEL_FAMILIES` is in the `model_family` field's space;
+   `--policy rl` parses on `run` (98.2).
+6. **A88.6 — the history ships.** `CHANGELOG.md` exists, lists the
+   current version on its top row, and carries one row per milestone
+   (98.2).
+7. **A88.7 — the repo is clean.** `.gitattributes` pins `text=auto
+   eol=lf` and binary types; `.gitignore` covers `runs/`,
+   `__pycache__/`, `.pytest_cache/`, `dist/`, and `*.egg-info/`
+   (98.2).
+
+All in `tests/test_release_gate_v084.py`.
+
+### 98.4 Milestone (M87)
+
+**M87** — v0.84 "Release gate": the package carries full distribution
+metadata, a license, and a changelog; every CLI `--help` renders on a
+Windows console (five crashes and one format string fixed); the release
+invariants are pinned by `tests/test_release_gate_v084.py` (A88), so a
+release is a checklist gate, not a hope. No model change, no new
+dependency, no pinned surface touched.

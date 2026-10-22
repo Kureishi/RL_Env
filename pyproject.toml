@@ -6,11 +6,27 @@ build-backend = "setuptools.build_meta"
 name = "autorefine"
 # SPEC.md 33.1 (C1): the single version source — must equal
 # autorefine.__version__ (enforced by the A23 test); one step per round
-# (v0.83 ⇒ 0.83.0, M86, SPEC.md 97)
-version = "0.83.0"
+# (v0.84 ⇒ 0.84.0, M87, SPEC.md 98)
+version = "0.84.0"
 description = "Environment for autonomous iterative ML model improvement"
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.26"]
+authors = [{ name = "Kurei" }]
+license = { text = "MIT" }   # the LICENSE file at the repo root (SPEC 98.2)
+readme = "README.md"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

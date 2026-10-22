@@ -23,7 +23,7 @@ Covers:
 - 96.2.4 `BudgetManager.pause()` / `resume()` — `wall_seconds_left`
   freezes across a sleep, `resume()` does not charge the hold, both are
   idempotent, and a fresh `start()` clears the hold;
-- A86.6 the round regression — the version steps to `0.83.0` in both
+- A86.6 the round regression — the version steps to `0.84.0` in both
   sources (33.1), SPEC.md carries the A86 acceptance block, and the
   M85 index row resolves to this file.
 
@@ -341,11 +341,11 @@ def test_app_wiring_pause_resume():
 # --- A86.6: the round regression ------------------------------------------------
 
 def test_version_ceremony():
-    """A86.6 (SPEC.md 33.1): the version steps to `0.83.0` in both
+    """A86.6 (SPEC.md 33.1): the version steps to `0.84.0` in both
     sources; SPEC.md carries the A86 acceptance block; the M85 index
     row resolves to this file; the README points at the capability."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.83.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.84.0"
     spec = (REPO / "SPEC.md").read_text(encoding="utf-8")
     assert "### 96.3 Acceptance (A86)" in spec
     assert re.search(

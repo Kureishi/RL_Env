@@ -1,0 +1,18 @@
+# AutoRefine — line-ending & binary hygiene (SPEC 98.2, v0.84).
+# The A-pins and the byte-exact tests assume LF; mixed editors and a
+# Windows checkout must not rewrite tracked text files.
+* text=auto eol=lf
+
+# Binary artifacts: never line-ending-normalized, never diffed as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.mp4 binary
+*.avi binary
+*.mov binary
+*.wav binary
+*.mp3 binary
+*.flac binary
+*.npz binary
+*.zip binary

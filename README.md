@@ -5,7 +5,7 @@ The improver loop proposes model-configuration changes, trains, evaluates on
 splits it never saw, records the outcome, and proposes the next change — all
 within a hard budget, fully reproducible, NumPy-only.
 
-**Current version: 0.83.0.** Input modalities: CSV and JSONL records,
+**Current version: 0.84.0.** Input modalities: CSV and JSONL records,
 plus labelled image / audio / text / signal / MIDI / point-cloud /
 video / mixed directories — all via `autorefine fit --data PATH`.
 
@@ -401,6 +401,7 @@ carries the full detail; this table is the index.
 | Conformal calibration + OOD | "How sure?" per-row prediction sets / intervals; "is this in my world?" OOD flag + familiarity | `predict --run DIR --csv rows.csv --cal --ood` | 93.1–93.2 |
 | Live steering (v0.80) | Pin / bias / constrain the search *while it runs* — the changed field is re-explored first, and each change's measured effect (pre/post/delta) is logged and reported | dashboard ("Steer now"); `AutoRefineEnv.steer(pin=(...))`; `report --run DIR --steer` (ASCII table; `--json` for the rows) | 94 |
 | Pause & Resume (v0.82) | Hold the live loop between experiments — nothing trains and the wall-clock budget holds while paused; resuming continues exactly where it held (decision trajectory unchanged); Stop while paused ends the run | dashboard (**Pause the run** / **Resume the run**); `DashboardRunner.pause()` / `resume()` | 96 |
+| Release gate (v0.84) | The package ships: full wheel metadata + MIT `LICENSE` + `CHANGELOG.md` (one line per round); every CLI `--help` renders on a Windows console; the release invariants are pinned (metadata, help renderability, a live run → report → verify → export smoke, task / family coverage) | `autorefine --version`; `pip wheel .`; `tests/test_release_gate_v084.py` | 98 |
 
 ## Run artifacts
 
