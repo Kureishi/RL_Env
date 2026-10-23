@@ -14,46 +14,47 @@ video / mixed directories — all via `autorefine fit --data PATH`.
 ## Quickstart
 
 ```bash
-pip install -e .            # installs the `autorefine` package (needs numpy)
+pip install -e .            # installs the package + the `autorefine` command (needs numpy)
+# (every `autorefine …` below is equivalently `python -m autorefine …`)
 
 # run the autonomous improvement loop (30 experiments, 15 min cap)
-python -m autorefine run --task cartpole-v1 --seed 7 --experiments 30
+autorefine run --task cartpole-v1 --seed 7 --experiments 30
 
 # other tasks (v0.2): sine-v1 (regression), gridnav-v1 (tabular policy)
-python -m autorefine run --task sine-v1 --seed 7 --experiments 10
+autorefine run --task sine-v1 --seed 7 --experiments 10
 
 # noisy 4-bit XOR classification (v0.3): a task linear models can't solve
-python -m autorefine run --task parity-v1 --seed 7 --experiments 10
+autorefine run --task parity-v1 --seed 7 --experiments 10
 
 # UCB field-bandit improver (v0.3): one-field mutations, credited by outcome
-python -m autorefine run --task parity-v1 --policy bandit --seed 7 --experiments 6
+autorefine run --task parity-v1 --policy bandit --seed 7 --experiments 6
 
 # search-quality preset (v0.4) is the default; opt out for the v0.3 rule
-python -m autorefine run --task parity-v1 --policy bandit --seed 7 --search-quality legacy
+autorefine run --task parity-v1 --policy bandit --seed 7 --search-quality legacy
 
 # frontier ensembling (v0.5): also report the top-2 frontier models averaged
 # as a final evaluation (off by default; the reward/acceptance is untouched)
-python -m autorefine run --task parity-v1 --policy bandit --seed 7 --ensemble-final
+autorefine run --task parity-v1 --policy bandit --seed 7 --ensemble-final
 
 # curriculum (v0.6): step parity difficulty up (p_flip, then n_bits) as the
 # improver saturates (off by default; parity-v1 only for now)
-python -m autorefine run --task parity-v1 --policy bandit --seed 7 --experiments 10 --curriculum
+autorefine run --task parity-v1 --policy bandit --seed 7 --experiments 10 --curriculum
 
 # meta-RL improver: a policy trained on the improvement loop itself
-python -m autorefine run --task sine-v1 --policy rl --rl-episodes 5
+autorefine run --task sine-v1 --policy rl --rl-episodes 5
 
 # inspect a run
-python -m autorefine report --run runs/<run_id>
+autorefine report --run runs/<run_id>
 
 # machine-readable + plotted report (v0.7): JSON stdout, ASCII charts, SVG files
-python -m autorefine report --run runs/<run_id> --plot
-python -m autorefine report --run runs/<run_id> --json
+autorefine report --run runs/<run_id> --plot
+autorefine report --run runs/<run_id> --json
 
 # one self-contained HTML report (v0.8): summary + embedded SVGs + tables
-python -m autorefine report --run runs/<run_id> --html
+autorefine report --run runs/<run_id> --html
 
 # re-score the run's best model on fresh splits
-python -m autorefine eval  --run runs/<run_id>
+autorefine eval  --run runs/<run_id>
 
 # external RL agent through the Gymnasium adapter (v0.7, needs: pip install gymnasium)
 python examples/gym_dqn.py --task sine-v1 --experiments 5 --seed 7
@@ -65,27 +66,27 @@ python examples/tabular.py --experiments 20 --target 95.0
 python examples/narrative.py
 
 # list plugin entry points (v0.7): tasks/policies contributed by other packages
-python -m autorefine plugins list
+autorefine plugins list
 
 # no-code model fit on your own CSV (v0.8): gate on your target (exit 0/2)
-python -m autorefine fit --data sales.csv --label churn --target 95.0
+autorefine fit --data sales.csv --label churn --target 95.0
 # ...or try the bundled sample (600 rows, 27% churn, nonlinear boundary; baseline ~85 -> PASS):
-python -m autorefine fit --data examples/data/churn_sample.csv
+autorefine fit --data examples/data/churn_sample.csv
 
 # no-code model fit on an image/audio directory (v0.10): one subfolder per
 # class (or an index.csv); WAV needs no extra, MP3 needs autorefine[audio],
 # images need autorefine[image]
 python examples/make_sample_media.py   # synthesize deterministic sample dirs
-python -m autorefine fit --data examples/data/tone_clips --target 90.0
-python -m autorefine fit --data examples/data/image_shapes --target 90.0
+autorefine fit --data examples/data/tone_clips --target 90.0
+autorefine fit --data examples/data/image_shapes --target 90.0
 
 # visual dashboard (v0.9, needs: pip install autorefine[gui];
 # v0.10: also accepts an image/audio directory):
 # upload the CSV or directory, watch every experiment live, view the plots, download the model
-python -m autorefine dashboard          # or: streamlit run src/autorefine/dashboard_app.py
+autorefine dashboard          # or: streamlit run src/autorefine/dashboard_app.py
 
 # check the environment (v0.29): version / numpy / extras / a micro smoke train
-python -m autorefine doctor
+autorefine doctor
 
 # run the test suite (per-round acceptance pins — the SPEC §0 index)
 python -m pytest tests/
@@ -97,7 +98,7 @@ The same improver loop as a web page — no terminal required:
 
 ```bash
 pip install autorefine[gui]            # needs streamlit
-python -m autorefine dashboard         # or: streamlit run src/autorefine/dashboard_app.py
+autorefine dashboard         # or: streamlit run src/autorefine/dashboard_app.py
 ```
 
 The first screen is the **Quickstart itself** (SPEC §65) — the same four
