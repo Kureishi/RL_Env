@@ -33,6 +33,7 @@ from ..memory import (
     RunMemory,
 )
 from ..pareto import ParetoFrontier
+from ..robustness import robust_accuracy  # SPEC.md 99 (v0.85, C3)
 from ..runconfig import RunConfig  # SPEC.md 37.1 (v0.23, G3)
 from ..finetune import (  # SPEC.md 80 (v0.66): fine-tuning
     Checkpoint,
@@ -158,6 +159,42 @@ def _v_backend(value: Any) -> str:
     return value
 
 
+def _v_robust_eps(value: Any) -> float:
+    if value is None or isinstance(value, bool):
+        raise ValueError(
+            f"robust_eps must be a number >= 0 (0 = off), got {value!r} "
+            f"(SPEC.md 99)")
+    try:
+        eps = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"robust_eps must be a number >= 0 (0 = off), got {value!r} "
+            f"(SPEC.md 99)") from None
+    if not math.isfinite(eps) or eps < 0.0:
+        raise ValueError(
+            f"robust_eps must be a number >= 0 (0 = off), got {value!r} "
+            f"(SPEC.md 99)")
+    return eps
+
+
+def _v_cost_max(value: Any) -> float:
+    if value is None or isinstance(value, bool):
+        raise ValueError(
+            f"cost_max must be a number >= 0 (0 = off), got {value!r} "
+            f"(SPEC.md 99)")
+    try:
+        cost = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"cost_max must be a number >= 0 (0 = off), got {value!r} "
+            f"(SPEC.md 99)") from None
+    if not math.isfinite(cost) or cost < 0.0:
+        raise ValueError(
+            f"cost_max must be a number >= 0 (0 = off), got {value!r} "
+            f"(SPEC.md 99)")
+    return cost
+
+
 def _v_screen_frac(value: Any) -> float:
     if value is None or isinstance(value, bool):
         raise ValueError(
@@ -207,6 +244,12 @@ KNOBS: dict[str, Knob] = {
                      ("run", "fit", "variance"), None, _v_parallel),
     "backend": Knob("backend", "cpu", "91.3",
                     ("run", "fit"), None, _v_backend),
+    # SPEC.md 99 (v0.85): C3 FGSM robustness gate + D4 cost-aware gate
+    # (both 0.0 = off, pre-v0.85 behavior exactly)
+    "robust_eps": Knob("robust_eps", 0.0, "99",
+                       ("run", "fit"), None, _v_robust_eps),
+    "cost_max": Knob("cost_max", 0.0, "99",
+                     ("run", "fit"), None, _v_cost_max),
 }
 
 
@@ -273,6 +316,13 @@ class AutoRefineEnv:
         kfold: int = 0,
         parallel: int = 1,
         backend: str = "cpu",
+        # --- v0.85 C3 (SPEC.md 99): FGSM robustness gate (0.0 = off) ----
+        # a candidate must be at least as FGSM-robust (holdout argmax
+        # survival at eps) as the champion; classification tasks only
+        robust_eps: float = 0.0,
+        # --- v0.85 D4 (SPEC.md 99): cost-aware gate (0.0 = off) ---------
+        # acceptance additionally requires train_seconds <= cost_max
+        cost_max: float = 0.0,
         # --- v0.23 driver metadata (SPEC.md 37.1.3; None = env-level) ----
         # the env does not own these — the driver (cli fit / dashboard /
         # variance) supplies them so the reset-time recipe is complete
@@ -356,7 +406,17 @@ class AutoRefineEnv:
         _kf = KNOBS["kfold"].validate(kfold)
         _pr = KNOBS["parallel"].validate(parallel)  # SPEC.md 91.2 (v0.77)
         _bk = KNOBS["backend"].validate(backend)  # SPEC.md 91.3 (v0.77)
+        _re = KNOBS["robust_eps"].validate(robust_eps)  # SPEC.md 99 (v0.85)
+        _cm = KNOBS["cost_max"].validate(cost_max)  # SPEC.md 99 (v0.85)
         task_cls = TASKS[task]
+        # SPEC.md 99 (v0.85) C3: the FGSM gate is a classification concept
+        # (argmax survival) — a regression task with robust_eps > 0 is a
+        # construction-time error, not a runtime surprise (fail loud)
+        if _re > 0.0 and task_cls.head != "softmax":
+            raise ValueError(
+                f"robust_eps requires a classification (softmax) task, "
+                f"task {task!r} has head {task_cls.head!r} "
+                f"(SPEC.md 99)")
         self.task_name = task
         self.seed = int(seed)
         self.budget = budget or Budget()
@@ -367,6 +427,9 @@ class AutoRefineEnv:
             self.task = task_cls(seed=self.seed, **self.task_config)
         else:
             self.task = task_cls(seed=self.seed)
+        # SPEC.md 99 (v0.85) C1: fusion tasks expose the image/text split the
+        # late-fusion trainer needs (getattr: None on every other task)
+        self._fusion_split = getattr(self.task, "fusion_split", None)
         # SPEC.md 80 (v0.66): start from an uploaded trained model — loaded
         # and validated at construction (fail loud, before any reset);
         # None = the exact pre-v0.66 path (A70)
@@ -439,6 +502,11 @@ class AutoRefineEnv:
         # GPU backend (91.3; "cpu" default = the bit-identical legacy path)
         self.parallel = _pr
         self.backend = _bk
+        # SPEC.md 99 (v0.85): C3 robustness gate (0.0 = off) + D4 cost
+        # gate (0.0 = off); both are acceptance-time checks in step()
+        self.robust_eps = _re
+        self.cost_max = _cm
+        self._robust_cache: dict[str, float] = {}  # spec hash -> robust acc
         # SPEC.md 37.1.3 (v0.23, G3): driver metadata for the canonical
         # recipe (None = env-level, not a driver choice)
         self.policy = policy
@@ -623,6 +691,7 @@ class AutoRefineEnv:
                 time_limit_seconds=self.bm.train_time_limit(),
                 n_out=self.task.n_outputs, head=self.task.head,
                 parallel=self.parallel,  # SPEC.md 91.2 (v0.77)
+                fusion_split=self._fusion_split,  # SPEC.md 99 (v0.85) C1
             )
             score, std, gen, gen_gap = self._evaluate(result.model)
             eff = self._eff(score, result.train_seconds, gen_gap)
@@ -681,6 +750,7 @@ class AutoRefineEnv:
                     time_limit_seconds=self.bm.train_time_limit(),
                     n_out=self.task.n_outputs, head=self.task.head,
                     parallel=self.parallel,  # SPEC.md 91.2 (v0.77)
+                    fusion_split=self._fusion_split,  # SPEC.md 99 (v0.85)
                 )
                 self._screen_champion = float(self._evaluate(sres.model)[0])
                 # SPEC.md 33.3: the summary's baseline_screen_score (32.2)
@@ -804,6 +874,7 @@ class AutoRefineEnv:
                     n_out=self.task.n_outputs, head=self.task.head,
                     warm_start=warm,
                     parallel=self.parallel,  # SPEC.md 91.2 (v0.77)
+                    fusion_split=self._fusion_split,  # SPEC.md 99 (v0.85)
                 )
                 s_score, s_std, s_gen, s_gap = self._evaluate(sres.model)
                 if not s_score > self._screen_champion:
@@ -816,6 +887,7 @@ class AutoRefineEnv:
                 n_out=self.task.n_outputs, head=self.task.head,
                 warm_start=warm,
                 parallel=self.parallel,  # SPEC.md 91.2 (v0.77)
+                fusion_split=self._fusion_split,  # SPEC.md 99 (v0.85)
             )
         except SpecError as exc:
             return self._reject_invalid(
@@ -834,6 +906,14 @@ class AutoRefineEnv:
         # (all knobs 0 ⇒ exactly the legacy strict score > prev_best)
         se = math.sqrt(std ** 2 + prev_best_std ** 2)
         accepted = should_accept(eff - prev_best_eff, se, self.z_accept)
+        # SPEC.md 99 (v0.85): C3 FGSM robustness gate + D4 cost-aware gate
+        # (both 0.0 = off ⇒ the pre-v0.85 acceptance exactly, bit-identical)
+        cand_robust = self._robustness_of(result.model, spec)
+        robust_ok = (cand_robust is None
+                     or self._robust_gate_ok(cand_robust))
+        cost_ok = (self.cost_max <= 0.0
+                   or result.train_seconds <= self.cost_max)
+        accepted = accepted and robust_ok and cost_ok
 
         reward = (eff - prev_best_eff) + NOVELTY_BONUS
         if accepted:
@@ -870,6 +950,10 @@ class AutoRefineEnv:
             "effective_score": eff,  # SPEC.md 18 (== score in legacy mode)
             "accepted": accepted,
             "loss_history": result.loss_history,  # SPEC.md 28.1 (C1)
+            # SPEC.md 99 (v0.85): C3/D4 gate observability (None = off)
+            "robust_acc": cand_robust,
+            "robust_ok": robust_ok,
+            "cost_ok": cost_ok,
         })
 
         # SPEC.md 20.1: curriculum — when the task saturates, step the
@@ -908,6 +992,8 @@ class AutoRefineEnv:
         best_before = self.best_score
         self.task = self.curriculum.task()
         self.task_name = self.task.name
+        # SPEC.md 99 (v0.85) C1: re-derive the fusion split after the swap
+        self._fusion_split = getattr(self.task, "fusion_split", None)
         self.dataset = self.task.make_dataset(self.dataset_size)
         # SPEC.md 80 (v0.66): the re-baseline reuses the fine-tune seed
         # when compatible (None = the exact pre-v0.66 path)
@@ -917,6 +1003,7 @@ class AutoRefineEnv:
             n_out=self.task.n_outputs, head=self.task.head,
             warm_start=self._warm_start_for(self.best_spec),
             parallel=self.parallel,  # SPEC.md 91.2 (v0.77)
+            fusion_split=self._fusion_split,  # SPEC.md 99 (v0.85)
         )
         score, std, gen, gen_gap = self._evaluate(result.model)
         eff = self._eff(score, result.train_seconds, gen_gap)
@@ -945,6 +1032,7 @@ class AutoRefineEnv:
                 time_limit_seconds=self.bm.train_time_limit(),
                 n_out=self.task.n_outputs, head=self.task.head,
                 parallel=self.parallel,  # SPEC.md 91.2 (v0.77)
+                fusion_split=self._fusion_split,  # SPEC.md 99 (v0.85)
             )
             self._screen_champion = float(self._evaluate(sc.model)[0])
         event = {
@@ -1121,6 +1209,33 @@ class AutoRefineEnv:
             score, train_seconds, gen_gap,
             self.efficiency_weight, self.gen_gap_penalty,
         )
+
+    # --- SPEC.md 99 (v0.85) C3: FGSM robustness gate ------------------------
+    def _robustness_of(self, model, spec: ModelSpec) -> float | None:
+        """Cached FGSM robust accuracy at ``self.robust_eps`` on a
+        deterministic 128-row prefix of the run's train split (a unified
+        (X, y) source across tasks — task holdout point sets are
+        score-only). ``None`` when the gate is off (``robust_eps == 0``).
+        Cached per spec fingerprint (same spec + seed ⇒ same model ⇒
+        same robustness). Deterministic (``robustness`` is RNG-free)."""
+        if self.robust_eps <= 0.0 or self.dataset is None:
+            return None
+        fp = spec.fingerprint()
+        if fp in self._robust_cache:
+            return self._robust_cache[fp]
+        X, y = self.dataset
+        r = robust_accuracy(model, X, y, self.robust_eps, self.task.head)
+        self._robust_cache[fp] = float(r["robust_acc"])
+        return self._robust_cache[fp]
+
+    def _robust_gate_ok(self, cand_robust: float) -> bool:
+        """A candidate must not be more FGSM-fragile than the current
+        champion (``cand >= champ``; a 1e-12 float tolerance). Before the
+        first acceptance the champion is the baseline model."""
+        if self.best_model is None or self.best_spec is None:
+            return True
+        champ = self._robustness_of(self.best_model, self.best_spec)
+        return champ is None or cand_robust >= champ - 1e-12
 
     def _finish(self, reason: str | None) -> None:
         self.done = True

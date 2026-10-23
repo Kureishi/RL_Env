@@ -106,6 +106,7 @@ numbers and carry none.)
 | M85 | v0.82   | 96     | A86 | tests/test_pauseresume_v082.py |
 | M86 | v0.83   | 97     | A87 | tests/test_docs_v083.py |
 | M87 | v0.84   | 98     | A88 | tests/test_release_gate_v084.py |
+| M88 | v0.85   | 99     | A89 | tests/test_selfimprove_v085.py |
 
 ---
 
@@ -9404,3 +9405,200 @@ Windows console (five crashes and one format string fixed); the release
 invariants are pinned by `tests/test_release_gate_v084.py` (A88), so a
 release is a checklist gate, not a hope. No model change, no new
 dependency, no pinned surface touched.
+
+## 99. v0.85 — Self-improvement: the improver improves itself (A89)
+
+### 99.1 The seventeen features
+
+Seventeen additive, opt-in surfaces in four groups. All deterministic
+given their inputs (G2); stdlib + numpy only, with PIL / gymnasium
+optional and lazy-loaded.
+
+* **A1–A5 — the improver improving itself.**
+  * **A1** `meta_loop` (`improver/meta.py`): the loop tunes its *own*
+    knobs (`META_KNOBS`: budget, UCB alpha, gate z / gen_gap,
+    search-quality) across episodes; episode 0 always runs the legacy
+    config, so the first episode is byte-identical to `run`. CLI: `meta`.
+  * **A2** `mine_policy` (`improver/policylab.py`): mine a `MetaRLPolicy`
+    from a finished bandit run's accepted/rejected outcomes (AWR-style,
+    `beta` / `lr` / `n_epochs`); the mined weights load back and
+    `policy.n_updates` is restored. CLI: `policy mine`.
+  * **A3** `pretrain`: task-conditioned pretraining of a `MetaRLPolicy`
+    over `PRETRAIN_TASKS` (default parity-v1 / sine-v1 /
+    sequence-motif-v1), each written to `pretrain-<task>`; `run
+    --pretrained PATH` loads it, and `_pretrained_guard` refuses a
+    `--pretrained` policy that is not an RL policy. CLI: `policy
+    pretrain`.
+  * **A4** `PopulationPolicy`: a population of improvers (bandit / rl /
+    random members) sharing one budget; `allocation()` sums to 1.0 and
+    credit flows through `last["accepted"]`.
+  * **A5** `ThompsonPolicy` (`improver/thompson.py`): Beta(1+w, 1+l)
+    arm sampling over the full `ACTIONS` catalog; `alpha <= 0` is a
+    `ValueError`.
+* **B1–B5 — model & transfer.**
+  * **B1** `AdapterMLP` (`models/adapters.py`): a frozen backbone with
+    per-linear-layer rank-r adapter pairs (incl. the head); the spec
+    field `adapter_rank` is in `(0, 1, 2, 4, 8)` — 0 is the legacy MLP
+    and the trainer dispatches the adapter model only when `> 0`.
+  * **B2** `aux_pretrain`: the `off` / `nextframe` self-supervised stage
+    for `conv1d` / `rnn`; `off` is the exact legacy path.
+  * **B3** `distill_from_run` (`distill.py`): distill a finished run's
+    champion into a smaller model (keep-ratio default 0.95); writes
+    `<run>/distill.json`. CLI: `distill --run DIR --keep`.
+  * **B4** `forget_tol` on `adapt_model`: a forgetting guard — the
+    report block gains `forget_tol, orig_task, orig_before, orig_after,
+    drop, ok`; `None` leaves the legacy report shape untouched. CLI:
+    `adapt --forget-tol`.
+  * **B5** `augment_batch` (`models/augment.py`): `none` / `mixup` /
+    `noise` / `flip` / `time_warp` training-time augmentation; `none`
+    is the identity with no rng draw, and an unknown mode is a
+    `SpecError`.
+* **C1–C3 — fusion & robustness.**
+  * **C1** fusion tasks + `LateFusionMLP` (`models/fusion.py`):
+    `FusionV1` (synthetic 96-d `[64 image | 32 text]` 3-class) and
+    `FusionTask` (an `index.csv` of `image,text,label`); the trainer's
+    `fusion="late"` branch routes the concatenated input through the
+    two-tower model. Mutually exclusive with `adapter_rank > 0` and
+    `fourier_features > 0`; `fusion_split` must be in `(0, in_dim)`.
+  * **C2** `cross_modal_adapt` (`adapt.py`): warm-start a source run's
+    champion into a target task whose family is derived from its
+    capabilities (grid → convnet, sequence → conv1d, else mlp) via
+    `cross_modal=True` slot mapping (the 99 C2 fallback beside the
+    strict 80.3 path); before/after scores are reported honestly
+    (`None` when inapplicable). CLI: `warmstart --src RUN --task T`.
+  * **C3** FGSM robustness gate (`robustness.py`): `input_grads`
+    (central differences), `fgsm_perturb` = `x + eps · sign(g)`, and
+    `robust_accuracy` (clean vs robust). The env knob `robust_eps` (0
+    = off) bounds candidates on classification tasks: a candidate must
+    not be *more fragile* than the champion.
+* **D1–D4 — RL & infrastructure.**
+  * **D1** DQN example agent (`examples/gym_dqn.py`): `DQNAgent(obs_dim,
+    n_actions, seed, hidden, …)` drives the `AutoRefineGymEnv` adapter;
+    gymnasium is lazy-optional.
+  * **D2** policy zoo (`improver/policy_zoo.py`): `export_policy` /
+    `import_policy` / `list_zoo` / `zoo_info` with 64-hex sha256
+    provenance re-verified *before* load; names match `^[A-Za-z0-9]
+    [A-Za-z0-9._-]*$`; non-`MetaRLPolicy` objects are a `TypeError`.
+    CLI: `policy zoo list|info|import|export`.
+  * **D3** `bench_suite` (`bench_suite.py`): run a task suite
+    (`SUITE_MULTIMODAL` default) with derived seeds
+    (`seed · 1_000_003 + i`), returning `tasks` rows and `ranked` task
+    names best-first; `render_bench` renders the ASCII table. CLI:
+    `bench --suite|--tasks|--budget`.
+  * **D4** `cost_max` cost-aware gate: a candidate's train wall-time is
+    bounded at acceptance (0 = off); a sub-millisecond budget leaves
+    the baseline as champion, so the knob is always exercisable.
+
+### 99.2 Legacy safety
+
+Every one of the seventeen is opt-in and default-off, so every pinned
+sequence (A1–A88) stays byte-identical (G2):
+
+* the meta loop's episode 0 *is* the legacy config (`LEGACY_META`);
+  `meta` is a new command, `run` is untouched;
+* mining / pretrain / zoo / bench / distill / warmstart are new code
+  paths or new commands — the bit-exact bandit and RL streams are
+  untouched (the bandit action stream is unchanged, 99.2);
+* `adapter_rank = 0`, `aux_pretrain = "off"`, `augment = "none"`,
+  `fusion = "early"`, `forget_tol = None`, `robust_eps = 0`, and
+  `cost_max = 0` each reduce to the exact pre-v0.85 behavior (the
+  `robust_eps = 0` path returns before `input_grads` is computed);
+* Thompson / Population are new policy objects — selecting them is the
+  user's act; the default bandit policy is untouched;
+* the cold-field tie-break and the §18.7 proposal-order pin are green
+  (99.2).
+
+No new hard dependency; no pinned surface touched.
+
+### 99.3 Acceptance (A89)
+
+1. **A89.1 — meta-loop.** `meta_loop` runs ≥3 episodes with episode 0
+   equal to the legacy config, returns `best_config` /
+   `best_score` / `belief` / `history`; `META_KNOBS` covers the loop
+   knobs; `run --meta`-equivalent CLI `meta` parses (99.1 A1).
+2. **A89.2 — policy mining.** `mine_policy` on a tiny finished bandit
+   run yields a `MetaRLPolicy` with restored `n_updates`; `beta` /
+   `lr` / `n_epochs` are honored; CLI `policy mine` parses (99.1 A2).
+3. **A89.3 — pretraining + guard.** `pretrain` over `PRETRAIN_TASKS`
+   writes `pretrain-<task>` dirs; `run --pretrained PATH` loads the
+   policy; `_pretrained_guard` rejects a pretrained path with a
+   non-RL policy (99.1 A3).
+4. **A89.4 — population.** `PopulationPolicy` accepts bandit / rl /
+   random members, `allocation()` sums to 1.0, and acceptance credit
+   reaches the proposing member (99.1 A4).
+5. **A89.5 — Thompson.** `ThompsonPolicy.n_actions == len(ACTIONS)`
+   (120); the Beta(1+w, 1+l) posterior updates on accept / reject;
+   `alpha <= 0` raises `ValueError` (99.1 A5).
+6. **A89.6 — adapters.** `AdapterMLP` carries one adapter pair per
+   linear layer (incl. the head); `loss_and_grads` returns grads for
+   every adapter pair; `adapter_rank = 0` is the legacy MLP and
+   out-of-range ranks are a `SpecError` (99.1 B1).
+7. **A89.7 — aux pretrain.** `aux_pretrain ∈ {off, nextframe}`; `off`
+   trains bit-identically to the legacy path for `conv1d` / `rnn`
+   (99.1 B2).
+8. **A89.8 — distillation.** `distill_from_run` on a finished run
+   writes `<run>/distill.json` with the keep-ratio (default 0.95) and
+   the distilled size; CLI `distill --run DIR --keep` parses (99.1 B3).
+9. **A89.9 — forgetting guard.** `adapt_model(..., forget_tol=T)` adds
+   the `forget_tol, orig_task, orig_before, orig_after, drop, ok`
+   block to the report; `None` preserves the legacy shape; invalid
+   tolerances raise `ValueError` (99.1 B4).
+10. **A89.10 — augmentation.** `augment_batch` implements none / mixup
+    / noise / flip / time_warp; `none` is the identity with no rng
+    draw; an unknown mode is a `SpecError` (99.1 B5).
+11. **A89.11 — fusion.** `FusionV1` exposes the 96-d `[64 | 32]`
+    3-class split; `FusionTask` reads `image,text,label` from
+    `index.csv`; `LateFusionMLP` rejects wrong-width inputs; the
+    `fusion="late"` trainer branch trains and scores; exclusion with
+    `adapter_rank > 0` / `fourier_features > 0` and the
+    `fusion_split` bounds are enforced (99.1 C1).
+12. **A89.12 — cross-modal warm start.** `cross_modal_adapt` picks the
+    target family from capabilities (sequence-motif → `conv1d`),
+    warm-starts via `cross_modal=True`, and reports honest
+    before / after (99.1 C2).
+13. **A89.13 — FGSM gate.** `input_grads` central differences are
+    nonzero for a real model (both sides of the difference, the v0.85
+    sign fix); `fgsm_perturb` = `x + eps · sign(g)`; `robust_accuracy`
+    returns clean ≥ robust and is a no-op at `eps = 0`; the env honors
+    `robust_eps` only for classification tasks and rejects a more-
+    fragile candidate (99.1 C3).
+14. **A89.14 — DQN example.** `examples/gym_dqn.py`'s `DQNAgent` acts,
+    decays epsilon, stores transitions, and `update()` returns True
+    and increments `updates`; gymnasium is optional (skips cleanly
+    when absent) (99.1 D1).
+15. **A89.15 — policy zoo.** `export_policy` writes a sha256-provenanced
+    entry; `import_policy` re-verifies the digest before loading and
+    rejects a tampered zoo; name validation and the `MetaRLPolicy`
+    type gate hold; CLI `policy zoo list|info|import|export` parses
+    (99.1 D2).
+16. **A89.16 — benchmark suite.** `bench_suite` runs the default
+    multimodal suite with derived seeds, returns `tasks` rows and
+    best-first `ranked` names; unknown tasks raise `ValueError`;
+    `render_bench` renders the table; CLI `bench --suite|--tasks|
+    --budget` parses (99.1 D3).
+17. **A89.17 — cost gate.** `cost_max >= 0` with 0 = off bounds a
+    candidate's train wall-time at acceptance; a sub-millisecond budget
+    keeps the baseline champion (99.1 D4).
+
+All in `tests/test_selfimprove_v085.py`.
+
+### 99.4 Milestone (M88)
+
+**M88** — v0.85 "Self-improvement": the improver improves *itself* —
+the loop tunes its own knobs (`meta`), policies are mined from and
+pretrained on finished runs (`policy mine` / `policy pretrain` / `run
+--pretrained`) and shared through a sha256-provenanced zoo (`policy
+zoo`), and new Thompson / Population sampling competes over the same
+budget; the model space gains frozen-backbone adapters, next-frame aux
+pretraining, augmentation, image+text fusion (the `fusion` /
+`fusion-v1` tasks and `LateFusionMLP`), cross-modal warm start
+(`warmstart`), and distillation (`distill`); robustness becomes a gate
+(FGSM via `robust_eps`), the forgetting guard rides `adapt
+--forget-tol`, and the `bench` suite + `cost_max` gate close the
+infrastructure arc. One real bug fixed en route: the central-difference
+sign in `robustness.py` made the FGSM gate a silent no-op (both
+difference sides landed at x+h, so the gradient was identically zero);
+only the opt-in `robust_eps > 0` path is affected, every default stays
+legacy. All seventeen are opt-in (99.2): the A1–A88 pins stay green.
+Seventeen features, zero new hard dependencies, one product bug fix,
+pinned by `tests/test_selfimprove_v085.py` (A89).

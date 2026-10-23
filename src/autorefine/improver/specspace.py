@@ -18,10 +18,14 @@ from typing import Any, Callable
 
 from ..config import (
     ACTIVATIONS,
+    ADAPTER_RANKS,
+    AUGMENTS,
+    AUX_PRETRAIN,
     BATCH_SIZES,
     CONV1D_FILTERS,
     CONV1D_KERNELS,
     CONV_FILTERS,
+    FUSIONS,
     EARLY_STOPPING_RANGE,
     FOURIER_FEATURES,
     GAM_INTERACTIONS,
@@ -203,6 +207,23 @@ SPEC_FIELDS: dict[str, SpecField] = {
     "rnn_hidden": SpecField(
         "rnn_hidden", RNN_HIDDEN, _v_int_range(8, 32),
         ("rnn",), "83", "ordered"),
+    # SPEC.md 99 (v0.85): self-improvement / fine-tuning — appended at the END
+    # so every existing ordinal stays (the A50 fingerprint pattern; 21 -> 25
+    # fields). Each is validated for every family, consumed only by the named
+    # one (the knn_k pattern, 25.2); defaults keep pre-v0.85 specs loadable
+    # and the §18.7 pin green (99.2).
+    "adapter_rank": SpecField(
+        "adapter_rank", ADAPTER_RANKS, _v_int_range(0, 8),
+        ("mlp",), "99", "ordered"),
+    "augment": SpecField(
+        "augment", AUGMENTS, _v_enum(AUGMENTS),
+        ("mlp", "convnet", "conv1d", "rnn"), "99", "categorical"),
+    "fusion": SpecField(
+        "fusion", FUSIONS, _v_enum(FUSIONS),
+        ("mlp",), "99", "categorical"),
+    "aux_pretrain": SpecField(
+        "aux_pretrain", AUX_PRETRAIN, _v_enum(AUX_PRETRAIN),
+        ("conv1d", "rnn"), "99", "categorical"),
 }
 
 SPEC_FIELD_NAMES = tuple(SPEC_FIELDS)

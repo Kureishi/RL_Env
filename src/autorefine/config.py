@@ -79,6 +79,22 @@ CONV1D_KERNELS = (3, 5, 7)
 # rnn: the Elman hidden width H (83.3.3)
 RNN_HIDDEN = (8, 16, 32)
 
+# --- SPEC.md 99 (v0.85): self-improvement / fine-tuning fields --------------
+# All four default to the legacy behavior (0 / "none" / "early" / "off"), so
+# pre-v0.85 spec JSON stays loadable and every legacy run stays bit-exact (the
+# 17 / 19.1 / 25.2 / 78 / 83 back-compat pattern). Each is validated for every
+# family, consumed only by the named one (the knn_k pattern, 25.2). The names
+# are chosen to sort lexicographically BELOW "init_scale" so the §18.7 pin's
+# cold-field tie-break is untouched (SPEC.md 99.2).
+# adapter rank r (0 = off; mlp: frozen backbone + rank-r adapters, SPEC.md 99 B1)
+ADAPTER_RANKS = (0, 1, 2, 4, 8)
+# data-augmentation mode ("none" = off; neural families, SPEC.md 99 B5)
+AUGMENTS = ("none", "mixup", "noise", "flip", "time_warp")
+# multi-modality fusion layout (fusion tasks, SPEC.md 99 C1)
+FUSIONS = ("early", "late")
+# self-supervised pretrain stage ("off" = off; conv1d / rnn, SPEC.md 99 B2)
+AUX_PRETRAIN = ("off", "nextframe")
+
 
 class SpecError(ValueError):
     """Raised when a ModelSpec value is outside its allowed space."""
@@ -139,6 +155,12 @@ class ModelSpec:
     conv1d_filters: int = 8      # output-filter count F (83.2.3)
     conv1d_kernel: int = 3       # time-kernel width K (83.2.3)
     rnn_hidden: int = 16         # Elman hidden width H (83.3.3)
+    # --- SPEC.md 99 (v0.85): self-improvement / fine-tuning fields; all
+    # default to the legacy behavior (bit-exact back-compat, the knn_k pattern)
+    adapter_rank: int = 0        # rank-r adapters (mlp only; 0 = plain mlp)
+    augment: str = "none"       # batch augmentation (neural; "none" = off)
+    fusion: str = "early"       # fusion layout (fusion tasks; "early")
+    aux_pretrain: str = "off"   # self-supervised stage (conv1d/rnn; off)
 
     def __post_init__(self) -> None:
         # normalize list -> tuple even though the class is frozen
@@ -237,6 +259,16 @@ class ModelSpec:
                  f"conv1d_kernel {self.conv1d_kernel} not in {CONV1D_KERNELS}")
         _require(int(self.rnn_hidden) in RNN_HIDDEN,
                  f"rnn_hidden {self.rnn_hidden} not in {RNN_HIDDEN}")
+        # SPEC.md 99 (v0.85): validated for every family, consumed only by
+        # the named one (the knn_k pattern, 25.2)
+        _require(int(self.adapter_rank) in ADAPTER_RANKS,
+                 f"adapter_rank {self.adapter_rank} not in {ADAPTER_RANKS}")
+        _require(self.augment in AUGMENTS,
+                 f"augment {self.augment!r} not in {AUGMENTS}")
+        _require(self.fusion in FUSIONS,
+                 f"fusion {self.fusion!r} not in {FUSIONS}")
+        _require(self.aux_pretrain in AUX_PRETRAIN,
+                 f"aux_pretrain {self.aux_pretrain!r} not in {AUX_PRETRAIN}")
 
     # --- serialization -----------------------------------------------------
     def to_dict(self) -> dict[str, Any]:
@@ -264,6 +296,11 @@ class ModelSpec:
             "conv1d_filters": int(self.conv1d_filters),
             "conv1d_kernel": int(self.conv1d_kernel),
             "rnn_hidden": int(self.rnn_hidden),
+            # SPEC.md 99 (v0.85): self-improvement / fine-tuning fields
+            "adapter_rank": int(self.adapter_rank),
+            "augment": self.augment,
+            "fusion": self.fusion,
+            "aux_pretrain": self.aux_pretrain,
         }
 
     @classmethod
@@ -296,6 +333,11 @@ class ModelSpec:
             conv1d_filters=int(d.get("conv1d_filters", 8)),
             conv1d_kernel=int(d.get("conv1d_kernel", 3)),
             rnn_hidden=int(d.get("rnn_hidden", 16)),
+            # defaults keep pre-v0.85 spec JSON loadable (SPEC.md 99, back-compat)
+            adapter_rank=int(d.get("adapter_rank", 0)),
+            augment=str(d.get("augment", "none")),
+            fusion=str(d.get("fusion", "early")),
+            aux_pretrain=str(d.get("aux_pretrain", "off")),
         )
 
     def fingerprint(self) -> str:
@@ -310,7 +352,8 @@ class ModelSpec:
 
 
 def spec_n_params(spec, state_dim: int | None, n_out: int | None,
-                  grid: tuple | None = None) -> int | None:
+                  grid: tuple | None = None,
+                  fusion_split: int | None = None) -> int | None:
     """SPEC.md 58.2 (v0.44): the parameter count of one spec — the size axis
     of the 3-objective frontier.
 
@@ -366,6 +409,44 @@ def spec_n_params(spec, state_dim: int | None, n_out: int | None,
         if K not in FOURIER_FEATURES:
             return None
         in_dim = in_dim * (2 * K + 1)
+        # SPEC.md 99 (v0.85) C1: fusion "late" = two towers + shared head —
+        # counted exactly as LateFusionMLP draws them (image tower over the
+        # first fusion_split dims, text tower over the rest, head from
+        # 2*h_last; depth 0 = one linear head over the full in_dim). Late is
+        # incompatible with the Fourier expansion (the trainer SpecErrors)
+        # and needs a valid split — both degrade to None (the 58.2 rule).
+        if str(d.get("fusion", "early")) == "late":
+            if K > 0:
+                return None
+            if (not isinstance(fusion_split, int)
+                    or isinstance(fusion_split, bool)
+                    or not (0 < fusion_split < in_dim)):
+                return None
+            d_img, d_txt = int(fusion_split), in_dim - int(fusion_split)
+            total = 0
+            for base in (d_img, d_txt):
+                prev = base
+                for h in arch:
+                    hi = int(h)
+                    total += prev * hi + hi
+                    prev = hi
+            h_last = int(arch[-1]) if arch else in_dim
+            return int(total + (2 * h_last if arch else in_dim) * n_outputs
+                       + n_outputs)
+        r = int(d.get("adapter_rank", 0))
+        if r not in ADAPTER_RANKS:
+            return None
+        if r > 0:
+            # SPEC.md 99 (B1): only the adapters are trainable — per hidden
+            # layer a d_in*r V and an r*h U, plus the head's h_last*r P and
+            # r*n_out Q (the frozen backbone is not counted).
+            d_in = in_dim
+            total = 0
+            for h in arch:
+                hi = int(h)
+                total += d_in * r + r * hi
+                d_in = hi
+            return int(total + d_in * r + r * n_outputs)
         sizes = [in_dim, *[int(h) for h in arch], n_outputs]
         return int(sum(sizes[i] * sizes[i + 1] + sizes[i + 1]
                        for i in range(len(sizes) - 1)))

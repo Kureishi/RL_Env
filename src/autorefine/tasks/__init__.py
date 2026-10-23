@@ -23,6 +23,7 @@ from .pointcloud import (  # 92.4 (A4)
 from .graph import GraphTask, load_graph  # 92.5 (A5)
 from .video import VideoTask, video_features, load_video_frames  # 92.6 (A6)
 from .mixed import MixedTask, mixed_row  # 92.7 (A7)
+from .fusion import FusionTask, FusionV1, collect_fusion_items  # SPEC.md 99 (v0.85 C1)
 
 # task registry (SPEC.md 15): new tasks register here, zero core-loop changes
 TASKS = {
@@ -52,6 +53,9 @@ TASKS = {
     "graph": GraphTask,        # 92.5 (A5): nodes.csv + edges.csv
     "video": VideoTask,        # 92.6 (A6): video clips (.mp4/.mov/.avi)
     "mixed": MixedTask,        # 92.7 (A7): multi-modality labelled dirs
+    # v0.85 (SPEC.md 99, C1): image+text fusion rows (late-fusion two-tower)
+    "fusion-v1": FusionV1,     # synthetic 3-class (image pattern + text)
+    "fusion": FusionTask,      # file-based: index.csv image/text/label dirs
     # robust-v1 is a wrapper (needs a base task) — not a bare registry entry,
     # so it is exported for direct use / plugins rather than the string map.
 }
@@ -74,4 +78,6 @@ __all__ = [
     "GraphTask", "load_graph",
     "VideoTask", "video_features", "load_video_frames",
     "MixedTask", "mixed_row",
+    # v0.85 (SPEC.md 99, C1): fusion tasks
+    "FusionTask", "FusionV1", "collect_fusion_items",
 ]

@@ -46,7 +46,12 @@ from .runconfig import (
 from .dashboard import diff_n_summaries, diff_two_summaries, field_stats  # 42.2/42.3 (v0.28) + 50.1.4 (v0.36)
 from .sharing import share_payload, write_share_zip  # 47.4/50.2 (v0.36)
 from .exporter import export_run  # 92.10 (v0.78, B3): the portable model export
-from .adapt import adapt_model, plan_adapt, render_adapt_text  # 93.3 (v0.79, A83)
+from .adapt import (  # 93.3 (v0.79, A83) + 99 (v0.85, A89.12/A89.9)
+    adapt_model,
+    cross_modal_adapt,
+    plan_adapt,
+    render_adapt_text,
+)
 from .conformal import (  # 93.1/93.2 (v0.79, A83): calibration + OOD
     conformal_interval,
     conformal_prediction_set,
@@ -69,6 +74,22 @@ from .improver.rl_policy import (
     save_policy,  # 67.1 (v0.53, A57): policy persistence
     load_policy,
 )
+from .improver.meta import meta_loop  # 99 (v0.85, A89.1): the meta-optimization loop
+from .improver.policylab import (  # 99 (v0.85, A89.2/A89.3/A89.4)
+    PRETRAIN_TASKS,
+    mine_policy,
+    pretrain,
+    PopulationPolicy,
+)
+from .improver.thompson import ThompsonPolicy  # 99 (v0.85, A89.5)
+from .improver.policy_zoo import (  # 99 (v0.85, A89.15): the policy zoo
+    export_policy,
+    import_policy,
+    list_zoo,
+    zoo_info,
+)
+from .distill import distill_from_run  # 99 (v0.85, A89.8): champion distillation
+from .bench_suite import bench_suite, render_bench  # 99 (v0.85, A89.16)
 from .steering import SteeringState, train_manual  # 59 (v0.45)
 from .accounting import account_run  # 39.2 (T4): decision accounting
 from .memory import KIND_BASELINE, KIND_EXPERIMENT, RunMemory
@@ -218,8 +239,12 @@ def _drive(args: argparse.Namespace, env: AutoRefineEnv) -> None:
         # `--rl-load` resumes a saved policy (learn → persist → explore →
         # reuse); `--rl-epsilon`/`--rl-epsilon-decay` enable ε-greedy;
         # `--rl-save` writes the trained policy after training.
-        if getattr(args, "rl_load", None):
-            policy = load_policy(args.rl_load, seed=args.seed)
+        # SPEC.md 99 (v0.85, A89.3): --pretrained is a --rl-load alias for a
+        # pretrained search policy (the `policy pretrain` output)
+        load_from = (getattr(args, "rl_load", None)
+                     or getattr(args, "pretrained", None))
+        if load_from:
+            policy = load_policy(load_from, seed=args.seed)
         else:
             policy = MetaRLPolicy(
                 seed=args.seed,
@@ -229,8 +254,8 @@ def _drive(args: argparse.Namespace, env: AutoRefineEnv) -> None:
             print(f"task    : {args.task}  (meta-RL, {args.rl_episodes} full-budget episodes"
                   + (f", eps={policy.epsilon:g}" if policy.epsilon > 0.0 else "")
                   + (
-                      f" (loaded from {args.rl_load})"
-                      if getattr(args, "rl_load", None) else ""))
+                      f" (loaded from {load_from})"
+                      if load_from else ""))
         rl_summary = train_policy(env, policy, args.rl_episodes,
                                   verbose=not quiet)  # 47.3.2
         if not quiet:
@@ -256,10 +281,19 @@ def _drive(args: argparse.Namespace, env: AutoRefineEnv) -> None:
         # search/RL policies own no per-field bookkeeping (86.4.2)
         prior = (env.prior.to_bandit_prior()
                  if getattr(env, "prior", None) is not None else None)
-        policy = (SearchPolicy(seed=args.seed, exclude_fields=excl)
-                  if args.policy == "search"
-                  else BanditPolicy(seed=args.seed, exclude_fields=excl,
-                                    prior=prior))
+        # SPEC.md 99 (v0.85): the new reference policies — a population of
+        # competing improvers (A89.4, --population) and Thompson sampling
+        # (A89.5, --policy thompson); both implement the same
+        # propose(env_state) -> spec_dict contract (SPEC.md 17)
+        if getattr(args, "population", False):
+            policy = PopulationPolicy(seed=args.seed)
+        elif args.policy == "thompson":
+            policy = ThompsonPolicy(seed=args.seed)
+        else:
+            policy = (SearchPolicy(seed=args.seed, exclude_fields=excl)
+                      if args.policy == "search"
+                      else BanditPolicy(seed=args.seed, exclude_fields=excl,
+                                        prior=prior))
         while not env.done:
             action = policy.propose(state)
             state, reward, done, info = env.step(action)
@@ -318,6 +352,14 @@ def _steering_from_args(args: argparse.Namespace):
     pins = list(getattr(args, "pin", None) or [])
     biases = list(getattr(args, "bias", None) or [])
     constrains = list(getattr(args, "constrain", None) or [])
+    # SPEC.md 99 (v0.85): the new spec fields (A89.6/A89.7/A89.10/A89.11) — an explicit
+    # --adapter-rank / --augment / --aux-pretrain / --fusion flag force-sets
+    # the field through the same pin machinery (the env's step() force-set
+    # is the backstop, 59.2); None = off (the field is freely mutable)
+    for flag in ("adapter_rank", "augment", "aux_pretrain", "fusion"):
+        value = getattr(args, flag, None)
+        if value is not None:
+            pins.append(f"{flag}={value}")
     if not (pins or biases or constrains):
         return None
     state = SteeringState()
@@ -381,6 +423,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print("--prior-run and --from-model are mutually exclusive "
               "(SPEC.md 86.4.1)", file=sys.stderr)
         return 1
+    # SPEC.md 99 (v0.85, A89.3): --pretrained only makes sense in the RL
+    # branch - refuse to silently ignore it (no silent fallbacks)
+    if getattr(args, "pretrained", None) is not None and args.policy != "rl":
+        print("--pretrained loads a saved search policy and only applies "
+              "with --policy rl (SPEC.md 99); re-run with `--policy rl "
+              "--pretrained PATH`", file=sys.stderr)
+        return 1
     # SPEC.md 59.2 (v0.45): the steering rules (None = off, pre-v0.45 path)
     try:
         steering = _steering_from_args(args)
@@ -407,24 +456,34 @@ def _cmd_run(args: argparse.Namespace) -> int:
             print("--curriculum supports parity-v1, sine-v1, and cartpole-v1 "
                   "(SPEC.md 46.2)", file=sys.stderr)
             return 1
-    env = AutoRefineEnv(
-        task=args.task, seed=args.seed, budget=_budget(args), runs_dir=args.runs_dir,
-        ensemble_top_k=2 if args.ensemble_final else 0,
-        curriculum=curriculum,
-        stall_patience=args.stall_patience,  # v0.17 (SPEC.md 31.1; None = off)
-        screen_frac=args.screen_frac,  # v0.18 (SPEC.md 32.2; 1.0 = off)
-        kfold=args.kfold,  # v0.30 (SPEC.md 44.1; 0 = off, legacy)
-        parallel=args.parallel,  # v0.77 (SPEC.md 91.2; 1 = serial, bit-identical)
-        backend=args.backend,  # v0.77 (SPEC.md 91.3; cpu = the legacy path)
-        # v0.23 (SPEC.md 37.1.3): driver metadata for the canonical recipe
-        policy=args.policy,
-        target=None,  # `run` is ungated (SPEC.md 37.2.3)
-        rl_episodes=args.rl_episodes if args.policy == "rl" else None,
-        steering=steering,  # SPEC.md 59.2 (v0.45)
-        initial_model=args.from_model,  # v0.66 (SPEC.md 80; None = off)
-        prior_run=args.prior_run,  # v0.72 (SPEC.md 86; None = off)
-        **quality,
-    )
+    try:
+        env = AutoRefineEnv(
+            task=args.task, seed=args.seed, budget=_budget(args), runs_dir=args.runs_dir,
+            ensemble_top_k=2 if args.ensemble_final else 0,
+            curriculum=curriculum,
+            stall_patience=args.stall_patience,  # v0.17 (SPEC.md 31.1; None = off)
+            screen_frac=args.screen_frac,  # v0.18 (SPEC.md 32.2; 1.0 = off)
+            kfold=args.kfold,  # v0.30 (SPEC.md 44.1; 0 = off, legacy)
+            parallel=args.parallel,  # v0.77 (SPEC.md 91.2; 1 = serial, bit-identical)
+            backend=args.backend,  # v0.77 (SPEC.md 91.3; cpu = the legacy path)
+            # v0.23 (SPEC.md 37.1.3): driver metadata for the canonical recipe
+            policy=args.policy,
+            target=None,  # `run` is ungated (SPEC.md 37.2.3)
+            rl_episodes=args.rl_episodes if args.policy == "rl" else None,
+            steering=steering,  # SPEC.md 59.2 (v0.45)
+            initial_model=args.from_model,  # v0.66 (SPEC.md 80; None = off)
+            prior_run=args.prior_run,  # v0.72 (SPEC.md 86; None = off)
+            # SPEC.md 99 (v0.85): the D3/D4 gates (0.0 = off, legacy exactly)
+            robust_eps=getattr(args, "robust_eps", 0.0),  # C3 FGSM robustness
+            cost_max=getattr(args, "cost_max", 0.0),  # D4 cost-aware gate
+            **quality,
+        )
+    except ValueError as exc:
+        # SPEC.md 99 (v0.85): a construction-time contract violation (e.g.
+        # --robust-eps on a regression task) is a clean rc-1 error, not a
+        # traceback
+        print(str(exc), file=sys.stderr)
+        return 1
     note = _backend_note(args.backend)  # v0.77 (SPEC.md 91.3)
     if note:
         print(note, file=sys.stderr)
@@ -2042,11 +2101,25 @@ def _catalog_description(task_name: str, policy: str) -> str:
             f"{len(actions)} catalog actions (union)")
 
 
+def _pretrained_guard(args) -> str | None:
+    # SPEC.md 99 (v0.85, A89.3): --pretrained only makes sense in the RL
+    # branch - return the error line when it would be silently ignored
+    if getattr(args, "pretrained", None) is not None and args.policy != "rl":
+        return ("--pretrained loads a saved search policy and only applies "
+                "with --policy rl (SPEC.md 99); re-run with `--policy rl "
+                "--pretrained PATH`")
+    return None
+
+
 def _fit_data(args: argparse.Namespace) -> tuple:
     """`fit --data` mode (SPEC.md 22.1/24.5): probe the data, build the env,
     and return `(env, bar, metric)` (or `(None, None, None)` on a bad
     path/task)."""
     from .tasks import TASKS
+    guard = _pretrained_guard(args)
+    if guard is not None:
+        print(guard, file=sys.stderr)
+        return None, None, None
     data = Path(args.data)
     try:
         task_name = _resolve_fit_task(data, getattr(args, "task", "auto") or "auto")
@@ -2080,24 +2153,33 @@ def _fit_data(args: argparse.Namespace) -> tuple:
         return None, None, None
     quality = {} if args.search_quality == "legacy" else search_quality_v04()
     args.task = task_name  # _drive's print lines
-    env = AutoRefineEnv(
-        task=task_name, seed=args.seed, budget=_budget(args), runs_dir=args.runs_dir,
-        ensemble_top_k=2 if args.ensemble_final else 0,
-        dataset_episodes=int(probe.default_dataset_size),
-        task_config=config,
-        stall_patience=args.stall_patience,  # v0.17 (SPEC.md 31.1; None = off)
-        screen_frac=args.screen_frac,  # v0.18 (SPEC.md 32.2; 1.0 = off)
-        kfold=args.kfold,  # v0.30 (SPEC.md 44.1; 0 = off, legacy)
-        parallel=getattr(args, "parallel", 1),  # v0.77 (SPEC.md 91.2; 1 = serial, bit-identical)
-        backend=getattr(args, "backend", "cpu"),  # v0.77 (SPEC.md 91.3; cpu = the legacy path)
-        # v0.23 (SPEC.md 37.1.3): driver metadata for the canonical recipe
-        policy=args.policy, target=args.target,
-        rl_episodes=args.rl_episodes if args.policy == "rl" else None,
-        steering=steering,  # SPEC.md 59.2 (v0.45)
-        initial_model=args.from_model,  # v0.66 (SPEC.md 80; None = off)
-        prior_run=args.prior_run,  # v0.72 (SPEC.md 86; None = off)
-        **quality,
-    )
+    try:
+        env = AutoRefineEnv(
+            task=task_name, seed=args.seed, budget=_budget(args), runs_dir=args.runs_dir,
+            ensemble_top_k=2 if args.ensemble_final else 0,
+            dataset_episodes=int(probe.default_dataset_size),
+            task_config=config,
+            stall_patience=args.stall_patience,  # v0.17 (SPEC.md 31.1; None = off)
+            screen_frac=args.screen_frac,  # v0.18 (SPEC.md 32.2; 1.0 = off)
+            kfold=args.kfold,  # v0.30 (SPEC.md 44.1; 0 = off, legacy)
+            parallel=getattr(args, "parallel", 1),  # v0.77 (SPEC.md 91.2; 1 = serial, bit-identical)
+            backend=getattr(args, "backend", "cpu"),  # v0.77 (SPEC.md 91.3; cpu = the legacy path)
+            # v0.23 (SPEC.md 37.1.3): driver metadata for the canonical recipe
+            policy=args.policy, target=args.target,
+            rl_episodes=args.rl_episodes if args.policy == "rl" else None,
+            steering=steering,  # SPEC.md 59.2 (v0.45)
+            initial_model=args.from_model,  # v0.66 (SPEC.md 80; None = off)
+            prior_run=args.prior_run,  # v0.72 (SPEC.md 86; None = off)
+            # SPEC.md 99 (v0.85): the D3/D4 gates (0.0 = off, legacy exactly)
+            robust_eps=getattr(args, "robust_eps", 0.0),  # C3 FGSM robustness
+            cost_max=getattr(args, "cost_max", 0.0),  # D4 cost-aware gate
+            **quality,
+        )
+    except ValueError as exc:
+        # SPEC.md 99 (v0.85): a construction-time contract violation is a
+        # clean rc-1 error, not a traceback
+        print(str(exc), file=sys.stderr)
+        return None, None, None
     return env, args.target, metric
 
 
@@ -3363,6 +3445,20 @@ def _load_knn(path: str):
     return KNN.load(path)
 
 
+def _load_mlp(path: str):
+    """SPEC.md 99 (v0.85): B1 — an mlp-family checkpoint may be a plain MLP
+    or a frozen-backbone AdapterMLP (adapter_rank > 0). The adapter file
+    carries the 'rank' / 'ad0_V' markers; route it to AdapterMLP.load so the
+    adapter weights are never silently dropped by MLP.load."""
+    import numpy as np
+    from .models.mlp import MLP
+    with np.load(path, allow_pickle=False) as z:
+        if "rank" in z.files and "ad0_V" in z.files:
+            from .models.adapters import AdapterMLP
+            return AdapterMLP.load(path)
+    return MLP.load(path)
+
+
 def _load_convnet(path: str):
     from .models.convnet import ConvNet
     return ConvNet.load(path)
@@ -3407,7 +3503,8 @@ def _task_from_summary(summary: dict):
 def _best_model_loaders() -> dict:
     """SPEC.md 25.5: family -> npz loader mapping (knn/convnet since v0.11)."""
     return {
-        "mlp": lambda p: MLP.load(p),
+        "mlp": _load_mlp,  # SPEC.md 99 (v0.85): routes adapter files too
+        "adapter": _load_mlp,  # SPEC.md 99 (v0.85): B1 (explicit family)
         "tree": lambda p: _load_tree(p),
         "boost": lambda p: _load_boost(p),  # SPEC.md 19.2
         "knn": lambda p: _load_knn(p),      # SPEC.md 25.2
@@ -3784,7 +3881,10 @@ def _cmd_adapt(args: argparse.Namespace) -> int:
     try:
         rep = adapt_model(run_dir, args.data, runs_dir=args.runs_dir,
                           seed=int(args.seed), steps=args.steps,
-                          max_seconds=args.max_seconds, target=args.target)
+                          max_seconds=args.max_seconds, target=args.target,
+                          # SPEC.md 99 (v0.85, B4): the forgetting guard
+                          # (None = off, the exact legacy path)
+                          forget_tol=getattr(args, "forget_tol", None))
     except (ValueError, FileNotFoundError) as exc:
         print(f"adapt: {exc}", file=sys.stderr)
         return 1
@@ -3792,6 +3892,282 @@ def _cmd_adapt(args: argparse.Namespace) -> int:
         print(json.dumps(rep, sort_keys=True))
         return 0
     print(render_adapt_text(rep))
+    return 0
+
+
+def _cmd_meta(args: argparse.Namespace) -> int:
+    """`meta` (SPEC.md 99, v0.85 A89.1): the meta-optimization loop —
+    `--episodes` full-budget bandit runs of the same task; episode 0 is the
+    exact legacy config and each later episode mutates ONE meta-knob (UCB
+    over the meta-knobs), credited on whether it improved on the best score
+    so far. Deterministic given (task, seed, episodes, budget) (G2);
+    rc 0 (a bad task is rc 1)."""
+    try:
+        out = meta_loop(args.task, seed=int(args.seed),
+                        episodes=int(args.episodes), budget=int(args.budget),
+                        runs_dir=args.runs_dir,
+                        verbose=(not args.json)
+                        and getattr(args, "verbose", False))
+    except (ValueError, FileNotFoundError) as exc:
+        print(f"meta: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(out, indent=2, sort_keys=True))
+        return 0
+    print(f"meta-loop : {args.task}  (seed {args.seed}, {args.episodes} episodes, "
+          f"budget {args.budget}/episode)")
+    for row in out["history"]:
+        mark = "+" if row["improved"] else " "
+        knobs = ", ".join(f"{k}={v}" for k, v in sorted(row["config"].items()))
+        print(f" {mark} ep {row['episode']}   score {row['score']:7.2f}   {knobs}")
+    print(f"best      : {out['best_score']:.2f}  "
+          f"config {json.dumps(out['best_config'], sort_keys=True)}")
+    bel = ", ".join(f"{k}: {v['trials']} tries, win {v['win_rate']:.2f}"
+                    for k, v in sorted(out["belief"].items()))
+    print(f"belief    : {bel}")
+    print(f"runs      : {args.runs_dir}/meta-0 ... meta-{len(out['history']) - 1}")
+    return 0
+
+
+def _cmd_policy_mine(args: argparse.Namespace) -> int:
+    """`policy mine` (SPEC.md 99, v0.85 A89.2): fit a meta-RL policy from
+    the logs of finished runs (AWR-weighted maximum likelihood over the
+    catalog — zero new training, SPEC.md 84.3 weight law). `--out` persists
+    it (the `run --policy rl --pretrained PATH` input). rc 0 / rc 1."""
+    try:
+        policy = mine_policy(list(args.runs), seed=int(args.seed),
+                             beta=float(args.beta), lr=float(args.lr),
+                             n_epochs=int(args.epochs))
+    except (ValueError, FileNotFoundError) as exc:
+        print(f"policy mine: {exc}", file=sys.stderr)
+        return 1
+    if args.out:
+        p = save_policy(policy, args.out)
+        print(f"policy mine: {len(args.runs)} run(s) -> {p} "
+              f"(beta={args.beta:g}, lr={args.lr:g}, epochs={args.epochs})")
+    else:
+        print(f"policy mine: learned from {len(args.runs)} run(s) "
+              f"(beta={args.beta:g}, lr={args.lr:g}, epochs={args.epochs}) "
+              "- pass --out PATH to save it")
+    return 0
+
+
+def _cmd_policy_pretrain(args: argparse.Namespace) -> int:
+    """`policy pretrain` (SPEC.md 99, v0.85 A89.3): pretrain one
+    task-conditioned meta-RL policy over the given tasks (the SPEC.md 20.2
+    transfer channel) and persist it with `--out`. Deterministic given
+    (tasks, seed, episodes, budget) (G2). rc 0 / rc 1 on an unknown task."""
+    if args.tasks:
+        tasks = tuple(t.strip() for t in args.tasks.split(",") if t.strip())
+        bad = [t for t in tasks if t not in TASKS]
+        if bad:
+            print(f"policy pretrain: unknown task(s) {bad}; valid: "
+                  f"{sorted(TASKS)}", file=sys.stderr)
+            return 1
+    else:
+        tasks = PRETRAIN_TASKS
+    policy, saved = pretrain(tasks, seed=int(args.seed),
+                             episodes=int(args.episodes),
+                             budget=int(args.budget),
+                             runs_dir=args.runs_dir, out_path=args.out)
+    if saved is not None:
+        print(f"policy pretrain: {', '.join(tasks)} -> {saved} "
+              f"({args.episodes} episodes x {args.budget} experiments/task)")
+    else:
+        print(f"policy pretrain: {', '.join(tasks)} (saved nothing - "
+              "pass --out PATH to persist it)")
+    return 0
+
+
+def _cmd_policy_zoo_list(args: argparse.Namespace) -> int:
+    """`policy zoo list` (SPEC.md 99, v0.85 A89.15): the zoo's entries,
+    sorted by name (the hash-pinned policy index, A89.15's machinery)."""
+    entries = list_zoo(args.zoo)
+    if args.json:
+        print(json.dumps(entries, indent=2, sort_keys=True))
+        return 0
+    if not entries:
+        print(f"policy zoo: {args.zoo} is empty (export one with "
+              "`policy zoo export --policy PATH --name NAME`)")
+        return 0
+    for e in entries:
+        print(f"{e['name']:<24} task={str(e.get('task') or '-'):<16} "
+              f"actions={e.get('n_actions')}  source={e.get('source') or '-'}")
+    return 0
+
+
+def _cmd_policy_zoo_info(args: argparse.Namespace) -> int:
+    """`policy zoo info` (SPEC.md 99, v0.85 A89.15): the index row for one
+    named policy, with `sha256_ok` re-verifying the file against the
+    provenance pin (A89.15). rc 0 / rc 1."""
+    try:
+        entry = zoo_info(args.name, args.zoo)
+    except (ValueError, FileNotFoundError) as exc:
+        print(f"policy zoo info: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(entry, indent=2, sort_keys=True))
+        return 0
+    ok = entry.get("sha256_ok")
+    print(f"name      : {entry['name']}")
+    print(f"path      : {entry['path']}")
+    print(f"sha256    : {entry['sha256'][:16]}...  "
+          f"(verified: {'ok' if ok else 'MISMATCH/MISSING'})")
+    print(f"task      : {entry.get('task') or '-'}   "
+          f"tasks: {entry.get('task_names') or '(single-task)'}")
+    print(f"actions   : {entry.get('n_actions')}   "
+          f"n_updates: {entry.get('n_updates')}")
+    if entry.get("note"):
+        print(f"note      : {entry['note']}")
+    return 0
+
+
+def _cmd_policy_zoo_import(args: argparse.Namespace) -> int:
+    """`policy zoo import` (SPEC.md 99, v0.85 A89.15): load a named policy
+    after re-verifying its sha256 (loud on mismatch); `--out` copies it to
+    a path ready for `run --policy rl --pretrained PATH`. rc 0 / rc 1."""
+    try:
+        _policy, path = import_policy(args.name, args.zoo, target=args.out)
+    except (ValueError, FileNotFoundError) as exc:
+        print(f"policy zoo import: {exc}", file=sys.stderr)
+        return 1
+    if args.out:
+        print(f"policy zoo import: {args.name} -> {path} "
+              "(sha256 verified)")
+    else:
+        print(f"policy zoo import: {args.name} verified at {path} (in "
+              "memory - pass --out PATH to copy it)")
+    return 0
+
+
+def _cmd_policy_zoo_export(args: argparse.Namespace) -> int:
+    """`policy zoo export` (SPEC.md 99, v0.85 A89.15): register a saved
+    policy file in the zoo under a name (its sha256 is the provenance
+    pin). rc 0 / rc 1."""
+    try:
+        policy = load_policy(args.policy, seed=0)
+    except (ValueError, FileNotFoundError) as exc:
+        print(f"policy zoo export: {exc}", file=sys.stderr)
+        return 1
+    try:
+        entry = export_policy(policy, args.name, zoo_dir=args.zoo,
+                              task=args.task,
+                              source=str(Path(args.policy).resolve()),
+                              note=args.note or "")
+    except (ValueError, TypeError, OSError) as exc:
+        print(f"policy zoo export: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(entry, indent=2, sort_keys=True))
+        return 0
+    print(f"policy zoo export: {args.name} -> {entry['path']} "
+          f"(sha256 {entry['sha256'][:16]}...; check with "
+          f"`policy zoo info {args.name}`)")
+    return 0
+
+
+def _cmd_distill(args: argparse.Namespace) -> int:
+    """`distill` (SPEC.md 99, v0.85 A89.8): the smallest spec that keeps
+    >= `--keep` of the champion's holdout score (a deterministic grid of
+    simpler specs, pure trainer derivation — zero search). Writes
+    `distill.json` into the run dir. rc 0 / rc 1 (a run that no grid
+    candidate can match is a loud failure)."""
+    try:
+        rep = distill_from_run(args.run, keep=args.keep)
+    except (ValueError, FileNotFoundError, RuntimeError) as exc:
+        print(f"distill: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(rep, indent=2, sort_keys=True))
+        return 0
+    champ = rep["champion"]
+    print(f"champion : {json.dumps(champ['spec'], sort_keys=True)}  "
+          f"({champ['n_params']} params, score {champ['score']:.2f})")
+    print(f"distilled: {json.dumps(rep['spec'], sort_keys=True)}  "
+          f"({rep['n_params']} params, score {rep['score']:.2f})")
+    kept = rep.get("kept")
+    red = rep.get("reduction")
+    kept_s = (f"{kept:.1%} of the champion score"
+              if isinstance(kept, (int, float)) else "n/a")
+    if isinstance(red, (int, float)) and red > 1.0:
+        red_s = f"{red:.1f}x smaller"
+    elif isinstance(red, (int, float)):
+        red_s = "not smaller (the champion is already on the grid)"
+    else:
+        red_s = "size n/a (the family has no parameter count)"
+    print(f"kept     : {kept_s} (threshold {args.keep:.0%}); {red_s}")
+    print(f"artifact : {Path(args.run) / 'distill.json'}")
+    return 0
+
+
+def _cmd_bench(args: argparse.Namespace) -> int:
+    """`bench` (SPEC.md 99, v0.85 A89.16): the suite leaderboard — every
+    task in the suite (or `--tasks a,b`), the same seed/budget, ranked by
+    best score; the deterministic ASCII board (or `--json`). rc 0 / rc 1
+    on an unknown task."""
+    if args.tasks:
+        tasks = tuple(t.strip() for t in args.tasks.split(",") if t.strip())
+        bad = [t for t in tasks if t not in TASKS]
+        if bad:
+            print(f"bench: unknown task(s) {bad}; valid: {sorted(TASKS)}",
+                  file=sys.stderr)
+            return 1
+    else:
+        tasks = None  # the suite default (SUITE_MULTIMODAL)
+    try:
+        out = bench_suite(tasks=tasks, seed=int(args.seed),
+                          budget=int(args.budget), runs_dir=args.runs_dir,
+                          verbose=getattr(args, "verbose", False))
+    except (ValueError, KeyError) as exc:
+        print(f"bench: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(out, indent=2, sort_keys=True))
+    else:
+        print(render_bench(out))
+    return 0
+
+
+def _cmd_warmstart(args: argparse.Namespace) -> int:
+    """`warmstart` (SPEC.md 99, v0.85 A89.12): cross-modality warm-start —
+    adapt a finished run's champion onto a task of a DIFFERENT modality
+    (grid -> convnet, sequence -> conv1d, else mlp; the champion's spec
+    re-expressed for the target family, shape-mapped weight transfer).
+    Before/after are honest (measured-None on a true mismatch). rc 0 /
+    rc 1."""
+    from .tasks import TASKS  # the registry is heavy; keep the top light
+    try:
+        target = TASKS[args.task](seed=int(args.seed))
+    except (KeyError, ValueError) as exc:
+        print(f"warmstart: cannot build the target task: {exc}",
+              file=sys.stderr)
+        return 1
+    try:
+        rep = cross_modal_adapt(args.src, target, seed=int(args.seed),
+                                steps=args.steps,
+                                max_seconds=args.max_seconds,
+                                runs_dir=args.runs_dir)
+    except (ValueError, FileNotFoundError) as exc:
+        print(f"warmstart: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(rep, indent=2, sort_keys=True))
+        return 0
+
+    def _s(x):
+        return (f"{x:.2f}"
+                if isinstance(x, (int, float)) and not isinstance(x, bool)
+                else "n/a (measured: cannot be scored there)")
+
+    wr = rep.get("warm_report") or {}
+    print(f"source    : {rep['parent_run']} ({rep['src_task']}, "
+          f"{rep['src_family']})")
+    print(f"target    : {rep['target_task']} ({rep['target_family']})")
+    print(f"before    : {_s(rep['before'])}  (the champion on the target holdout)")
+    print(f"after     : {_s(rep['after'])}  (the adapted model on the target holdout)")
+    print(f"warm start: copied={wr.get('copied')}, reshaped={wr.get('reshaped')}, "
+          f"kept_init={wr.get('kept_init')}")
+    print(f"run dir   : {rep['run_path']}")
     return 0
 
 
@@ -4383,9 +4759,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--task", default="cartpole-v1",
                        choices=sorted(TASKS), help=f"task ({', '.join(sorted(TASKS))})")
     p_run.add_argument("--policy", default="search",
-                       choices=("search", "bandit", "rl"),
+                       choices=("search", "bandit", "rl", "thompson"),
                        help="improver: v1 search (default), UCB field-bandit (v0.3),"
-                            " or the meta-RL policy")
+                            " the meta-RL policy, or Thompson sampling (v0.85, "
+                            "SPEC.md 99)")
     p_run.add_argument("--rl-episodes", type=int, default=5,
                        help="meta-RL: number of full-budget episodes to train for")
     p_run.add_argument("--rl-save", default=None, metavar="PATH",
@@ -4400,6 +4777,47 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--rl-epsilon-decay", type=float, default=1.0,
                        help="v0.53 (SPEC.md 67.2): per-episode epsilon decay "
                             "factor in (0, 1] (1.0 = no decay)")
+    p_run.add_argument("--pretrained", default=None, metavar="PATH",
+                       help="v0.85 (SPEC.md 99): load a pretrained search "
+                            "policy (a `policy pretrain --out` / `policy mine "
+                            "--out` file) as the meta-RL improver - a --rl-load "
+                            "alias (requires --policy rl)")
+    p_run.add_argument("--population", action="store_true",
+                       help="v0.85 (SPEC.md 99): a population of competing "
+                            "improvers (bandit / rl / random) over the same "
+                            "budget - the member that proposed the previous "
+                            "step is credited on acceptance and the selection "
+                            "weights adapt (opt-in; --policy is ignored)")
+    p_run.add_argument("--robust-eps", type=float, default=0.0,
+                       help="v0.85 (SPEC.md 99): the robustness gate - "
+                            "acceptance additionally requires the candidate's "
+                            "FGSM robust accuracy at eps (classification tasks "
+                            "only; 0 = off, the legacy gate)")
+    p_run.add_argument("--cost-max", type=float, default=0.0,
+                       help="v0.85 (SPEC.md 99): the cost-aware gate - "
+                            "acceptance additionally requires the candidate's "
+                            "train time <= this many seconds (0 = off, the "
+                            "legacy gate)")
+    # SPEC.md 99 (v0.85): the new spec fields - explicit pins (the 59.2
+    # steering machinery force-sets them; None = the field is freely mutable)
+    p_run.add_argument("--adapter-rank", type=int, default=None,
+                       help="v0.85 (SPEC.md 99): pin the low-rank adapter "
+                            "rank (0 = the full-width layers, the legacy "
+                            "width; a positive rank caps the effective width "
+                            "per layer)")
+    p_run.add_argument("--augment", default=None,
+                       choices=("none", "mixup", "noise", "flip", "time_warp"),
+                       help="v0.85 (SPEC.md 99): pin the training augmentation "
+                            "(none = the legacy training exactly)")
+    p_run.add_argument("--aux-pretrain", default=None,
+                       choices=("off", "nextframe"),
+                       help="v0.85 (SPEC.md 99): pin the auxiliary "
+                            "self-supervised pretraining objective (off = the "
+                            "legacy training exactly)")
+    p_run.add_argument("--fusion", default=None,
+                       choices=("early", "late"),
+                       help="v0.85 (SPEC.md 99): pin the multi-modal fusion "
+                            "mode (early = the legacy concatenation)")
     p_run.add_argument("--seed", type=int, default=7)
     p_run.add_argument("--experiments", type=int, default=30)
     p_run.add_argument("--max-seconds", type=float, default=900.0)
@@ -4704,8 +5122,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_fit.add_argument("--target", type=float, default=95.0,
                        help="your acceptance bar on final_best_score (score points)")
     p_fit.add_argument("--policy", default="bandit",
-                       choices=("search", "bandit", "rl"),
-                       help="improver: UCB field-bandit (default), v1 search, or meta-RL")
+                       choices=("search", "bandit", "rl", "thompson"),
+                       help="improver: UCB field-bandit (default), v1 search, "
+                            "meta-RL, or Thompson sampling (v0.85, SPEC.md 99)")
     p_fit.add_argument("--rl-episodes", type=int, default=5,
                        help="meta-RL: number of full-budget episodes to train for")
     p_fit.add_argument("--rl-epsilon", type=float, default=0.1,
@@ -4719,6 +5138,47 @@ def build_parser() -> argparse.ArgumentParser:
     p_fit.add_argument("--rl-epsilon-decay", type=float, default=1.0,
                        help="v0.59 (SPEC.md 73.3): per-episode epsilon decay "
                             "factor in (0, 1] (1.0 = no decay)")
+    p_fit.add_argument("--pretrained", default=None, metavar="PATH",
+                       help="v0.85 (SPEC.md 99): load a pretrained search "
+                            "policy (a `policy pretrain --out` / `policy mine "
+                            "--out` file) as the meta-RL improver - a --rl-load "
+                            "alias (requires --policy rl)")
+    p_fit.add_argument("--population", action="store_true",
+                       help="v0.85 (SPEC.md 99): a population of competing "
+                            "improvers (bandit / rl / random) over the same "
+                            "budget - the member that proposed the previous "
+                            "step is credited on acceptance and the selection "
+                            "weights adapt (opt-in; --policy is ignored)")
+    p_fit.add_argument("--robust-eps", type=float, default=0.0,
+                       help="v0.85 (SPEC.md 99): the robustness gate - "
+                            "acceptance additionally requires the candidate's "
+                            "FGSM robust accuracy at eps (classification tasks "
+                            "only; 0 = off, the legacy gate)")
+    p_fit.add_argument("--cost-max", type=float, default=0.0,
+                       help="v0.85 (SPEC.md 99): the cost-aware gate - "
+                            "acceptance additionally requires the candidate's "
+                            "train time <= this many seconds (0 = off, the "
+                            "legacy gate)")
+    # SPEC.md 99 (v0.85): the new spec fields - explicit pins (the 59.2
+    # steering machinery force-sets them; None = the field is freely mutable)
+    p_fit.add_argument("--adapter-rank", type=int, default=None,
+                       help="v0.85 (SPEC.md 99): pin the low-rank adapter "
+                            "rank (0 = the full-width layers, the legacy "
+                            "width; a positive rank caps the effective width "
+                            "per layer)")
+    p_fit.add_argument("--augment", default=None,
+                       choices=("none", "mixup", "noise", "flip", "time_warp"),
+                       help="v0.85 (SPEC.md 99): pin the training augmentation "
+                            "(none = the legacy training exactly)")
+    p_fit.add_argument("--aux-pretrain", default=None,
+                       choices=("off", "nextframe"),
+                       help="v0.85 (SPEC.md 99): pin the auxiliary "
+                            "self-supervised pretraining objective (off = the "
+                            "legacy training exactly)")
+    p_fit.add_argument("--fusion", default=None,
+                       choices=("early", "late"),
+                       help="v0.85 (SPEC.md 99): pin the multi-modal fusion "
+                            "mode (early = the legacy concatenation)")
     p_fit.add_argument("--seed", type=int, default=7)
     p_fit.add_argument("--experiments", type=int, default=30)
     p_fit.add_argument("--max-seconds", type=float, default=900.0)
@@ -5166,6 +5626,11 @@ def build_parser() -> argparse.ArgumentParser:
                       help="the wall-time cap for the training (default 30s)")
     p_ad.add_argument("--target", type=float, default=95.0,
                       help="the score bar for the met_target flag (default 95.0)")
+    p_ad.add_argument("--forget-tol", type=float, default=None,
+                      help="v0.85 (SPEC.md 99): the forgetting guard - after "
+                           "adapting, the drop on the ORIGINAL task's holdout "
+                           "must be <= this tolerance (default: off, the "
+                           "legacy adapt exactly)")
     p_ad.add_argument("--runs-dir", default="runs",
                       help="where the adapted run dir + registry live "
                            "(default runs)")
@@ -5350,6 +5815,179 @@ def build_parser() -> argparse.ArgumentParser:
     p_ver.add_argument("--run", required=True, help="path to a run directory")
     _add_config_flag(p_ver)  # 47.1.2
     p_ver.set_defaults(func=_cmd_verify)
+
+    # --- SPEC.md 99 (v0.85): the self-improvement / ecosystem surface -------
+    p_meta = sub.add_parser(
+        "meta", help="v0.85 (SPEC.md 99): the meta-optimization loop - N "
+                     "full-budget episodes, each mutating one meta-knob (UCB) "
+                     "and credited on whether it improved",
+        epilog="examples:\n"
+               "  autorefine meta --task parity-v1 --episodes 3 --budget 4",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p_meta.add_argument("--task", default="parity-v1",
+                        choices=sorted(TASKS),
+                        help=f"task ({', '.join(sorted(TASKS))})")
+    p_meta.add_argument("--episodes", type=int, default=3,
+                        help="number of full-budget episodes (1 = a single "
+                             "legacy run; default 3)")
+    p_meta.add_argument("--budget", type=int, default=6,
+                        help="experiments per episode (default 6)")
+    p_meta.add_argument("--seed", type=int, default=7)
+    p_meta.add_argument("--runs-dir", default="runs")
+    p_meta.add_argument("--verbose", action="store_true",
+                        help="print one line per episode as it runs")
+    p_meta.add_argument("--json", action="store_true",
+                        help="print the result as pure JSON")
+    _add_config_flag(p_meta)  # 47.1.2
+    p_meta.set_defaults(func=_cmd_meta)
+
+    p_pol = sub.add_parser(
+        "policy", help="v0.85 (SPEC.md 99): the policy laboratory - mine / "
+                       "pretrain / zoo (a hash-pinned index of saved policies)",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p_pol_sub = p_pol.add_subparsers(dest="policy_cmd", required=True)
+
+    p_mine = p_pol_sub.add_parser(
+        "mine", help="fit a meta-RL policy from finished runs' logs "
+                     "(AWR-weighted, zero new training)")
+    p_mine.add_argument("--runs", action="append", required=True,
+                        metavar="RUN_DIR", help="a finished run dir (repeatable)")
+    p_mine.add_argument("--seed", type=int, default=7)
+    p_mine.add_argument("--beta", type=float, default=1.0,
+                        help="the AWR temperature (beta > 0; default 1.0)")
+    p_mine.add_argument("--lr", type=float, default=0.5,
+                        help="the weighted-likelihood step (default 0.5)")
+    p_mine.add_argument("--epochs", type=int, default=1,
+                        help="replay passes over the transitions (default 1)")
+    p_mine.add_argument("--out", default=None, metavar="PATH",
+                        help="save the mined policy (the `run --policy rl "
+                             "--pretrained PATH` input)")
+    p_mine.set_defaults(func=_cmd_policy_mine)
+
+    p_pre = p_pol_sub.add_parser(
+        "pretrain", help="pretrain one task-conditioned policy over several "
+                         "tasks (the SPEC.md 20.2 transfer channel) and save "
+                         "it with --out")
+    p_pre.add_argument("--tasks", default=None, metavar="T1,T2,...",
+                       help="comma-separated task names (default: "
+                            "parity-v1, sine-v1, sequence-motif-v1)")
+    p_pre.add_argument("--seed", type=int, default=7)
+    p_pre.add_argument("--episodes", type=int, default=3,
+                       help="full-budget RL episodes per task (default 3)")
+    p_pre.add_argument("--budget", type=int, default=6,
+                       help="experiments per episode (default 6)")
+    p_pre.add_argument("--runs-dir", default="runs")
+    p_pre.add_argument("--out", default=None, metavar="PATH",
+                       help="where to persist the pretrained policy")
+    p_pre.set_defaults(func=_cmd_policy_pretrain)
+
+    p_zoo = p_pol_sub.add_parser(
+        "zoo", help="the policy zoo - a named, hash-pinned index of saved "
+                    "search policies")
+    p_zoo_sub = p_zoo.add_subparsers(dest="zoo_cmd", required=True)
+    p_zl = p_zoo_sub.add_parser(
+        "list", help="list the zoo's entries (sorted by name)")
+    p_zl.add_argument("--zoo", default="policies/zoo",
+                      help="the zoo directory (default policies/zoo)")
+    p_zl.add_argument("--json", action="store_true",
+                      help="print the index as pure JSON")
+    p_zl.set_defaults(func=_cmd_policy_zoo_list)
+    p_zi = p_zoo_sub.add_parser(
+        "info", help="show one entry (with sha256 verification)")
+    p_zi.add_argument("name", help="the policy's name in the zoo")
+    p_zi.add_argument("--zoo", default="policies/zoo",
+                      help="the zoo directory (default policies/zoo)")
+    p_zi.add_argument("--json", action="store_true",
+                      help="print the entry as pure JSON")
+    p_zi.set_defaults(func=_cmd_policy_zoo_info)
+    p_zin = p_zoo_sub.add_parser(
+        "import", help="load a named policy after re-verifying its sha256; "
+                       "--out copies it to a path")
+    p_zin.add_argument("name", help="the policy's name in the zoo")
+    p_zin.add_argument("--zoo", default="policies/zoo",
+                       help="the zoo directory (default policies/zoo)")
+    p_zin.add_argument("--out", default=None, metavar="PATH",
+                       help="copy the verified policy to this path")
+    p_zin.set_defaults(func=_cmd_policy_zoo_import)
+    p_zo = p_zoo_sub.add_parser(
+        "export", help="register a saved policy file under a name (its "
+                       "sha256 becomes the provenance pin)")
+    p_zo.add_argument("--policy", required=True, metavar="PATH",
+                      help="the saved policy file (a `save_policy` npz)")
+    p_zo.add_argument("--name", required=True,
+                      help="the zoo name (a safe file stem)")
+    p_zo.add_argument("--zoo", default="policies/zoo",
+                      help="the zoo directory (default policies/zoo)")
+    p_zo.add_argument("--task", default=None, help="the task it was learned on")
+    p_zo.add_argument("--note", default="", help="a free-form note")
+    p_zo.add_argument("--json", action="store_true",
+                      help="print the index entry as pure JSON")
+    p_zo.set_defaults(func=_cmd_policy_zoo_export)
+    _add_config_flag(p_pol)  # 47.1.2
+
+    p_dis = sub.add_parser(
+        "distill", help="v0.85 (SPEC.md 99): the smallest spec that keeps >= "
+                        "--keep of a run's champion score (pure derivation, "
+                        "zero search)",
+        epilog="examples:\n"
+               "  autorefine distill --run runs/<run_id> --keep 0.95",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p_dis.add_argument("--run", required=True, help="path to a run directory")
+    p_dis.add_argument("--keep", type=float, default=0.95,
+                       help="the fraction of the champion score to keep "
+                            "(in (0, 1]; default 0.95)")
+    p_dis.add_argument("--json", action="store_true",
+                       help="print the report as pure JSON")
+    _add_config_flag(p_dis)  # 47.1.2
+    p_dis.set_defaults(func=_cmd_distill)
+
+    p_ben = sub.add_parser(
+        "bench", help="v0.85 (SPEC.md 99): the suite leaderboard - every task "
+                      "in the suite (or --tasks a,b), the same seed/budget, "
+                      "ranked by best score",
+        epilog="examples:\n"
+               "  autorefine bench --budget 6 --seed 7\n"
+               "  autorefine bench --tasks parity-v1,sine-v1 --json",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p_ben.add_argument("--suite", default="multimodal",
+                       choices=("multimodal",),
+                       help="the suite name (default multimodal; the task "
+                            "list is --tasks when given)")
+    p_ben.add_argument("--tasks", default=None, metavar="T1,T2,...",
+                       help="override the suite's task list (comma-separated)")
+    p_ben.add_argument("--seed", type=int, default=7)
+    p_ben.add_argument("--budget", type=int, default=6,
+                       help="experiments per task (default 6)")
+    p_ben.add_argument("--runs-dir", default="runs")
+    p_ben.add_argument("--verbose", action="store_true",
+                       help="print one line per task as it runs")
+    p_ben.add_argument("--json", action="store_true",
+                       help="print the result as pure JSON")
+    _add_config_flag(p_ben)  # 47.1.2
+    p_ben.set_defaults(func=_cmd_bench)
+
+    p_warm = sub.add_parser(
+        "warmstart", help="v0.85 (SPEC.md 99): cross-modality warm-start - "
+                          "adapt a run's champion onto a task of a DIFFERENT "
+                          "modality (grid -> convnet, sequence -> conv1d, "
+                          "else mlp)",
+        epilog="examples:\n"
+               "  autorefine warmstart --src runs/<run_id> --task sine-v1",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p_warm.add_argument("--src", required=True,
+                        help="the source run dir (the champion to adapt)")
+    p_warm.add_argument("--task", required=True, choices=sorted(TASKS),
+                        help=f"the target task ({', '.join(sorted(TASKS))})")
+    p_warm.add_argument("--seed", type=int, default=7)
+    p_warm.add_argument("--steps", type=int, default=None,
+                        help="training steps (default: the champion's spec)")
+    p_warm.add_argument("--max-seconds", type=float, default=30.0,
+                        help="the wall-time cap for the training (default 30s)")
+    p_warm.add_argument("--runs-dir", default="runs")
+    p_warm.add_argument("--json", action="store_true",
+                        help="print the report as pure JSON")
+    _add_config_flag(p_warm)  # 47.1.2
+    p_warm.set_defaults(func=_cmd_warmstart)
 
     return parser
 

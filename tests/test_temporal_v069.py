@@ -10,7 +10,7 @@ families, and a built-in sequence task that demonstrates them:
     yield 3-D X; ``wants_sequence`` models read it natively, every other
     family reads the flattened rows; a conv1d/rnn spec on flat data is a
     clean SpecError; the three new spec fields are out of the bandit's
-    14-field stream but in the 106-action catalog;
+    14-field stream but in the 120-action catalog;
   * 83.2  — `models.conv1d.Conv1D`: causal conv -> pool -> FC -> head,
     the shared ``.layers`` / ``.loss_and_grads`` contract (the
     _train_neural loop), analytic gradients, plain-array save/load;
@@ -306,8 +306,8 @@ def test_model_family_and_registry_growth():
     a sampler; the three are out of the bandit's 14-field stream."""
     assert set(MODEL_FAMILIES) >= {"mlp", "tree", "boost", "knn", "convnet",
                                    "gp", "gam", "conv1d", "rnn"}
-    assert len(SPEC_FIELDS) == 21
-    assert set(FIELD_NAMES) == set(SPEC_FIELDS) and len(FIELD_NAMES) == 21
+    assert len(SPEC_FIELDS) == 25
+    assert set(FIELD_NAMES) == set(SPEC_FIELDS) and len(FIELD_NAMES) == 25
     assert {"conv1d_filters", "conv1d_kernel", "rnn_hidden"} <= set(SPEC_FIELDS)
     assert set(FIELD_SAMPLERS) == set(SPEC_FIELDS)
     assert len(SEARCH_FIELDS) == 14
@@ -316,22 +316,24 @@ def test_model_family_and_registry_growth():
 
 
 def test_catalog_and_family_fields_growth():
-    """A73 (83.5.4): the catalog grows to 106 actions (the 21-field
+    """A73 (83.5.4): the catalog grows to 120 actions (the 25-field
     registry); conv1d / rnn expose the full 21-field row set (their own
     knobs included); the pre-v0.69 mlp / convnet pools keep the 18-field
     v0.64 set (83.2.5 — the §18.7 bit-exact bandit stream must not see
     the new knobs); the sequence task offers the temporal families and no
     pre-v0.69 task changes its offer."""
-    assert len(CATALOG_FIELDS) == 21
-    assert len(ACTIONS) == 106
+    assert len(CATALOG_FIELDS) == 25
+    assert len(ACTIONS) == 120
     # conv1d / rnn: the full row set, including their own knobs
     assert FAMILY_FIELDS["conv1d"] == CATALOG_FIELDS
     assert FAMILY_FIELDS["rnn"] == CATALOG_FIELDS
-    # mlp / convnet: the pre-v0.69 18-field set (83.2.5, §18.7 pin safety)
+    # mlp / convnet: the pre-v0.69 18-field set + the v0.85
+    # self-improvement fields (18 + 4 = 22; 83.2.5, §18.7 pin safety is
+    # carried by the 14-field SEARCH_FIELDS exclusion, not this pool)
     legacy = tuple(f for f in CATALOG_FIELDS
                    if f not in ("conv1d_filters", "conv1d_kernel",
                                 "rnn_hidden"))
-    assert len(legacy) == 18
+    assert len(legacy) == 22
     assert FAMILY_FIELDS["mlp"] == legacy
     assert FAMILY_FIELDS["convnet"] == legacy
     assert relevant_families("sequence-motif-v1") == \
@@ -466,16 +468,16 @@ def test_env_run_on_sequence_task(tmp_path):
 # --- 83.5.7 version + spec (A73) -------------------------------------------------
 
 def test_version_and_spec_cite_a73():
-    """A73 (83.5.7): the version steps to 0.84.0 in both sources (33.1);
+    """A73 (83.5.7): the version steps to 0.85.0 in both sources (33.1);
     SPEC.md carries the section 83 + the A-index row resolving to this
     file (the coherency index test in tests/test_coherency_v021.py does
     the cross-check)."""
     py = tomllib.loads(
         (REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.84.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.85.0"
     init = (REPO / "src" / "autorefine" / "__init__.py").read_text(
         encoding="utf-8")
-    assert '"0.84.0"' in init
+    assert '"0.85.0"' in init
     spec = SPEC.read_text(encoding="utf-8")
     assert "## 83." in spec and "Acceptance (A73)" in spec
     assert "| M72 | v0.69" in spec

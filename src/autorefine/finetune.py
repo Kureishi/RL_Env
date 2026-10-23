@@ -20,6 +20,7 @@ from typing import Any
 import numpy as np
 
 from .config import DEFAULT_SPEC, ModelSpec
+from .models.adapters import AdapterMLP  # SPEC.md 99 (v0.85): B1
 from .models.conv1d import Conv1D
 from .models.convnet import ConvNet
 from .models.gam import GAM
@@ -33,7 +34,8 @@ from .models.trees import BoostingEnsemble, TreeEnsemble
 # weights). The non-parametric families (tree/boost/knn/gp/gam) memorize
 # the training rows — there is nothing to copy (80.3.3).
 # SPEC.md 83 (v0.69): the native temporal families carry weights too.
-PARAMETRIC = ("mlp", "convnet", "conv1d", "rnn")
+# SPEC.md 99 (v0.85): the adapter family carries its adapter weights.
+PARAMETRIC = ("mlp", "convnet", "conv1d", "rnn", "adapter")
 
 
 @dataclass(frozen=True)
@@ -74,6 +76,11 @@ def _detect_family(files: set[str]) -> str:
         return "boost"
     if "n_trees" in files and "max_depth" in files:
         return "tree"
+    # SPEC.md 99 (v0.85): the adapter checkpoint shares the mlp's layer keys
+    # but also carries the ``rank`` / ``ad{i}_V`` markers — check it BEFORE
+    # the mlp fallback so an adapter file is never loaded as a plain MLP.
+    if "rank" in files and "ad0_V" in files and "n_blocks" in files:
+        return "adapter"
     if "n_layers" in files and "layer0_w" in files:
         return "mlp"
     raise ValueError(
@@ -92,6 +99,11 @@ def _spec_for(family: str, model: Any) -> ModelSpec:
         d["architecture"] = [int(w.shape[1]) for w, _b in model.layers[:-1]]
         d["activation"] = model.activation
         d["fourier_features"] = int(model.fourier_K)
+    elif family == "adapter":  # SPEC.md 99 (v0.85): B1 — mlp spec + rank
+        d["architecture"] = [int(w.shape[1]) for w, _b in model.backbone[:-1]]
+        d["activation"] = model.activation
+        d["fourier_features"] = int(model.fourier_K)
+        d["adapter_rank"] = int(model.rank)
     elif family == "convnet":
         d["model_family"] = "convnet"
         d["architecture"] = [int(model.c1), int(model.c2)]
@@ -145,6 +157,7 @@ def load_checkpoint(path: str | Path) -> Checkpoint:
         "rnn": RNN.load, "knn": KNN.load,
         "gp": GP.load, "gam": GAM.load,
         "tree": TreeEnsemble.load, "boost": BoostingEnsemble.load,
+        "adapter": AdapterMLP.load,  # SPEC.md 99 (v0.85): B1
     }
     model = loaders[family](str(p))
     spec = _spec_for(family, model)
@@ -167,7 +180,9 @@ def validate_for_task(cp: Checkpoint, task: Any) -> tuple[bool, str]:
     if cp.n_out != task.n_outputs:
         return False, (f"output count mismatch: the model has {cp.n_out} "
                        f"output(s) but the task has {task.n_outputs}")
-    if cp.family == "mlp":
+    if cp.family in ("mlp", "adapter"):
+        # SPEC.md 99 (v0.85): the adapter family has the same input contract
+        # as the mlp (frozen backbone of the same width)
         K = int(cp.model.fourier_K)
         want = int(task.state_dim) * (2 * K + 1)
         if cp.model.in_dim != want:
@@ -219,7 +234,11 @@ def can_warm_start(cp: Checkpoint, spec: ModelSpec, n_out: int, head: str,
     hidden architecture, the same spectral order, and (when known) the
     same input width. Non-parametric families always return False — the
     candidate trains fresh, exactly as pre-v0.66."""
-    if cp.family != spec.model_family:
+    # SPEC.md 99 (v0.85): an adapter checkpoint belongs to the mlp family's
+    # spec space (adapter_rank > 0) — allow that one cross-family pairing;
+    # every other mismatch is refused below.
+    if cp.family != spec.model_family and not (
+            cp.family == "adapter" and spec.model_family == "mlp"):
         return False
     if cp.head != head or cp.n_out != n_out:
         return False
@@ -228,7 +247,27 @@ def can_warm_start(cp: Checkpoint, spec: ModelSpec, n_out: int, head: str,
     m = cp.model
     if m.activation != spec.activation:
         return False
+    # SPEC.md 99 (v0.85): B1 — an adapter checkpoint seeds an mlp spec only
+    # when that spec itself uses adapters (rank > 0); the backbone is frozen
+    # in both, so the trainable blocks are the adapter pairs of equal rank.
+    if cp.family == "adapter":
+        if spec.model_family != "mlp" or int(spec.adapter_rank) < 1:
+            return False
+        if int(m.rank) != int(spec.adapter_rank):
+            return False
+        hidden = tuple(int(w.shape[1]) for w, _b in m.backbone[:-1])
+        if hidden != tuple(spec.architecture):
+            return False
+        if int(m.fourier_K) != int(spec.fourier_features):
+            return False
+        if in_dim is not None and m.in_dim != int(in_dim):
+            return False
+        return True
     if cp.family == "mlp":
+        # SPEC.md 99 (v0.85): a plain MLP carries no adapter weights — it
+        # cannot seed an adapter spec (only an adapter checkpoint can).
+        if int(spec.adapter_rank) > 0:
+            return False
         hidden = tuple(int(w.shape[1]) for w, _b in m.layers[:-1])
         if hidden != tuple(spec.architecture):
             return False

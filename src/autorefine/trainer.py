@@ -25,6 +25,9 @@ import numpy as np
 
 from .config import ModelSpec, SpecError
 from .finetune import copy_weights  # SPEC.md 80 (v0.66): fine-tune seed
+from .models.adapters import AdapterMLP  # SPEC.md 99 (v0.85): B1 adapters
+from .models.augment import augment_batch  # SPEC.md 99 (v0.85): B5
+from .models.fusion import LateFusionMLP  # SPEC.md 99 (v0.85): C1 late fusion
 from .models.conv1d import Conv1D  # SPEC.md 83 (v0.69): native temporal family
 from .models.convnet import ConvNet
 from .models.gam import GAM
@@ -35,14 +38,15 @@ from .models.mlp import MLP, _sample_weights  # SPEC.md 84.1 (v0.70)
 from .models.optimizers import make_optimizer
 from .models.rnn import RNN  # SPEC.md 83 (v0.69): native temporal family
 from .models.trees import BoostingEnsemble, TreeEnsemble
+from .warmstart import cross_modal_warm_start  # SPEC.md 99 (v0.85, C2)
 
 __all__ = ["fourier_expand"]
 
 Dataset = Tuple[np.ndarray, np.ndarray]  # (features (n, d), targets (n,) or (n, k))
 # SPEC.md 83 (v0.69): Conv1D / RNN are the native temporal families over a
 # (T, C) sequence layout; they join the Model union and the shared neural loop.
-Model = Union[MLP, TreeEnsemble, BoostingEnsemble, KNN, ConvNet, GP, GAM,
-              Conv1D, RNN]
+Model = Union[MLP, AdapterMLP, TreeEnsemble, BoostingEnsemble, KNN,
+              ConvNet, GP, GAM, Conv1D, RNN]
 
 # SPEC.md 19.1: warmup fraction for the "warmup_cosine" schedule, and the
 # internal validation-split fraction used for early stopping (both fixed, so
@@ -51,6 +55,49 @@ WARMUP_FRACTION = 0.1
 VAL_FRACTION = 0.1
 # SPEC.md 28.1: cap on TrainResult.loss_history records (bounded, C1)
 LOSS_HISTORY_MAX = 48
+
+# SPEC.md 99 (v0.85) B2: fixed self-supervised next-frame pretrain steps
+# (deterministic — plain full-batch SGD, no RNG beyond the model init).
+AUX_PRETRAIN_STEPS = 128
+
+
+def _aux_pretrain_temporal(model: Model, spec: ModelSpec, seed: int,
+                           T: int, C: int, X: np.ndarray) -> None:
+    """SPEC.md 99 (v0.85) B2 — self-supervised next-frame pretrain.
+
+    Builds a T-1 auxiliary temporal model (same seed → identical trunk init
+    as `model`), trains it for `AUX_PRETRAIN_STEPS` full-batch SGD steps at
+    `spec.learning_rate` on (history → next frame, mse over the C channel
+    dim), then copies the shape-matching trunk slots into `model`. The task
+    head (and any T-dependent slot, e.g. Conv1D's FC) stays at its init.
+    Deterministic (no RNG); a no-op when the aux model cannot be built
+    (e.g. T-1 shorter than the conv kernel)."""
+    if T <= 1:
+        return
+    try:
+        if spec.model_family == "conv1d":
+            if T - 1 < 2 or int(spec.conv1d_kernel) > T - 1:
+                return
+            aux: Model = Conv1D(
+                T - 1, C, int(spec.conv1d_filters), int(spec.conv1d_kernel),
+                C, spec.activation, seed, "mse")
+        else:
+            aux = RNN(T - 1, C, int(spec.rnn_hidden), C, spec.activation,
+                      seed, "mse")
+    except SpecError:
+        return
+    xa = X[:, :-1, :]     # (n, T-1, C) history
+    yt = X[:, -1, :]      # (n, C) the next frame
+    lr = float(spec.learning_rate)
+    for _ in range(AUX_PRETRAIN_STEPS):
+        _loss, grads = aux.loss_and_grads(xa, yt)
+        for i, ((w, b), (gw, gb)) in enumerate(zip(aux.layers, grads)):
+            aux.layers[i] = (w - lr * gw, b - lr * gb)
+    # Copy trunk slots with identical shapes; never the final (task) head.
+    for i in range(len(model.layers) - 1):
+        slot, aux_slot = model.layers[i], aux.layers[i]
+        if slot[0].shape == aux_slot[0].shape:
+            model.layers[i] = aux_slot
 
 
 def _scheduled_lr(schedule: str, base_lr: float, t: int, total: int) -> float:
@@ -236,12 +283,21 @@ def _train_neural(
     else:
         scheduled = True
 
+    # SPEC.md 99 (v0.85): B5 — data augmentation. A SEPARATE rng stream
+    # ([seed, 90000]) so enabling it never perturbs the batch-sampler stream;
+    # "none" draws nothing, keeping the legacy path bit-identical.
+    augment_mode = spec.augment
+    aug_rng = (np.random.default_rng([seed, 90000])
+               if augment_mode != "none" else None)
+
     for t in range(1, T + 1):
         idx = rng.integers(0, n_tr, batch)
         xb = X[idx]
         if noise > 0.0:
             xb = xb + rng.normal(0.0, noise, xb.shape)
         yb = y[idx]
+        if aug_rng is not None:  # SPEC.md 99 (v0.85): B5 (opt-in)
+            xb, yb = augment_batch(xb, yb, augment_mode, aug_rng, head)
         # SPEC.md 84.1: the batch carries the same rows' sample weights
         # (the RNG draw above is untouched — determinism, G2)
         swb = sample_weight[idx] if sample_weight is not None else None
@@ -321,6 +377,8 @@ def train(
     warm_start: Any | None = None,
     sample_weight: np.ndarray | None = None,
     parallel: int = 1,
+    cross_modal: bool = False,
+    fusion_split: int | None = None,
 ) -> TrainResult:
     """Train one spec on one dataset.
 
@@ -492,7 +550,11 @@ def train(
             n_out, spec.activation, seed, head, spec.init_scale,
         )  # SPEC.md 25.3 (audio temporal model + image spatial model)
         if warm_start is not None:  # SPEC.md 80 (v0.66): fine-tune seed
-            copy_weights(model, warm_start)
+            if not copy_weights(model, warm_start) and cross_modal:
+                # SPEC.md 99 (v0.85) C2: the cross-modality fallback —
+                # a partial, shape-mapped transfer (opt-in; the strict
+                # 80.3 path is unchanged when cross_modal is False)
+                model.xmodal_report = cross_modal_warm_start(model, warm_start)
         return _train_neural(model, X, y, n, spec, seed, start,
                              time_limit_seconds, time_check_every, head,
                              sample_weight=sample_weight)  # SPEC.md 84.1
@@ -522,8 +584,16 @@ def train(
         if time_limit_seconds is not None and time_limit_seconds <= 0.0:
             return TrainResult(_build_temporal(), 0, float("inf"), 0.0, True)
         model = _build_temporal()
+        # SPEC.md 99 (v0.85) B2: "nextframe" = self-supervised next-frame
+        # pretrain of the trunk before supervised fine-tuning (opt-in;
+        # "off" is the exact legacy path, bit-identical).
+        if spec.aux_pretrain == "nextframe":
+            _aux_pretrain_temporal(model, spec, seed, T, C, X)
         if warm_start is not None:  # SPEC.md 80 (v0.66): the fine-tune seed
-            copy_weights(model, warm_start)
+            # (an explicit checkpoint wins over the SSL init)
+            if not copy_weights(model, warm_start) and cross_modal:
+                # SPEC.md 99 (v0.85) C2: the cross-modality fallback
+                model.xmodal_report = cross_modal_warm_start(model, warm_start)
         return _train_neural(model, X, y, n, spec, seed, start,
                              time_limit_seconds, time_check_every, head,
                              sample_weight=sample_weight)  # SPEC.md 84.1
@@ -540,13 +610,51 @@ def train(
     else:
         fourier_scale = None
         in_dim = int(X.shape[1])
-    model = MLP(
-        in_dim, spec.architecture, n_out=n_out, activation=spec.activation,
-        seed=seed, head=head, init_scale=spec.init_scale,  # SPEC.md 19.1
-        fourier_K=K, fourier_scale=fourier_scale,  # SPEC.md 78
-    )
+    # SPEC.md 99 (v0.85): B1 — adapter_rank > 0 swaps in the frozen-backbone
+    # AdapterMLP (same Glorot backbone init as MLP for this seed; only the
+    # rank-r adapter pairs are trainable). rank 0 is the exact legacy MLP
+    # path (bit-identical — the T2 / 18.7 pins stay green).
+    # SPEC.md 99 (v0.85): C1 — fusion "late" swaps in the two-tower
+    # LateFusionMLP: an image tower over the first `fusion_split` dims and a
+    # text tower over the rest, then the shared head. Mutually exclusive
+    # with the adapter (both re-parameterize the mlp surface) and with the
+    # Fourier expansion (a shared input map would break the two towers).
+    if int(spec.adapter_rank) > 0:
+        if spec.fusion == "late":
+            raise SpecError(
+                "fusion='late' and adapter_rank>0 are mutually exclusive "
+                "(SPEC.md 99)")
+        model = AdapterMLP(
+            in_dim, spec.architecture, n_out=n_out, activation=spec.activation,
+            seed=seed, head=head, init_scale=spec.init_scale,  # SPEC.md 19.1
+            rank=int(spec.adapter_rank),
+            fourier_K=K, fourier_scale=fourier_scale,  # SPEC.md 78 / 99
+        )
+    elif spec.fusion == "late":
+        if K > 0:
+            raise SpecError(
+                "fusion='late' is incompatible with fourier_features>0 "
+                "(SPEC.md 99)")
+        if (not isinstance(fusion_split, int) or isinstance(fusion_split, bool)
+                or not (0 < fusion_split < in_dim)):
+            raise SpecError(
+                f"fusion='late' needs a valid fusion_split in "
+                f"(0, {in_dim}); got {fusion_split!r} (SPEC.md 99)")
+        model = LateFusionMLP(
+            int(fusion_split), in_dim - int(fusion_split), spec.architecture,
+            n_out=n_out, activation=spec.activation, seed=seed, head=head,
+            init_scale=spec.init_scale,  # SPEC.md 19.1
+        )
+    else:
+        model = MLP(
+            in_dim, spec.architecture, n_out=n_out, activation=spec.activation,
+            seed=seed, head=head, init_scale=spec.init_scale,  # SPEC.md 19.1
+            fourier_K=K, fourier_scale=fourier_scale,  # SPEC.md 78
+        )
     if warm_start is not None:  # SPEC.md 80 (v0.66): the fine-tune seed
-        copy_weights(model, warm_start)
+        if not copy_weights(model, warm_start) and cross_modal:
+            # SPEC.md 99 (v0.85) C2: the cross-modality fallback
+            model.xmodal_report = cross_modal_warm_start(model, warm_start)
     return _train_neural(model, X, y, n, spec, seed, start,
                          time_limit_seconds, time_check_every, head,
                          sample_weight=sample_weight)  # SPEC.md 84.1
@@ -567,4 +675,6 @@ def train_from_task(
     return train(
         dataset, spec, seed, time_limit_seconds,
         n_out=task.n_outputs, head=task.head,
+        # SPEC.md 99 (v0.85) C1: fusion tasks expose their image/text split
+        fusion_split=getattr(task, "fusion_split", None),
     )

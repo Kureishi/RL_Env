@@ -499,7 +499,9 @@ def save_policy(policy: MetaRLPolicy, path) -> Path:
     # 68.2.1 (v0.54, A58): the array dict comes from `_policy_arrays` —
     # one home with `policy_to_bytes`, so file and bytes cannot drift.
     np.savez_compressed(p, **_policy_arrays(policy))
-    return p
+    # numpy appends `.npz` to a path that lacks it — return the file that
+    # was actually written, so callers can load what `save_policy` saved
+    return p if str(p).endswith(".npz") else Path(str(p) + ".npz")
 
 
 def load_policy(path, seed: int = 0) -> MetaRLPolicy:
@@ -514,6 +516,10 @@ def load_policy(path, seed: int = 0) -> MetaRLPolicy:
     loaded policy is bit-exact: same-seed `propose` streams are identical to
     the original's (67.1.3)."""
     p = Path(path)
+    # the save-side `.npz`-appending: a path without the suffix resolves to
+    # the file `save_policy` actually wrote (the round-trip is the contract)
+    if not p.exists() and Path(str(p) + ".npz").exists():
+        p = Path(str(p) + ".npz")
     # 68.2.1 (v0.54, A58): the reconstruction + 67.1.2 validation come from
     # `_policy_from_npz` — one home with `policy_from_bytes`.
     with np.load(p, allow_pickle=False) as z:

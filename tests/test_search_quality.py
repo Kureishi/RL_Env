@@ -152,9 +152,10 @@ def test_relevant_fields_and_actions():
     optimizer/lr/batch/weight-decay/activation/label-smoothing and the
     mlp-only fields; mlp uses the 18 pre-v0.69 fields (v0.11: +knn_k; v0.64:
     +fine-pattern fields, consumed where they apply); the action space is
-    106 (77 v0.11 + v0.61 value-level: gp/gam families, adamw optimizer,
+    120 (77 v0.11 + v0.61 value-level: gp/gam families, adamw optimizer,
     3 schedules + the v0.64 fine-pattern fields, 3 × 4 values + the v0.69
-    temporal families, SPEC.md 83: 9 model families + 3 fields × 3 values).
+    temporal families, SPEC.md 83: 9 model families + 3 fields × 3 values
+    + the v0.85 self-improvement fields, SPEC.md 99: 14 values).
     SPEC.md 83.2.5: the v0.69 temporal knobs are conv1d/rnn-only bandit
     fields — they are NOT in the mlp pool (the §18.7 bit-exact stream's
     lexicographic cold-start tie-break must stay wd -> steps -> optimizer)."""
@@ -163,7 +164,7 @@ def test_relevant_fields_and_actions():
     assert set(relevant_fields("mlp")) == mlp_pool
     assert set(relevant_fields("tree")) == set(TREE_FIELDS)
     assert set(relevant_fields("boost")) == set(TREE_FIELDS)  # SPEC.md 19.2
-    assert len(ACTIONS) == 106
+    assert len(ACTIONS) == 120
     tree_actions = relevant_actions("tree")
     assert len(tree_actions) == 41  # arch 23 + steps 5 + noise 4 + family 9 (SPEC.md 75/83)
     assert set(tree_actions) < set(range(len(ACTIONS)))
@@ -171,7 +172,7 @@ def test_relevant_fields_and_actions():
     # mlp: every action except the three temporal-knob ones (SPEC.md 83.2.5)
     mlp_actions = {i for i, (f, _v) in enumerate(ACTIONS) if f in mlp_pool}
     assert set(relevant_actions("mlp")) == mlp_actions
-    assert len(mlp_actions) == 106 - 9  # 3 fields × 3 values stay out
+    assert len(mlp_actions) == 120 - 9  # 3 fields × 3 values stay out
 
 
 def test_bandit_tree_best_stays_in_relevant_fields():
@@ -394,6 +395,33 @@ def _ci_mixed_dir(base: Path) -> Path:
     return d
 
 
+def _ci_fusion_dir(base: Path) -> Path:
+    """Two bar-orientation classes as an `index.csv` of (image, text, label)
+    rows (SPEC.md 99, v0.85 C1) — the index layout, so each class can
+    contribute several items (the subfolder layout yields one per class,
+    too few for the train/holdout/gen split)."""
+    pytest.importorskip("PIL", reason="fusion fixture needs autorefine[image] (SPEC.md 24.1)")
+    from PIL import Image
+    d = base / "fusion"
+    d.mkdir(parents=True)
+    rows = []
+    for name, vertical in (("h", False), ("v", True)):
+        for i in range(5):
+            a = np.zeros((16, 16), dtype=np.uint8)
+            if vertical:
+                a[:, 4:12] = 255
+            else:
+                a[4:12, :] = 255
+            Image.fromarray(a, mode="L").save(str(d / f"f{i:02d}.png"))
+            (d / f"f{i:02d}.txt").write_text(
+                "vertical bars" if vertical else "horizontal bars",
+                encoding="utf-8")
+            rows.append(f"f{i:02d}.png,f{i:02d}.txt,{name}")
+    (d / "index.csv").write_text(
+        "image,text,label\n" + "\n".join(rows) + "\n", encoding="utf-8")
+    return d
+
+
 def _ci_video_dir(base: Path) -> Path:
     """slow/fast clip folders (SPEC.md 92.6, v0.78); decoding is
     monkeypatched at `imageio.v3.imread` by the caller."""
@@ -422,6 +450,11 @@ def test_score_with_ci_all_tasks(task_name, tmp_path, monkeypatch):
         task = TASKS[task_name](seed=1, path=str(_ci_text_dir(tmp_path)))
     elif task_name == "signal":
         task = TASKS[task_name](seed=1, path=str(_ci_signal_dir(tmp_path)))
+    elif task_name == "fusion":
+        # SPEC.md 99 (v0.85 C1): the file-based fusion task needs a
+        # (image, text) pair directory (the synthetic `fusion-v1` takes
+        # the else branch)
+        task = TASKS[task_name](seed=1, path=str(_ci_fusion_dir(tmp_path)))
     elif task_name == "jsonl":
         task = TASKS[task_name](seed=1, path=str(_ci_jsonl(tmp_path)))
     elif task_name == "midi":

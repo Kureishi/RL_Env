@@ -5,7 +5,7 @@ The improver loop proposes model-configuration changes, trains, evaluates on
 splits it never saw, records the outcome, and proposes the next change — all
 within a hard budget, fully reproducible, NumPy-only.
 
-**Current version: 0.84.0.** Input modalities: CSV and JSONL records,
+**Current version: 0.85.0.** Input modalities: CSV and JSONL records,
 plus labelled image / audio / text / signal / MIDI / point-cloud /
 video / mixed directories — all via `autorefine fit --data PATH`.
 
@@ -304,7 +304,8 @@ changes is the *space* it searches and the *surfaces* that explain it.
   XOR — linear models provably can't solve it; an MLP reaches the ≈75 Bayes
   ceiling), `sequence-motif-v1` (temporal motif — drives the `conv1d` /
   `rnn` families), `medical-v1` / `finance-v1` (domain packs), `csv`
-  (your own CSV), and labelled image / audio / text / signal / MIDI /
+  (your own CSV), `fusion` / `fusion-v1` (image + text fusion), and
+  labelled image / audio / text / signal / MIDI /
   point-cloud / video / mixed directories plus JSONL records (SPEC §92).
 - **Model families** — `mlp` (depth 0..3; 0 = linear), `tree` (bagged
   CART), `boost` (gradient-boosted CART — clearly stronger than bag on
@@ -402,6 +403,7 @@ carries the full detail; this table is the index.
 | Live steering (v0.80) | Pin / bias / constrain the search *while it runs* — the changed field is re-explored first, and each change's measured effect (pre/post/delta) is logged and reported | dashboard ("Steer now"); `AutoRefineEnv.steer(pin=(...))`; `report --run DIR --steer` (ASCII table; `--json` for the rows) | 94 |
 | Pause & Resume (v0.82) | Hold the live loop between experiments — nothing trains and the wall-clock budget holds while paused; resuming continues exactly where it held (decision trajectory unchanged); Stop while paused ends the run | dashboard (**Pause the run** / **Resume the run**); `DashboardRunner.pause()` / `resume()` | 96 |
 | Release gate (v0.84) | The package ships: full wheel metadata + MIT `LICENSE` + `CHANGELOG.md` (one line per round); every CLI `--help` renders on a Windows console; the release invariants are pinned (metadata, help renderability, a live run → report → verify → export smoke, task / family coverage) | `autorefine --version`; `pip wheel .`; `tests/test_release_gate_v084.py` | 98 |
+| Self-improvement (v0.85) | The improver improves itself: a meta-loop over its own knobs, policies mined from / pretrained on finished runs and shared through a sha256-provenanced policy zoo, population + Thompson sampling, frozen-backbone adapters, next-frame aux pretraining, distillation, a forgetting guard, data augmentation, image+text fusion tasks (`fusion` / `fusion-v1`) with late fusion, cross-modal warm start, an FGSM robustness gate (`robust-eps`), a DQN example agent, a benchmark suite, and a cost-aware acceptance gate (`cost-max`) | `meta`; `policy mine --run DIR`; `policy pretrain`; `policy zoo list|info|import|export`; `run --pretrained PATH`; `distill --run DIR --keep`; `warmstart --src RUN --task T`; `bench --suite multimodal` (or `--tasks a,b,c`); `adapt --forget-tol T` | 99 |
 
 ## Run artifacts
 

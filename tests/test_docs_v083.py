@@ -55,7 +55,7 @@ def test_version_agrees_everywhere():
     """A87.1 (SPEC.md 97.3): the README's "Current version" line,
     pyproject.toml, and autorefine.__version__ all state the same
     version — the systemic staleness the audit caught (README said
-    0.81.0 while the package was 0.84.0)."""
+    0.81.0 while the package was 0.85.0)."""
     m = re.search(r"\*\*Current version: ([\d.]+)\.\*\*", README)
     assert m, "README: the 'Current version' line is missing"
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))

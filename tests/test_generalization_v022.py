@@ -208,8 +208,10 @@ def test_every_task_is_a_task_subclass():
     interface, no duck-typing guess). v0.31 (SPEC.md 45.2): the text
     modality advances the count 7 -> 8 in place. v0.47 (SPEC.md 61.2):
     the medical/finance domain packs advance it 8 -> 10. v0.69
-    (SPEC.md 83.1): the native sequence task advances it 10 -> 11."""
-    assert len(TASKS) == 18  # v0.78 (A82): 11 → 18, seven new modalities
+    (SPEC.md 83.1): the native sequence task advances it 10 -> 11;
+    v0.78 (A82): 11 -> 18, seven new modalities; v0.85 (A89, SPEC.md 99):
+    the fusion tasks advance it 18 -> 20."""
+    assert len(TASKS) == 20
     for name, cls in TASKS.items():
         assert issubclass(cls, Task), name
 
@@ -342,10 +344,11 @@ def test_registry_is_15_fields_in_catalog_order():
     (the 15 historical A24 fields + the three v0.64 fine-pattern fields,
     SPEC.md 78) in catalog order; every value is a SpecField
     row whose `name` matches its key; the names tuple agrees."""
-    assert len(SPEC_FIELDS) == 21
+    assert len(SPEC_FIELDS) == 25
     assert tuple(SPEC_FIELDS) == HISTORICAL_FIELDS + (
         "fourier_features", "gam_interactions", "gp_length_scale",
-        "conv1d_filters", "conv1d_kernel", "rnn_hidden")
+        "conv1d_filters", "conv1d_kernel", "rnn_hidden",
+        "adapter_rank", "augment", "fusion", "aux_pretrain")
     assert SPEC_FIELD_NAMES == tuple(SPEC_FIELDS)
     for name, row in SPEC_FIELDS.items():
         assert isinstance(row, SpecField), name
@@ -385,13 +388,15 @@ def test_registry_rows_are_valid():
 def test_catalog_is_the_registry_view():
     """A26 (SPEC.md 36.2): `FIELD_CATALOG` is the registry's name→space
     view and `CATALOG_FIELDS` its name order; the `ACTIONS` catalog is
-    field-major over that order with exactly 106 actions (77 historical +
+    field-major over that order with exactly 120 actions (77 historical +
     the v0.61 value-level additions + the v0.64 fine-pattern fields,
     SPEC.md 78: 3 fields × 4 values + the v0.69 temporal families, SPEC.md
-    83: model_family 9 values + 3 fields × 3 values)."""
+    83: model_family 9 values + 3 fields × 3 values + the v0.85
+    self-improvement fields, SPEC.md 99: adapter_rank 5 + augment 5 +
+    fusion 2 + aux_pretrain 2 values)."""
     assert FIELD_CATALOG == {f.name: f.space for f in SPEC_FIELDS.values()}
     assert CATALOG_FIELDS == tuple(SPEC_FIELDS)
-    assert len(ACTIONS) == 106
+    assert len(ACTIONS) == 120
     assert ACTIONS == tuple((field, value)
                             for field in CATALOG_FIELDS
                             for value in FIELD_CATALOG[field])
@@ -455,7 +460,9 @@ def test_bandit_search_views_are_consistent():
         # SPEC.md 78 (v0.64): fine-pattern fields
         "fourier_features", "gam_interactions", "gp_length_scale",
         # SPEC.md 83 (v0.69): native temporal family knobs
-        "conv1d_filters", "conv1d_kernel", "rnn_hidden")
+        "conv1d_filters", "conv1d_kernel", "rnn_hidden",
+        # SPEC.md 99 (v0.85): the adapter rank (an ordered value)
+        "adapter_rank")
     assert set(FIELD_SAMPLERS) == set(SPEC_FIELDS)
     # `SEARCH_FIELDS` keeps the legacy order too (it is the A1–A4
     # proposal stream) minus the family-specific exclusions
@@ -473,4 +480,4 @@ def test_version_round_v022():
     assertion advanced in place per SPEC.md 33.1)."""
     py = tomllib.loads(
         (REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.84.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.85.0"

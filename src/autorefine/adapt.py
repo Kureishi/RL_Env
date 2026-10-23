@@ -35,14 +35,15 @@ from pathlib import Path
 
 import numpy as np
 
-from .config import ModelSpec
+from .config import ModelSpec, SpecError
 from .finetune import PARAMETRIC, Checkpoint, can_warm_start, validate_for_task
 from .ondemand import csv_preflight  # 90.4 (A80): the pure CSV preflight
 from .registry import append_entry, config_fingerprint  # 38.1
 from .tasks.csv import CsvTask
 from .trainer import train  # 80.3 (v0.66): the warm_start parameter
 
-__all__ = ["plan_adapt", "adapt_model", "render_adapt_text", "ADAPT_EPS"]
+__all__ = ["plan_adapt", "adapt_model", "cross_modal_adapt",
+           "render_adapt_text", "ADAPT_EPS"]
 
 # 93.3.4: the verdict margin (percentage points) — a delta within +/-
 # ADAPT_EPS of the champion's own score is NEUTRAL (noise, not signal).
@@ -108,6 +109,27 @@ def _warm_ok(cp: Checkpoint, new_task) -> bool:
 def _holdout_len(task) -> int:
     x, _y = task.holdout_rows(10**9, None)  # 28.2 protocol; clamps inside
     return int(x.shape[0])
+
+
+def _eval_n(task) -> int:
+    """The sample size for one task's `score(model, split, n)` (SPEC.md 99,
+    v0.85 B4/C2): the holdout length for file-based tasks (the 22.2
+    protocol), and the task's `default_dataset_size` (else 256) for
+    synthetic tasks, which score on fresh seed-derived points (the
+    ParityTask / SequenceMotifV1 pattern)."""
+    fn = getattr(task, "holdout_rows", None)
+    if fn is not None:
+        try:
+            x, _y = fn(10**9, None)
+            n = int(x.shape[0])
+            if n >= 2:
+                return n
+        except Exception:  # fall through to the synthetic rule
+            pass
+    n = getattr(task, "default_dataset_size", None)
+    if isinstance(n, int) and not isinstance(n, bool) and n >= 2:
+        return int(n)
+    return 256
 
 
 def _per_class(task, model) -> list[dict] | None:
@@ -214,7 +236,8 @@ def plan_adapt(run_dir, data_path, seed: int = 7) -> dict:
 
 def adapt_model(run_dir, data_path, runs_dir="runs", seed: int = 7,
                 steps: int | None = None, max_seconds: float | None = 30.0,
-                target: float = 95.0) -> dict:
+                target: float = 95.0,
+                forget_tol: float | None = None) -> dict:
     """93.3.2 (A83.A5): adapt the champion to the new data and score it
     before/after on the NEW data's holdout.
 
@@ -236,8 +259,23 @@ def adapt_model(run_dir, data_path, runs_dir="runs", seed: int = 7,
        and a 13-key registry entry (38.1.2) with
        ``parent_run`` = the champion (93.3.6).
 
+    ``forget_tol`` (SPEC.md 99, v0.85 B4; ``None`` = off, the exact
+    legacy path): the forgetting guard — after adapting, the model is
+    re-scored on the CHAMPION task's own holdout and the drop vs the
+    champion's recorded final score is the forgetting; ``ok`` is
+    ``drop <= forget_tol``. An incompatible original task (the model can
+    no longer be scored there) degrades to an honest measured-None
+    report, never an exception.
+
     Returns the JSON-safe report dict (the one
     ``adapt_report.json`` writes)."""
+    if forget_tol is not None and (
+            isinstance(forget_tol, bool)
+            or not isinstance(forget_tol, (int, float))
+            or not (0.0 <= float(forget_tol) < float("inf"))):
+        raise ValueError(
+            f"forget_tol must be a finite number >= 0 (or None = off), "
+            f"got {forget_tol!r} (SPEC.md 99)")
     run_dir = Path(run_dir)
     data_path = Path(data_path)
     if not data_path.is_file():
@@ -292,6 +330,37 @@ def adapt_model(run_dir, data_path, runs_dir="runs", seed: int = 7,
         verdict = "NEUTRAL"
     met = bool(after >= float(target))
 
+    # SPEC.md 99 (v0.85) B4: the forgetting guard — did adapting cost the
+    # champion its ORIGINAL task? One extra scoring pass on the original
+    # holdout (opt-in; None = off, zero legacy cost). The drop vs the
+    # champion's recorded final score is the forgetting; the adapted model
+    # that can no longer be scored on the original task degrades to an
+    # honest measured-None report (never an exception).
+    forgetting = None
+    if forget_tol is not None:
+        orig_before = summary.get("final_best_score")
+        orig_after = None
+        try:
+            orig_after = float(task.score(new_model, "holdout", _eval_n(task)))
+        except Exception:  # measured absence — reported, not fatal
+            orig_after = None
+        drop = None
+        if (isinstance(orig_before, (int, float))
+                and not isinstance(orig_before, bool)
+                and orig_after is not None):
+            drop = float(orig_before) - orig_after
+        ok = (drop <= float(forget_tol)) if drop is not None else None
+        forgetting = {
+            "forget_tol": float(forget_tol),
+            "orig_task": getattr(task, "name", None),
+            "orig_before": (float(orig_before)
+                            if isinstance(orig_before, (int, float))
+                            and not isinstance(orig_before, bool) else None),
+            "orig_after": orig_after,
+            "drop": drop,
+            "ok": ok,
+        }
+
     # --- artifacts (93.3.6): a new, reconstructible run + lineage -------
     runs_dir = Path(runs_dir)
     out_dir = _fresh_run_dir(runs_dir, int(seed))
@@ -330,6 +399,7 @@ def adapt_model(run_dir, data_path, runs_dir="runs", seed: int = 7,
             "after": after,
             "n_holdout": int(ho_n),
             "wall_seconds": round(wall, 3),
+            "forgetting": forgetting,  # SPEC.md 99 (v0.85) B4
         },
     }
     (out_dir / "summary.json").write_text(
@@ -360,6 +430,7 @@ def adapt_model(run_dir, data_path, runs_dir="runs", seed: int = 7,
         "per_class_before": per_class_before,
         "per_class_after": per_class_after,
         "weight_deltas": deltas,
+        "forgetting": forgetting,  # SPEC.md 99 (v0.85) B4
         "champion_spec": dict(spec_dict),
         "run_dir": out_dir.name,
         "run_path": str(out_dir),
@@ -386,6 +457,178 @@ def adapt_model(run_dir, data_path, runs_dir="runs", seed: int = 7,
     return report
 
 
+def cross_modal_adapt(src_run_dir, target_task, seed: int = 7,
+                      steps: int | None = None,
+                      max_seconds: float | None = 30.0,
+                      runs_dir="runs") -> dict:
+    """SPEC.md 99 (v0.85) C2 — cross-modality warm-start adaptation.
+
+    The champion of a finished run is adapted to a task of a DIFFERENT
+    modality (e.g. an image champion onto an audio task, or a flat
+    champion onto a sequence task): the target family is derived from
+    the target task's capabilities (grid -> convnet, sequence -> conv1d,
+    else mlp), the champion's spec is re-expressed for that family
+    (a champion whose architecture cannot be expressed there falls back
+    to the mlp surface), and ``train(..., warm_start=champion,
+    cross_modal=True)`` seeds it with the partial shape-mapped transfer
+    (the 99 C2 fallback; the strict 80.3 path is unchanged). Before/after
+    are the champion's and the adapted model's official scores on the
+    TARGET holdout (each an honest ``None`` when the model cannot be
+    scored there — a modality mismatch, never an exception).
+
+    Artifacts mirror ``adapt_model``: a fresh run dir (summary.json +
+    best_spec.json + best_model.npz + warmstart_report.json) and a
+    registry entry with ``parent_run`` = the source run (93.3.6
+    lineage). G2: deterministic given (champion, target, seed); the only
+    clock is wall time."""
+    src_run_dir = Path(src_run_dir)
+    summary, src_task, src_model, spec_dict = _champion(src_run_dir)
+    target_name = getattr(target_task, "name", "<task>")
+
+    # --- target family (capabilities -> family, the 25.3/83.1 rule) -------
+    caps = frozenset(getattr(target_task, "capabilities", ()) or ())
+    if getattr(target_task, "grid_capable", False):
+        preferred = "convnet"
+    elif "sequence" in caps:
+        preferred = "conv1d"
+    else:
+        preferred = "mlp"
+    d = dict(spec_dict)
+    if steps is not None:
+        d["train_steps"] = int(steps)
+    d["model_family"] = preferred
+    try:
+        target_spec = ModelSpec.from_dict(d)
+        target_family = preferred
+    except SpecError:
+        # the champion's architecture cannot be expressed in the
+        # preferred family — the mlp surface always can (loudly so when
+        # even that fails, e.g. a depth-3 champion)
+        d["model_family"] = "mlp"
+        target_spec = ModelSpec.from_dict(d)
+        target_family = "mlp"
+
+    # --- before: the champion on the target holdout (honest None) --------
+    before = None
+    try:
+        before = float(target_task.score(src_model, "holdout", _eval_n(target_task)))
+    except Exception:  # measured absence — reported, not fatal
+        before = None
+
+    # --- train the target (cross-modal warm start) -------------------------
+    if target_family == "convnet":
+        gd = getattr(target_task, "grid_dataset", None)
+        if gd is None:
+            raise ValueError(
+                f"target task {target_name!r} is grid_capable but exposes "
+                "no grid_dataset() (SPEC.md 99)")
+        size = int(getattr(target_task, "default_dataset_size", 60) or 60)
+        dataset = gd(size)
+    else:
+        dataset = target_task.make_dataset()
+    t0 = time.perf_counter()
+    res = train(
+        dataset, target_spec, seed=int(seed),
+        time_limit_seconds=(float(max_seconds) if max_seconds is not None
+                            else None),
+        n_out=int(target_task.n_outputs), head=str(target_task.head),
+        warm_start=src_model, cross_modal=True)
+    new_model = res.model
+    wall = time.perf_counter() - t0
+
+    after = None
+    try:
+        after = float(target_task.score(new_model, "holdout", _eval_n(target_task)))
+    except Exception:  # measured absence — reported, not fatal
+        after = None
+
+    warm_report = getattr(new_model, "xmodal_report", None)
+    if warm_report is None:
+        # the strict 80.3 path succeeded — every slot matched and copied
+        # (copy_weights checks all shapes before any mutation)
+        warm_report = {"mode": "strict-copy",
+                       "copied": len(getattr(new_model, "layers", ())),
+                       "reshaped": 0, "kept_init": 0}
+
+    # --- artifacts (93.3.6 lineage, the adapt_model pattern) --------------
+    runs_dir = Path(runs_dir)
+    out_dir = _fresh_run_dir(runs_dir, int(seed))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    new_model.save(str(out_dir / "best_model.npz"))
+
+    run_config = {
+        "policy": f"cross_modal_{target_family}",
+        "parent_run": src_run_dir.name,
+        "seed": int(seed),
+        "steps": (int(steps) if steps is not None else None),
+        "max_seconds": (float(max_seconds) if max_seconds is not None else None),
+    }
+    cross_block = {
+        "parent_run": src_run_dir.name,
+        "src_task": getattr(src_task, "name", None),
+        "src_family": str(spec_dict.get("model_family")),
+        "target_task": target_name,
+        "target_family": target_family,
+        "before": before,
+        "after": after,
+        "warm_report": warm_report,
+        "wall_seconds": round(wall, 3),
+    }
+    summary_out = {
+        "task": target_name,
+        "seed": int(seed),
+        "best_spec": target_spec.to_dict(),
+        "final_best_score": after,
+        "baseline_score": before,
+        "finished_reason": "cross_modal_adapted",
+        "policy": f"cross_modal_{target_family}",
+        "experiments_run": 1,
+        "wall_seconds": round(wall, 3),
+        "run_config": run_config,
+        "cross_modal": cross_block,
+    }
+    (out_dir / "summary.json").write_text(
+        json.dumps(summary_out, indent=2), encoding="utf-8")
+    (out_dir / "best_spec.json").write_text(
+        json.dumps(target_spec.to_dict(), indent=2), encoding="utf-8")
+    (out_dir / "warmstart_report.json").write_text(
+        json.dumps(warm_report, indent=2), encoding="utf-8")
+
+    report = {
+        "parent_run": src_run_dir.name,
+        "src_task": getattr(src_task, "name", None),
+        "src_family": str(spec_dict.get("model_family")),
+        "target_task": target_name,
+        "target_family": target_family,
+        "seed": int(seed),
+        "warm_start": True,
+        "warm_report": warm_report,
+        "before": before,
+        "after": after,
+        "steps_run": int(res.steps_run),
+        "wall_seconds": round(wall, 3),
+        "run_dir": out_dir.name,
+        "run_path": str(out_dir),
+    }
+    entry = {
+        "run_id": out_dir.name,
+        "task": target_name,
+        "seed": int(seed),
+        "policy": f"cross_modal_{target_family}",
+        "final_score": after,
+        "target": None,
+        "met_target": None,
+        "finished_reason": "cross_modal_adapted",
+        "experiments_run": 1,
+        "wall_seconds": round(wall, 3),
+        "config_fp": config_fingerprint(run_config),
+        "parent_run": src_run_dir.name,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    append_entry(runs_dir, entry)
+    return report
+
+
 def render_adapt_text(r: dict) -> str:
     """93.3.5: the CLI narrative of one adapt report — deterministic,
     ASCII (the house console rule)."""
@@ -394,6 +637,16 @@ def render_adapt_text(r: dict) -> str:
         mode_line += " (warm start from the champion's weights)"
     else:
         mode_line += " (weights cannot transfer - the champion's spec, fresh init)"
+    forgetting_line = None
+    if r.get("forgetting") is not None:
+        f = r["forgetting"]
+        if f.get("drop") is None:
+            forgetting_line = "forget   : n/a (the original task could not be re-scored)"
+        else:
+            status = "kept" if f.get("ok") else "FORGOT"
+            forgetting_line = (f"forget   : {status} (drop {f['drop']:.1f} "
+                               f"vs tol {f['forget_tol']:.1f} on the "
+                               f"original task)")
     lines = [
         f"champion : {r['parent_run']} ({r.get('champion_family', '?')}, "
         f"head={r.get('champion_head', '?')})",
@@ -404,6 +657,8 @@ def render_adapt_text(r: dict) -> str:
         f"verdict  : {r['verdict']} ({r['delta']:+.1f})",
         f"target   : {r['target']:.1f} -> "
         f"{'met' if r.get('met_target') else 'not met'}",
-        f"run dir  : {r['run_path']}",
     ]
+    if forgetting_line is not None:
+        lines.append(forgetting_line)
+    lines.append(f"run dir  : {r['run_path']}")
     return "\n".join(lines)

@@ -1,3 +1,5 @@
+from .adapters import AdapterMLP  # SPEC.md 99 (v0.85): B1 fine-tune adapters
+from .fusion import LateFusionMLP  # SPEC.md 99 (v0.85): C1 two-tower late fusion
 from .conv1d import Conv1D  # SPEC.md 83 (v0.69): native temporal family
 from .convnet import ConvNet
 from .knn import KNN
@@ -7,6 +9,8 @@ from .rnn import RNN  # SPEC.md 83 (v0.69): native temporal family
 from .trees import BOOST_SHRINK, BoostingEnsemble, TreeEnsemble
 
 __all__ = [
+    "AdapterMLP",
+    "LateFusionMLP",
     "MLP",
     "HEADS",
     "SGD",

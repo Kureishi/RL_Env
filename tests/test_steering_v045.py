@@ -270,17 +270,19 @@ def test_train_manual_tiny_parity_returns_seven_keys():
 # --- 59.1 parameter_inspection (A49) ------------------------------------------
 
 def test_inspection_row_count_and_layers():
-    """A49 (SPEC.md 59.1): 32 rows — the 21 architecture rows (registry
-    order) followed by the 11 loop rows (KNOBS order). Re-derived v0.64
+    """A49 (SPEC.md 59.1): 38 rows — the 25 architecture rows (registry
+    order) followed by the 13 loop rows (KNOBS order). Re-derived v0.64
     (A68, 78.2): the 3 fine-pattern fields join the registry, 15 -> 18;
     v0.69 (A73, 83): the 3 temporal knobs join it, 18 -> 21;
-    v0.77 (A81, 91): the parallel/backend knobs join it, 9 -> 11.
+    v0.77 (A81, 91): the parallel/backend knobs join it, 9 -> 11;
+    v0.85 (A89, 99): adapter_rank/augment/fusion/aux_pretrain join the
+    registry, 21 -> 25, and robust_eps/cost_max join the loop, 11 -> 13.
     """
     rows = parameter_inspection([])
-    assert len(rows) == 32
+    assert len(rows) == 38
     layers = [r["layer"] for r in rows]
-    assert layers[:21] == ["architecture"] * 21
-    assert layers[21:] == ["loop"] * 11
+    assert layers[:25] == ["architecture"] * 25
+    assert layers[25:] == ["loop"] * 13
 
 
 def test_inspection_arch_row_shape_and_effect():
@@ -338,7 +340,7 @@ def test_inspection_empty_entries_degrades():
     and every effect field is None (an old run without field_stats still
     renders every row)."""
     rows = parameter_inspection([])
-    assert len(rows) == 32
+    assert len(rows) == 38  # 25 architecture + 13 loop (SPEC.md 99, v0.85)
     for r in rows:
         assert r["best_seen"] is None
         assert r["delta"] is None
@@ -552,7 +554,7 @@ def test_version_round_v045():
     """A49 (SPEC.md 59.6, 33.1): the version stepped to ``0.45.0`` in both
     sources (v0.45 ⇒ ``0.45.0``, M48, SPEC.md 59)."""
     py = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert py["project"]["version"] == autorefine.__version__ == "0.84.0"
+    assert py["project"]["version"] == autorefine.__version__ == "0.85.0"
 
 
 def test_all_exports_steering_round():

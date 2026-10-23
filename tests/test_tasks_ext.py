@@ -176,6 +176,29 @@ def _fixture_graph_dir(base) -> "Path":
     return d
 
 
+def _fixture_fusion_dir(base) -> "Path":
+    """Six (image, text) rows, two classes, via index.csv (SPEC.md 99,
+    v0.85 C1) — ≥6 items so the train/holdout/gen split is legal."""
+    import csv as _csv
+    from PIL import Image
+    d = Path(base) / "fusion"
+    d.mkdir(parents=True)
+    rows = []
+    for i, (name, v) in enumerate(
+            (("dark", 40), ("dark", 60), ("dark", 90),
+             ("light", 165), ("light", 195), ("light", 225))):
+        Image.new("L", (8, 8), v).save(d / f"a{i}.png")
+        words = ("dark dark heavy heavy shadow" if v < 128
+                 else "light light bright bright glow")
+        (d / f"n{i}.txt").write_text(words, encoding="utf-8")
+        rows.append((f"a{i}.png", f"n{i}.txt", name))
+    with (d / "index.csv").open("w", newline="", encoding="utf-8") as fh:
+        w = _csv.writer(fh)
+        w.writerow(["image", "text", "label"])
+        w.writerows(rows)
+    return d
+
+
 def _fixture_mixed_dir(base) -> "Path":
     """low/high rows mixing signal (.sig) and audio (.wav) (SPEC.md 92.7, v0.78)."""
     import wave
@@ -219,14 +242,16 @@ class _TargetModel:
 
 
 def test_task_registry_covers_all_tasks(tmp_path, monkeypatch):
-    # SPEC.md 22.1/24/45.2/83.1/92: csv/image/audio/text and the v0.78
-    # signal/jsonl/midi/pointcloud/graph/video/mixed tasks are data-driven
-    # (need a file/dir), the rest are seed-constructable
+    # SPEC.md 22.1/24/45.2/83.1/92/99: csv/image/audio/text and the v0.78
+    # signal/jsonl/midi/pointcloud/graph/video/mixed tasks plus the v0.85
+    # fusion task are data-driven (need a file/dir), the rest are
+    # seed-constructable (fusion-v1 is the synthetic FusionV1 pair)
     assert set(TASKS) == {"cartpole-v1", "sine-v1", "gridnav-v1", "parity-v1",
                           "csv", "image", "audio", "text",
                           "medical-v1", "finance-v1", "sequence-motif-v1",
                           "signal", "jsonl", "midi", "pointcloud",
-                          "graph", "video", "mixed"}
+                          "graph", "video", "mixed",
+                          "fusion", "fusion-v1"}
     try:
         import imageio.v3 as _iio  # optional [video] extra (SPEC.md 92.6.1)
     except ImportError:
@@ -252,6 +277,8 @@ def test_task_registry_covers_all_tasks(tmp_path, monkeypatch):
             task = cls(seed=7, path=str(_fixture_graph_dir(tmp_path)))
         elif name == "mixed":
             task = cls(seed=7, path=str(_fixture_mixed_dir(tmp_path)))
+        elif name == "fusion":
+            task = cls(seed=7, path=str(_fixture_fusion_dir(tmp_path)))
         elif name == "video":
             root = _fixture_video_dir(tmp_path)
             if _iio is None:

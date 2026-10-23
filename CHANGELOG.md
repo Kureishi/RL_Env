@@ -7,6 +7,7 @@ always the top row.
 
 | Version | What changed | Detail |
 | --- | --- | --- |
+| 0.85.0 | Self-improvement (v0.85): the improver improves itself — meta-loop over its own knobs, policy mine/pretrain/zoo, population + Thompson policies, frozen-backbone adapters, aux pretraining, distillation, forgetting guard, augmentation, fusion tasks + late fusion, cross-modal warmstart, FGSM robustness gate (incl. a central-difference sign fix in robustness.py), DQN example, benchmark suite, cost gate | SPEC 99 |
 | 0.84.0 | Release gate (v0.84): packaging metadata + LICENSE, CLI help audit
   (five commands whose `--help` crashed are fixed), this changelog,
   `.gitattributes`, release-gate pins | SPEC 98 |

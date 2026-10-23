@@ -30,8 +30,12 @@ import pytest
 from autorefine import AutoRefineEnv, BanditPolicy, Budget
 from autorefine.config import (
     ACTIVATIONS,
+    ADAPTER_RANKS,
+    AUX_PRETRAIN,
+    AUGMENTS,
     BATCH_SIZES,
     CONV1D_FILTERS,
+    FUSIONS,
     CONV1D_KERNELS,
     CONV_FILTERS,
     DEFAULT_SPEC,
@@ -82,6 +86,11 @@ EXACT_FIELDS = {
     "conv1d_filters": CONV1D_FILTERS,
     "conv1d_kernel": CONV1D_KERNELS,
     "rnn_hidden": RNN_HIDDEN,
+    # SPEC.md 99 (v0.85, A89): the self-improvement exact-value knobs
+    "adapter_rank": ADAPTER_RANKS,
+    "augment": AUGMENTS,
+    "fusion": FUSIONS,
+    "aux_pretrain": AUX_PRETRAIN,
 }
 
 RANGE_FIELDS = {
@@ -252,7 +261,8 @@ def _install_flat_train(monkeypatch, score: float) -> None:
     """`autorefine.improver.meta_env.train` → one constant score for every
     call (screen, full, or re-baseline)."""
     def fake_train(dataset, spec, seed, time_limit_seconds=0.0,
-                   n_out=1, head="mse", warm_start=None, parallel=1):
+                   n_out=1, head="mse", warm_start=None, parallel=1,
+                   fusion_split=None):  # SPEC.md 99 C1 (v0.85)
         return SimpleNamespace(model=_FakeModel(score), train_seconds=0.001,
                                loss_history=[], time_capped=False)
     monkeypatch.setattr("autorefine.improver.meta_env.train", fake_train)

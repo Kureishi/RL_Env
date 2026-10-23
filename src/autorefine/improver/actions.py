@@ -11,10 +11,14 @@ import numpy as np
 
 from ..config import (
     ACTIVATIONS,
+    ADAPTER_RANKS,
+    AUGMENTS,
+    AUX_PRETRAIN,
     BATCH_SIZES,
     CONV1D_FILTERS,
     CONV1D_KERNELS,
     CONV_FILTERS,
+    FUSIONS,
     FOURIER_FEATURES,
     GAM_INTERACTIONS,
     GP_LENGTH_SCALES,
@@ -59,6 +63,14 @@ LEGACY_FIELD_ORDER = (
     # are bandit/catalog/spec-surface fields, EXCLUDED_FROM_SEARCH below, so
     # the 14-field SearchPolicy proposal stream stays v0.10 bit-stable.
     "conv1d_filters", "conv1d_kernel", "rnn_hidden",
+    # SPEC.md 99 (v0.85): the self-improvement / fine-tuning fields — appended
+    # at the END (the A50 pattern). Like knn_k / the temporal knobs they are
+    # bandit/catalog/spec-surface fields, EXCLUDED_FROM_SEARCH below, so the
+    # 14-field SearchPolicy proposal stream stays v0.10 bit-stable. The four
+    # names sort lexicographically BELOW every field the §18.7 pin picks
+    # (weight_decay is the cold-start lexicographic max), so the bit-exact
+    # legacy bandit stream is untouched (99.2).
+    "adapter_rank", "augment", "fusion", "aux_pretrain",
 )
 FIELD_NAMES = tuple(f for f in LEGACY_FIELD_ORDER if f in SPEC_FIELDS)
 
@@ -119,6 +131,13 @@ FIELD_SAMPLERS = {
     "conv1d_filters": lambda rng, task=None: int(rng.choice(CONV1D_FILTERS)),
     "conv1d_kernel": lambda rng, task=None: int(rng.choice(CONV1D_KERNELS)),
     "rnn_hidden": lambda rng, task=None: int(rng.choice(RNN_HIDDEN)),
+    # SPEC.md 99 (v0.85): the self-improvement / fine-tuning fields sample the
+    # catalog values (single source of truth in FIELD_CATALOG, the v0.5 sampler
+    # contract) — the exhaustiveness assert (36.2) requires all four.
+    "adapter_rank": lambda rng, task=None: int(rng.choice(ADAPTER_RANKS)),
+    "augment": lambda rng, task=None: str(rng.choice(AUGMENTS)),
+    "fusion": lambda rng, task=None: str(rng.choice(FUSIONS)),
+    "aux_pretrain": lambda rng, task=None: str(rng.choice(AUX_PRETRAIN)),
 }
 
 # SPEC.md 25.7 (full suite green; A1-A4 unchanged): the v1 search policy's
@@ -138,7 +157,12 @@ EXCLUDED_FROM_SEARCH = ("knn_k", "fourier_features", "gam_interactions",
                         # exclusion — bandit/catalog/spec-surface fields, so
                         # the 14-field SearchPolicy proposal stream stays
                         # v0.10 bit-stable (83.2.5 / 83.3.6).
-                        "conv1d_filters", "conv1d_kernel", "rnn_hidden")
+                        "conv1d_filters", "conv1d_kernel", "rnn_hidden",
+                        # SPEC.md 99 (v0.85): the self-improvement /
+                        # fine-tuning fields join the exclusion too — the
+                        # 14-field SearchPolicy proposal stream stays v0.10
+                        # bit-stable (99.2).
+                        "adapter_rank", "augment", "fusion", "aux_pretrain")
 SEARCH_FIELDS = tuple(f for f in FIELD_NAMES if f not in EXCLUDED_FROM_SEARCH)
 
 # SPEC.md 36.2 (v0.22, G2): the sampler table must be exhaustive over the

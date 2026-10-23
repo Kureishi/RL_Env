@@ -152,10 +152,13 @@ def test_builtin_env_task_config_none_unchanged(tmp_path):
     assert "task_config" not in summary  # absent for built-in tasks
 
 
-def test_run_task_csv_without_config_errors(tmp_path):
-    with pytest.raises(ValueError, match="data path"):
-        cli_main(["run", "--task", "csv", "--experiments", "1",
-                  "--runs-dir", str(tmp_path / "runs")])
+def test_run_task_csv_without_config_errors(tmp_path, capsys):
+    # fail-loud CLI contract (SPEC.md 98.2): friendly message + exit 1,
+    # not a traceback
+    rc = cli_main(["run", "--task", "csv", "--experiments", "1",
+                   "--runs-dir", str(tmp_path / "runs")])
+    assert rc == 1
+    assert "data path" in capsys.readouterr().err
     assert "csv" in TASKS  # registered, just needs a file
 
 
